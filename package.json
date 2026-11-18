@@ -38,6 +38,7 @@
     "cross-env": "^10.1.0",
     "electron": "^45.3.4",
     "electron-builder": "26.18.0",
+    "electron-updater": "^6.8.11",
     "esbuild": "^0.28.2",
     "playwright-core": "1.63.0",
     "react": "^18.3.1",
@@ -85,14 +86,20 @@
       "perMachine": false,
       "artifactName": "Diretor-Setup.${ext}",
       "shortcutName": "Diretor",
-      "uninstallDisplayName": "Diretor"
+      "uninstallDisplayName": "Diretor",
+      "differentialPackage": false
     },
     "linux": {
       "target": [
         "dir"
       ]
     },
-    "publish": null
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://github.com/teste652/Diretor/releases/download/teste"
+      }
+    ]
   },
   "private": true
 }
