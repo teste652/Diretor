@@ -69,9 +69,16 @@ function windowsFolders(env: NodeJS.ProcessEnv, home: string) {
     /** Pacotes instalados (a Microsoft Store apaga a pasta do pacote ao desinstalar). */
     packages: families(join(local, 'Packages')),
     classic: isDir(classic) ? classic : null,
-    /** O instalador clássico põe o Claude Desktop em %LOCALAPPDATA%\AnthropicClaude. */
-    classicInstalled: isDir(join(local, 'AnthropicClaude')),
+    classicInstalled: classicInstalled(join(local, 'AnthropicClaude')),
   };
+}
+/**
+ * O instalador clássico põe o Claude Desktop em %LOCALAPPDATA%\AnthropicClaude (claude.exe e
+ * as pastas app-<versão>). Ao desinstalar, o que não deu para apagar fica com a marca .dead.
+ */
+function classicInstalled(dir: string): boolean {
+  const names = list(dir).map((n) => n.toLowerCase());
+  return !names.includes('.dead') && names.some((n) => n === 'claude.exe' || /^app-\d/.test(n));
 }
 /** A cópia particular de %APPDATA%\Claude dentro da pasta do pacote. */
 const packageCopy = (packageDir: string) => join(packageDir, 'LocalCache', 'Roaming', 'Claude');
@@ -104,9 +111,10 @@ function unique(dirs: string[], platform: NodeJS.Platform): string[] {
  *   %LOCALAPPDATA%\Packages\Claude_<editor>\LocalCache\Roaming\Claude. Quando ela não
  *   tem o arquivo, o Claude lê o de %APPDATA%\Claude: aí grava nele, e não cria uma
  *   cópia particular que esconderia aquele.
- * - Instalação clássica: %APPDATA%\Claude.
- * Uma pasta da Claude-Data que o Claude abandonou (com a marca, ou só com marcas) fica de
- * fora, e as de pacotes desinstalados também, a não ser que não haja outra.
+ * - Instalação clássica (%LOCALAPPDATA%\AnthropicClaude): %APPDATA%\Claude.
+ * Um pacote instalado que nunca abriu ainda não tem pasta. Uma pasta da Claude-Data que o
+ * Claude abandonou (com a marca, ou só com marcas) fica de fora, e as de pacotes
+ * desinstalados também, a não ser que nenhum Claude Desktop instalado apareça.
  * CLAUDE_USER_DATA_DIR, quando definida, troca a pasta de dados do Claude por ela.
  */
 export function claudeConfigDirs(opts: Where = {}): string[] {
@@ -132,13 +140,12 @@ export function claudeConfigDirs(opts: Where = {}): string[] {
     else if (classic && hasConfig(classicNames)) out.push(classic);
     else out.push(copy);
   }
-  const classicUsed = classic !== null && !wasLeft(classicNames);
-  if (out.length) {
-    if (classicUsed && classicInstalled) out.push(classic);
-  } else {
-    // Nenhum pacote instalado lê nada: as pastas que sobraram e não foram abandonadas.
-    for (const [family, data] of moved) if (!packages.has(family) && !abandoned(list(data))) out.push(data);
-    if (classicUsed) out.push(classic);
+  // O Claude da instalação clássica lê %APPDATA%\Claude: a marca de mudança é de um pacote, não dele.
+  if (classic && classicInstalled) out.push(classic);
+  if (!packages.size && !classicInstalled) {
+    // Nenhum Claude Desktop instalado à vista (talvez instalado de outro jeito): as pastas que existem e não foram abandonadas.
+    for (const data of moved.values()) if (!abandoned(list(data))) out.push(data);
+    if (classic && !wasLeft(classicNames)) out.push(classic);
   }
   return unique(out, platform);
 }

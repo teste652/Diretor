@@ -50,6 +50,11 @@ function winProfile() {
     classic: join(roaming, 'Claude'),
     /** Onde o instalador clássico põe o Claude Desktop. */
     classicApp: join(local, 'AnthropicClaude'),
+    /** Instala o Claude Desktop clássico (como o instalador deixa a pasta dele). */
+    installClassic: () => {
+      make(join(local, 'AnthropicClaude'), { 'claude.exe': '', 'Update.exe': '' });
+      make(join(local, 'AnthropicClaude', 'app-0.14.10'));
+    },
     dirs: (extra: Record<string, string> = {}) => claudeConfigDirs({ env: { ...env, ...extra }, platform: 'win32', home }),
     candidates: () => claudeConfigCandidates({ env, platform: 'win32', home }),
   };
@@ -130,7 +135,7 @@ describe('onde fica a configuração do Claude Desktop', () => {
     const w = winProfile();
     make(w.moved(), { [CONFIG_NAME]: '{}' });
     make(w.pkg(), { [LEFT]: '' });
-    make(w.classicApp);
+    w.installClassic();
     make(w.classic, { Preferences: '{}' });
     expect(w.dirs()).toEqual([w.moved(), w.classic]);
   });
@@ -146,10 +151,38 @@ describe('onde fica a configuração do Claude Desktop', () => {
   it('Windows: a outra família do pacote (AnthropicPBC.Claude_…) também vale; pastas de outros apps não', () => {
     const w = winProfile();
     make(w.moved('anthropicpbc.claude_fnn82j28hfe8t'));
+    make(w.pkg('AnthropicPBC.Claude_fnn82j28hfe8t'), { '.user-data-left.anthropicpbc.claude_fnn82j28hfe8t': '' });
     make(join(w.local, 'Claude-Data', 'outra-coisa'));
     make(join(w.local, 'Packages', 'OutroApp_123', 'LocalCache', 'Roaming', 'Claude'));
     make(join(w.local, 'Packages', 'Claude_nuncaabriu', 'LocalCache'));
     expect(w.dirs()).toEqual([w.moved('anthropicpbc.claude_fnn82j28hfe8t')]);
+  });
+
+  it('Windows: um Claude instalado que nunca abriu ainda não tem pasta; a Claude-Data de um pacote desinstalado não conta', () => {
+    const w = winProfile();
+    make(w.moved(), { [CONFIG_NAME]: '{}' }); // Claude_pzs8sxrjxfjjc foi desinstalado
+    make(join(w.local, 'Packages', 'AnthropicPBC.Claude_fnn82j28hfe8t', 'LocalCache'));
+    expect(w.dirs()).toEqual([]); // o cartão pede para abrir o Claude uma vez
+  });
+
+  it('Windows, instalação clássica: lê %APPDATA%\\Claude mesmo com a marca deixada por um pacote; a Claude-Data que sobrou não conta', () => {
+    const w = winProfile();
+    w.installClassic();
+    make(w.classic, { [LEFT]: '', [CONFIG_NAME]: '{"mcpServers":{"outro":{"command":"x"}}}' });
+    expect(w.dirs()).toEqual([w.classic]);
+    make(w.moved(), { [CONFIG_NAME]: '{ "mcpServers": { "a": 1, } }' }); // de um pacote desinstalado, com erro
+    expect(w.dirs()).toEqual([w.classic]);
+    make(w.pkg(), { [LEFT]: '' }); // o pacote instalado de novo, junto com a clássica
+    expect(w.dirs()).toEqual([w.moved(), w.classic]);
+  });
+
+  it('Windows: o que sobrou de um Claude clássico desinstalado não conta como instalação', () => {
+    const w = winProfile();
+    make(w.classicApp, { '.dead': '', 'Update.exe': '' });
+    make(w.moved(), { [CONFIG_NAME]: '{}' });
+    make(w.pkg(), { [LEFT]: '' });
+    make(w.classic, { [CONFIG_NAME]: '{}' });
+    expect(w.dirs()).toEqual([w.moved()]);
   });
 
   it('Windows sem o Claude Desktop: nenhuma pasta (e não cria nada)', () => {
