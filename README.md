@@ -13,7 +13,7 @@ Editor de vídeo para Windows com foco em motion graphics, feito para editar à 
 
 ## Instalação (Windows)
 
-Requisitos: [Node.js 20 LTS ou mais novo](https://nodejs.org) e Git.
+Requisitos: [Node.js 22.12 ou mais novo](https://nodejs.org) (a versão LTS atual serve) e Git.
 
 ```powershell
 git clone https://github.com/teste652/Diretor.git
@@ -22,7 +22,7 @@ npm install
 npm start
 ```
 
-`npm start` compila e abre o editor. Para desenvolver com recarga automática: `npm run dev`.
+`npm start` compila e abre o editor (na primeira vez, baixa o Electron, uns 100 MB). Para desenvolver com recarga automática: `npm run dev`.
 
 O `npm install` baixa o ffmpeg para Windows x64. Em Windows ARM (ou se a rede bloquear o download) a instalação continua sem ele: instale o ffmpeg, deixe-o no PATH ou aponte a variável `DIRETOR_FFMPEG` para o `ffmpeg.exe`. O editor avisa se não encontrar o ffmpeg.
 

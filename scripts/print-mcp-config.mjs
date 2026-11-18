@@ -7,5 +7,5 @@ if (!existsSync(server)) console.warn('Aviso: rode "npm run build" antes; dist/m
 const electron = resolve('node_modules/electron/dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
 const withNode = { mcpServers: { diretor: { command: 'node', args: [server] } } };
 const withElectron = { mcpServers: { diretor: { command: electron, args: [server], env: { ELECTRON_RUN_AS_NODE: '1' } } } };
-console.log('Opção A (Node.js 18+ instalado):\n' + JSON.stringify(withNode, null, 2));
+console.log('Opção A (com o Node.js instalado):\n' + JSON.stringify(withNode, null, 2));
 console.log('\nOpção B (sem Node, usando o Electron do projeto):\n' + JSON.stringify(withElectron, null, 2));
