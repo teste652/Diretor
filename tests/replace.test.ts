@@ -30,8 +30,10 @@ function fakeFs(files: string[], opts: { locked?: Set<string>; lockedTimes?: num
 }
 
 const W = [1, 1, 1];
-const TMP = '/v/.diretor-1-1-abc.part';
-const DEST = '/v/video.mp4';
+// Caminhos no formato do sistema (no Windows, com \\), como os que o editor monta.
+const at = (name: string) => join('/v', name);
+const TMP = at('.diretor-1-1-abc.part');
+const DEST = at('video.mp4');
 
 describe('gravar o MP4 pronto no destino', () => {
   it('destino preso por instantes (antivírus): tenta de novo e substitui', async () => {
@@ -42,12 +44,12 @@ describe('gravar o MP4 pronto no destino', () => {
   });
 
   it('destino aberto num player: salva ao lado com outro nome, sem apagar nada', async () => {
-    const alt1 = '/v/video (1).mp4';
+    const alt1 = at('video (1).mp4');
     const f = fakeFs([TMP, DEST, alt1], { locked: new Set([DEST]) });
     const r = await moveIntoPlace(TMP, DEST, { ...f, waitsMs: W });
-    expect(r).toEqual({ path: '/v/video (2).mp4', fallback: true });
+    expect(r).toEqual({ path: at('video (2).mp4'), fallback: true });
     expect(f.calls.filter((c) => c === DEST)).toHaveLength(W.length + 1);
-    expect([f.has(DEST), f.has(alt1), f.has('/v/video (2).mp4'), f.has(TMP)]).toEqual([true, true, true, false]);
+    expect([f.has(DEST), f.has(alt1), f.has(at('video (2).mp4')), f.has(TMP)]).toEqual([true, true, true, false]);
   });
 
   it('outro erro (não é arquivo preso) não fica tentando de novo', async () => {
