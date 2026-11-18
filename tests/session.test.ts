@@ -423,7 +423,7 @@ describe('segunda revisão: orientação ao Claude, notas e contexto', () => {
     expect(s.dirty).toBe(false);
   });
 
-  it('com "ajustar" ligado, renomear o projeto e importar mídia vão para o projeto, não para a etapa do Claude', () => {
+  it('com "ajustar" ligado, renomear o projeto vai para o projeto, não para a etapa do Claude', () => {
     const s = setup();
     const r = s.propose(entradaSaida(s.project.revision));
     if (!r.ok) throw new Error();
@@ -431,14 +431,24 @@ describe('segunda revisão: orientação ao Claude, notas e contexto', () => {
     expect(s.adjustMode).toBe(true);
     expect(s.dispatch([{ op: 'renameProject', name: 'Meu vídeo' }])).toEqual({ ok: true, target: 'project' });
     expect(s.project.name).toBe('Meu vídeo');
+    // O projeto mudou fora do rascunho: ele fica desatualizado, e descartá-lo não leva o nome.
+    expect(r.proposal.status).toBe('stale');
+    s.discardStep(r.proposal.id);
+    expect(s.project.name).toBe('Meu vídeo');
+  });
+
+  it('com "ajustar" ligado e o rascunho ativo, importar mídia vai para o projeto, não para a etapa do Claude', () => {
+    const s = setup();
+    const r = s.propose(entradaSaida(s.project.revision));
+    if (!r.ok) throw new Error();
+    s.setAdjustMode(true);
+    expect(r.proposal.status).toBe('active');
     const media = { id: 'm2', path: 'C:/v/b.mp4', name: 'b.mp4', duration: 4, width: 1280, height: 720, hasAudio: false };
     expect(s.dispatch([{ op: 'addMedia', media }, { op: 'addClip', clip: { kind: 'video', id: 'v2', mediaId: 'm2', start: 6 } }])).toEqual({ ok: true, target: 'project' });
     expect(s.project.media.map((m) => m.id)).toContain('m2');
     expect(findClip(s.project, 'v2')).toBeDefined();
-    // O projeto mudou fora do rascunho: ele fica desatualizado, e descartá-lo não leva o nome nem a mídia.
-    expect(r.proposal.status).toBe('stale');
+    expect(r.proposal.steps.every((st) => st.manualOps.length === 0)).toBe(true);
     s.discardStep(r.proposal.id);
-    expect(s.project.name).toBe('Meu vídeo');
     expect(findClip(s.project, 'v2')).toBeDefined();
   });
 
@@ -499,15 +509,21 @@ describe('segunda revisão: orientação ao Claude, notas e contexto', () => {
 
   it('a nota vai para a espera mais nova quando há mais de uma proposta esperando', async () => {
     const s = setup();
-    const a = s.propose({ requestId: 'n1', baseRevision: s.project.revision, title: 'A', steps: [{ label: 'E', ops: [{ op: 'animate', clipId: 't1', preset: 'fadeIn' }] }] });
+    const one = (requestId: string, preset: 'fadeIn' | 'fadeOut') =>
+      s.propose({ requestId, baseRevision: s.project.revision, title: requestId, steps: [{ label: 'E', ops: [{ op: 'animate', clipId: 't1', preset }] }] });
+    const a = one('n1', 'fadeIn');
     if (!a.ok) throw new Error();
+    s.acceptStep();
+    expect(a.proposal.status).toBe('done');
+    // Uma espera esquecida na proposta A (já aceita) e outra, mais nova, na proposta B.
     const older = handleBridge(s, 'get_proposal', { proposalId: a.proposal.id, waitSeconds: 30, sinceVersion: a.proposal.version });
-    const newer = handleBridge(s, 'get_proposal', { proposalId: 'outra', waitSeconds: 30 });
-    expect(await newer).toMatchObject({ error: 'not_found' });
-    const newest = handleBridge(s, 'get_proposal', { proposalId: a.proposal.id, waitSeconds: 30, sinceVersion: a.proposal.version });
+    const b = one('n2', 'fadeOut');
+    if (!b.ok) throw new Error();
+    const newest = handleBridge(s, 'get_proposal', { proposalId: b.proposal.id, waitSeconds: 30, sinceVersion: b.proposal.version });
     s.addNote('azul');
-    expect(await older).toMatchObject({ error: 'superseded' });
-    expect(((await newest) as { userNotes?: string[] }).userNotes).toEqual(['azul']);
+    const [ra, rb] = (await Promise.all([older, newest])) as { userNotes?: string[] }[];
+    expect(ra.userNotes).toBeUndefined();
+    expect(rb.userNotes).toEqual(['azul']);
   });
 
   it('o contexto avisa o pedido de refazer e a resposta reduzida mantém a proposta pendente', async () => {

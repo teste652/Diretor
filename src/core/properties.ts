@@ -136,6 +136,22 @@ export function keyframeAt(p: AnimProp | undefined, t: number, tol = 1e-3): Keyf
   return found;
 }
 
+/** Instante do clipe que o painel edita com o playhead em `timelineT` (limitado ao clipe). */
+export function clipLocalTime(clip: Clip, timelineT: number): number {
+  return Math.min(Math.max(timelineT - clip.start, 0), clip.duration);
+}
+
+/**
+ * O que o painel mostra para uma propriedade com o playhead em `timelineT`: o
+ * instante é limitado ao clipe, e o valor e o ponto vêm desse mesmo instante
+ * (com o playhead antes do clipe, o painel edita o começo do clipe).
+ */
+export function propAtPlayhead(clip: Clip, name: string, timelineT: number): { local: number; value: number; keyframe?: Keyframe } {
+  const local = clipLocalTime(clip, timelineT);
+  const ap = clip.props[name];
+  return { local, value: evalProp(ap, local, propDef(name)?.default ?? 0), keyframe: keyframeAt(ap, local) };
+}
+
 export function evalClipProp(clip: Clip, name: string, timelineT: number): number {
   const def = propDef(name);
   return evalProp(clip.props[name], timelineT - clip.start, def?.default ?? 0);

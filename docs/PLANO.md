@@ -27,7 +27,7 @@ Decisões:
 - Presets nunca sobrescrevem o valor de repouso de uma propriedade, e cada um só substitui pontos do próprio grupo.
 - Ao abrir um projeto, a revisão só cresce, para uma proposta antiga nunca valer no projeto novo.
 - Importar mídia, faixas, nome e formato do projeto são sempre do usuário: mesmo com “Ajustar na linha do tempo” ligado, vão para o projeto, nunca para a etapa do Claude.
-- Exportação grava num temporário na mesma pasta e troca pelo destino só no fim; cancelar, fechar ou cair nunca apagam um arquivo que já existia. O ffmpeg é encerrado de verdade (entrada fechada e, se preciso, SIGKILL).
+- Exportação grava num temporário na mesma pasta (`.diretor-….part`, com o formato passado explícito ao ffmpeg) e troca pelo destino só no fim; cancelar, fechar ou cair nunca apagam um arquivo que já existia. O ffmpeg é encerrado de verdade (entrada fechada e, se preciso, SIGKILL). No Windows, um destino aberto num player ou lido pelo antivírus recusa a troca: o editor tenta de novo por ~4 s e depois salva como “nome (1).mp4”, com aviso. O vídeo pronto nunca é apagado; fechar o editor nessa hora espera a gravação terminar.
 - fps NTSC (23,976, 29,97, 59,94) é guardado exato (24000/1001…) e passado ao ffmpeg como fração, para a exportação não escorregar um quadro a cada ~42 s.
 
 Limitação conhecida: dois presets na mesma propriedade (ex.: `popOut` e depois `slowZoom`, ambos na escala) dividem a mesma lista de pontos; nada se perde e tudo é editável, mas o resultado pode precisar de ajuste à mão.

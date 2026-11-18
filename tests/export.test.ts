@@ -141,6 +141,24 @@ describe('exportação', () => {
     expect(g / (rgb.length / 3)).toBeLessThan(122);
   }, 30_000);
 
+  it('grava MP4 mesmo num temporário sem extensão .mp4 (o formato vai explícito)', async () => {
+    const s = new EditorSession();
+    s.project.settings = { width: 64, height: 64, fps: 30 };
+    s.dispatch([{ op: 'addClip', clip: { kind: 'title', id: 't', text: ' ', duration: 0.3 } }]);
+    const part = join(dir, '.diretor-1-1-abc.part');
+    const args = buildFfmpegArgs(s.project, part);
+    expect(args.slice(-3)).toEqual(['-f', 'mp4', part]);
+    await exportFrames(s.project, part, Buffer.alloc(64 * 64 * 4, 200));
+    let header = '';
+    try {
+      execFileSync(FFMPEG, ['-hide_banner', '-i', part], { stdio: 'pipe' });
+    } catch (e: any) {
+      header = String(e.stderr);
+    }
+    expect(header).toMatch(/Input #0, mov,mp4/);
+    expect(probe(part)).toMatchObject({ width: 64, height: 64 });
+  }, 30_000);
+
   it('áudio que começa depois do vídeo no arquivo continua no lugar', async () => {
     const late = join(dir, 'late.mp4');
     execFileSync(FFMPEG, [

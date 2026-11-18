@@ -1,12 +1,14 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { createReadStream, existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { closeSync, createReadStream, existsSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { buildFfmpegArgs, parseFfmpegProbe } from '../core/export';
 import type { Project } from '../core/model';
 import { bridgeFilePath } from '../shared/paths';
 import { startBridge } from './bridge';
+import { moveIntoPlace } from './replace';
 
 app.setName('Diretor');
 
@@ -249,6 +251,8 @@ type ExportJob = {
   exited: boolean;
   done: Promise<number>;
   cancelling?: Promise<void>;
+  /** O MP4 já está pronto e está indo para o destino: não se cancela mais, só se espera. */
+  moving?: Promise<unknown>;
 };
 const jobs = new Map<number, ExportJob>();
 let jobSeq = 0;
@@ -277,11 +281,17 @@ async function stopFfmpeg(job: ExportJob): Promise<void> {
   await within(job.done, 2000);
 }
 
-/** Para o ffmpeg e apaga o temporário. Chamar duas vezes espera o mesmo encerramento. */
+/**
+ * Para o ffmpeg e apaga o temporário. Chamar duas vezes espera o mesmo encerramento.
+ * Se o vídeo já está pronto e indo para o destino, só espera ele chegar (nunca o apaga).
+ */
 function abortExport(id: number, job: ExportJob): Promise<void> {
   job.cancelling ??= (async () => {
-    await stopFfmpeg(job);
-    removeQuietly(job.tmpPath);
+    if (job.moving) await job.moving;
+    else {
+      await stopFfmpeg(job);
+      removeQuietly(job.tmpPath);
+    }
     jobs.delete(id);
   })();
   return job.cancelling;
@@ -301,11 +311,20 @@ ipcMain.handle('export:start', async (_e, { project, outPath }: { project: Proje
   }
   if (project.media.some((m) => samePath(m.path, file!))) return { error: 'O arquivo de saída não pode substituir um original.' };
   const id = ++jobSeq;
-  const tmpPath = join(dirname(file), `.${basename(file)}.diretor-${process.pid}-${id}.tmp.mp4`);
+  // Nome curto (não repete o nome escolhido, que pode ser longo) e sem ".mp4", para o
+  // Explorer não gerar miniatura nem prender o arquivo. O formato vai explícito ao ffmpeg.
+  // O sufixo aleatório evita colidir com um temporário deixado por um travamento antigo.
+  const tmpPath = join(dirname(file), `.diretor-${process.pid}-${id}-${randomBytes(3).toString('hex')}.part`);
+  try {
+    closeSync(openSync(tmpPath, 'wx'));
+  } catch (e) {
+    return { error: `Não consigo criar arquivos na pasta ${dirname(file)} (${e instanceof Error ? e.message : String(e)}). Escolha outra pasta.` };
+  }
   let proc: ChildProcessWithoutNullStreams;
   try {
     proc = spawn(ffmpegPath(), buildFfmpegArgs(project, tmpPath));
   } catch (e) {
+    removeQuietly(tmpPath);
     return { error: `Não consegui iniciar o ffmpeg: ${e instanceof Error ? e.message : String(e)}` };
   }
   const job: ExportJob = { proc, outPath: file, tmpPath, stderr: '', exited: false, done: Promise.resolve(-1) };
@@ -370,22 +389,31 @@ ipcMain.handle('export:finish', async (_e, jobId: number, abandon?: boolean) => 
     await job.cancelling;
     return { ok: false, cancelled: true };
   }
-  jobs.delete(jobId);
   const stderr = job.stderr.trim().slice(-2000);
   if (abandon || code !== 0) {
+    jobs.delete(jobId);
     removeQuietly(job.tmpPath);
     return { ok: false, error: abandon ? stderr : stderr || `ffmpeg saiu com código ${code}` };
   }
-  try {
-    renameSync(job.tmpPath, job.outPath);
-  } catch (e) {
-    removeQuietly(job.tmpPath);
+  // Nunca apaga o vídeo pronto: destino preso vira "nome (1).mp4" ao lado. Fechar o
+  // editor agora espera essa troca terminar em vez de cancelar.
+  const moving = moveIntoPlace(job.tmpPath, job.outPath);
+  job.moving = moving;
+  const moved = await moving;
+  jobs.delete(jobId);
+  const name = basename(job.outPath);
+  if ('error' in moved) {
+    const where = moved.kept ? ` O vídeo pronto ficou em ${moved.kept} (renomeie para .mp4).` : '';
+    return { ok: false, error: `Não consegui gravar ${name}: ${moved.error}.${where}` };
+  }
+  if (moved.fallback) {
     return {
-      ok: false,
-      error: `Não consegui gravar ${basename(job.outPath)}: ${e instanceof Error ? e.message : String(e)}. Se ele estiver aberto em outro programa, feche-o e exporte de novo.`,
+      ok: true,
+      outPath: moved.path,
+      warning: `${name} está aberto em outro programa (ou protegido) e não pôde ser substituído. O vídeo foi salvo como ${basename(moved.path)}.`,
     };
   }
-  return { ok: true, outPath: job.outPath };
+  return { ok: true, outPath: moved.path };
 });
 
 ipcMain.handle('export:cancel', async (_e, jobId: number) => {
@@ -424,7 +452,8 @@ function createWindow(): void {
   else void win.loadFile(join(__dirname, '..', 'renderer', 'index.html'));
   // Fechar ou recarregar com mudanças não salvas: a interface segura (beforeunload) e aqui perguntamos.
   win.webContents.on('will-prevent-unload', (event) => {
-    const exporting = jobs.size > 0;
+    const exporting = [...jobs.values()].some((j) => !j.moving);
+    const finishing = !exporting && jobs.size > 0;
     const choice = dialog.showMessageBoxSync(
       win!,
       exporting
@@ -437,7 +466,17 @@ function createWindow(): void {
             message: 'Uma exportação está em andamento.',
             detail: 'Se sair agora, ela será cancelada e o arquivo de destino não será alterado. Mudanças não salvas no projeto, se houver, também serão perdidas.',
           }
-        : {
+        : finishing
+          ? {
+              type: 'question',
+              buttons: ['Sair', 'Continuar'],
+              defaultId: 1,
+              cancelId: 1,
+              title: 'Exportação terminando',
+              message: 'O vídeo está pronto e sendo gravado no destino.',
+              detail: 'Se sair agora, o editor termina de gravar o vídeo antes de fechar. Mudanças não salvas no projeto, se houver, serão perdidas.',
+            }
+          : {
             type: 'question',
             buttons: ['Sair sem salvar', 'Cancelar'],
             defaultId: 1,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { type Clip, type Project, createProject, findClip, parseProject } from '../src/core/model';
 import { type Op, OpValidationError, applyOps, clampTrimDelta } from '../src/core/operations';
-import { evalClipProp, keyframeAt, keyframeGroups } from '../src/core/properties';
+import { evalClipProp, keyframeAt, keyframeGroups, propAtPlayhead } from '../src/core/properties';
 
 function base(): Project {
   return applyOps(createProject(), [
@@ -200,6 +200,32 @@ describe('pontos de animação', () => {
       { op: 'animate', clipId: 't1', preset: 'popIn' },
     ]);
     expect(keyframeAt(clip(q, 't1').props.scale, 0)!.v).toBeCloseTo(at(q, 't1', 'scale', 0), 5);
+  });
+
+  it('o painel mostra o valor e o ponto do mesmo instante, mesmo com o playhead fora do clipe', () => {
+    // Título começando em 2 s com zoom lento e depois "surgir crescendo": dois pontos de escala em 0.
+    const p = run(base(), [
+      { op: 'updateClip', clipId: 't1', set: { start: 2 } },
+      { op: 'animate', clipId: 't1', preset: 'slowZoom' },
+      { op: 'animate', clipId: 't1', preset: 'popIn' },
+    ]);
+    const t1 = clip(p, 't1');
+    // Playhead antes do clipe: o painel edita o começo do clipe, e o número é o do ponto que ele vai editar.
+    const before = propAtPlayhead(t1, 'scale', 1);
+    expect(before.local).toBe(0);
+    expect(before.keyframe?.group).toBe('entrada');
+    expect(before.value).toBeCloseTo(before.keyframe!.v, 5);
+    expect(before.value).toBeCloseTo(at(p, 't1', 'scale', 2), 5); // o que a prévia mostra no começo do clipe
+    expect(before.value).toBeLessThan(0.7);
+    // Playhead depois do clipe: o fim do zoom.
+    const after = propAtPlayhead(t1, 'scale', 9);
+    expect(after.local).toBe(3);
+    expect(after.keyframe?.group).toBe('slowZoom');
+    expect(after.value).toBeCloseTo(after.keyframe!.v, 5);
+    // Dentro do clipe, entre pontos: o valor da prévia e nenhum ponto.
+    const mid = propAtPlayhead(t1, 'scale', 3.5);
+    expect(mid.keyframe).toBeUndefined();
+    expect(mid.value).toBeCloseTo(at(p, 't1', 'scale', 3.5), 5);
   });
 
   it('remover o último ponto feito à mão mantém o valor que ele mostrava', () => {

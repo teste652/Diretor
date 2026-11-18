@@ -141,6 +141,8 @@ export function Timeline() {
   };
 
   const trackOf = (kind: string) => view.tracks.find((t) => t.kind === kind);
+  const selKf = s.selection.keyframe;
+  const selectedKfExists = !!selKf && !!view.clips.find((c) => c.id === selKf.clipId)?.props[selKf.prop]?.keyframes.some((k) => k.id === selKf.keyframeId);
 
   return (
     <div className="panel timeline">
@@ -158,7 +160,7 @@ export function Timeline() {
         </button>
         <button
           className="btn ghost icon"
-          title={s.selection.keyframe ? 'Remover ponto selecionado (Delete)' : 'Remover clipe selecionado (Delete)'}
+          title={selectedKfExists ? 'Remover ponto selecionado (Delete)' : 'Remover clipe selecionado (Delete)'}
           disabled={!s.selection.clipIds.length}
           onClick={deleteSelectedKeyframeOrClip}
           data-testid="trash"

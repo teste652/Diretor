@@ -48,7 +48,7 @@ function newProject() {
   playback.seek(0);
 }
 
-type ExportState = { frame: number; total: number; done?: string; error?: string } | null;
+type ExportState = { frame: number; total: number; done?: string; warning?: string; error?: string } | null;
 
 export function App() {
   const s = useSession();
@@ -113,7 +113,7 @@ export function App() {
     setExp({ frame: 0, total: 1 });
     const r = await exportProject(session.project, { onProgress: (p) => setExp({ ...p }), signal: cancel.current });
     if (r.cancelled) return setExp(null);
-    setExp((e) => ({ ...(e ?? { frame: 0, total: 1 }), done: r.ok ? r.outPath : undefined, error: r.ok ? undefined : r.error }));
+    setExp((e) => ({ ...(e ?? { frame: 0, total: 1 }), done: r.ok ? r.outPath : undefined, warning: r.ok ? r.warning : undefined, error: r.ok ? undefined : r.error }));
   };
 
   return (
@@ -175,6 +175,7 @@ export function App() {
             )}
             {exp.done && (
               <>
+                {exp.warning && <p style={{ color: 'var(--warn)', fontSize: 12.5 }}>{exp.warning}</p>}
                 <p className="hint" style={{ wordBreak: 'break-all' }}>{exp.done}</p>
                 <div className="row">
                   <button className="btn primary" onClick={() => window.diretor?.showItem(exp.done!)}>

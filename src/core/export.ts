@@ -43,7 +43,7 @@ export function buildFfmpegArgs(p: Project, outPath: string): string[] {
   args.push(
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
     '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv',
-    '-movflags', '+faststart', '-t', total.toFixed(3), outPath,
+    '-movflags', '+faststart', '-t', total.toFixed(3), '-f', 'mp4', outPath,
   );
   return args;
 }

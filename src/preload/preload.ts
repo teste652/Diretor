@@ -8,7 +8,7 @@ const api = {
   saveProject: (project: unknown, path?: string): Promise<{ path: string } | { error: string } | null> => ipcRenderer.invoke('project:save', { project, path }),
   exportStart: (project: unknown, outPath?: string) => ipcRenderer.invoke('export:start', { project, outPath }),
   exportFrame: (jobId: number, frame: Uint8Array): Promise<boolean> => ipcRenderer.invoke('export:frame', jobId, frame),
-  exportFinish: (jobId: number, abandon?: boolean): Promise<{ ok: boolean; outPath?: string; error?: string; cancelled?: boolean }> =>
+  exportFinish: (jobId: number, abandon?: boolean): Promise<{ ok: boolean; outPath?: string; error?: string; warning?: string; cancelled?: boolean }> =>
     ipcRenderer.invoke('export:finish', jobId, abandon),
   exportCancel: (jobId: number) => ipcRenderer.invoke('export:cancel', jobId),
   appInfo: () => ipcRenderer.invoke('app:info'),

@@ -3,10 +3,10 @@
 // Gera capturas e o MP4 exportado em .test-output/.
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 const require = createRequire(import.meta.url);
 const { _electron } = require('playwright-core');
@@ -351,6 +351,57 @@ const last = await ev(
 check('cancelar no último quadro não vira "falha na exportação"', last.cancelled === true && !last.error && !existsSync(lastOut) && leftovers().length === 0, JSON.stringify(last));
 const stillRunning = ffmpegRunning();
 check('depois de cancelar, nenhum ffmpeg fica rodando', stillRunning === 0, `${stillRunning} processo(s)`);
+
+// Nome longo com acentos (o limite é de 255 bytes por nome): o temporário não pode repetir o nome escolhido.
+let longName = '';
+while (Buffer.byteLength(`${longName}.mp4`) < 236) longName += 'ação ';
+longName = `${longName.trim()}.mp4`;
+const longOut = join(out, longName);
+const longExp = await ev((p) => window.__diretor.exportProject(window.__diretor.session.project, { outPath: p }), longOut);
+check(
+  'exporta com nome longo e acentuado',
+  longExp.ok && existsSync(longOut) && leftovers().length === 0,
+  `${longName.length} caracteres, ${Buffer.byteLength(longName)} bytes${longExp.error ? `; ${longExp.error.slice(0, 200)}` : ''}`,
+);
+
+// Destino aberto em outro programa (um player prende o arquivo no Windows): o vídeo pronto
+// é salvo ao lado como "nome (1).mp4", com aviso, e nada se perde. No Windows o arquivo fica
+// preso de verdade (aberto sem permitir apagar, como um player); fora dele, o destino é uma pasta.
+const lockedOut = join(out, 'aberto no player.mp4');
+let locker = null;
+if (process.platform === 'win32') {
+  writeFileSync(lockedOut, 'vídeo aberto no player');
+  locker = spawn(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command', "$f = [System.IO.File]::Open($env:LOCK_PATH, 'Open', 'Read', 'Read'); [Console]::Out.WriteLine('preso'); [Console]::Out.Flush(); Start-Sleep -Seconds 300"],
+    { env: { ...process.env, LOCK_PATH: lockedOut }, stdio: ['ignore', 'pipe', 'inherit'] },
+  );
+  await new Promise((res, rej) => {
+    locker.stdout.on('data', (d) => /preso/.test(String(d)) && res());
+    locker.once('exit', (c) => rej(new Error(`o PowerShell que prende o arquivo saiu (${c})`)));
+    setTimeout(() => rej(new Error('o PowerShell não abriu o arquivo a tempo')), 60_000);
+  });
+} else {
+  mkdirSync(lockedOut);
+  writeFileSync(join(lockedOut, 'dentro.txt'), 'não mexer');
+}
+const t2 = Date.now();
+const locked = await ev((p) => window.__diretor.exportProject(window.__diretor.session.project, { outPath: p }), lockedOut);
+const lockedSecs = ((Date.now() - t2) / 1000).toFixed(1);
+if (locker && locker.exitCode === null) {
+  const gone = new Promise((r) => locker.once('exit', r));
+  locker.kill();
+  await gone;
+}
+const altOut = join(out, 'aberto no player (1).mp4');
+const altDur = /Duration: (\d+):(\d+):([\d.]+)/.exec(spawnSync(FFMPEG, ['-hide_banner', '-i', altOut], { encoding: 'utf8' }).stderr);
+const altSeconds = altDur ? Number(altDur[1]) * 3600 + Number(altDur[2]) * 60 + Number(altDur[3]) : 0;
+const untouched = process.platform === 'win32' ? contents(lockedOut) === 'vídeo aberto no player' : contents(join(lockedOut, 'dentro.txt')) === 'não mexer';
+check(
+  'destino aberto em outro programa: o vídeo pronto é salvo ao lado, com aviso, e nada se perde',
+  locked.ok && basename(locked.outPath ?? '') === basename(altOut) && /aberto em outro programa/.test(locked.warning ?? '') && Math.abs(altSeconds - seconds) < 0.1 && untouched && leftovers().length === 0,
+  `${lockedSecs}s; ${JSON.stringify({ outPath: locked.outPath && basename(locked.outPath), warning: locked.warning, error: locked.error, altSeconds })}`,
+);
 
 // 4. Interface: campo numérico, arrasto da borda do vídeo, lixeira e painel do modo econômico.
 // Digitar o fim de uma legenda e clicar em outra antes do Enter: o número vai para a legenda certa, sem os limites da outra.

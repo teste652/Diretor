@@ -8,7 +8,7 @@ export interface ExportProgress {
   total: number;
 }
 
-type ExportResult = { ok: boolean; outPath?: string; error?: string; cancelled?: boolean };
+type ExportResult = { ok: boolean; outPath?: string; error?: string; warning?: string; cancelled?: boolean };
 
 /**
  * Exportação em andamento. O botão Cancelar age em qualquer fase: conferência dos
@@ -92,7 +92,7 @@ export async function exportProject(
       }
       if (signal.cancelled) return await stop('Cancelado.');
       const res = await api.exportFinish(jobId);
-      if (res.ok) return { ok: true, outPath: res.outPath ?? outPath };
+      if (res.ok) return { ok: true, outPath: res.outPath ?? outPath, warning: res.warning };
       // Cancelar enquanto o ffmpeg finaliza é cancelamento, não "Falha na exportação".
       if (res.cancelled || signal.cancelled) return cancelled;
       return { ok: false, error: res.error };

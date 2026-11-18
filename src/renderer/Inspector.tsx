@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { type CaptionPreset, type Clip, EASINGS, type Easing, findClip } from '../core/model';
 import { ANIMATION_PRESETS, type AnimationPreset, CAPTION_PRESETS, type TrimEdge, clampTrimDelta } from '../core/operations';
-import { evalClipProp, keyframeAt, keyframeGroups, propDef, propsForKind } from '../core/properties';
+import { clipLocalTime, keyframeGroups, propAtPlayhead, propDef, propsForKind } from '../core/properties';
 import { playback, session, usePlayback, useSession } from './store';
 import { ColorField, NumberField, TextField, run } from './ui';
 
@@ -22,7 +22,7 @@ export function Inspector() {
     const d = clampTrimDelta(session.view, cur, edge, delta);
     if (Math.abs(d) > 1e-6) run([{ op: 'trimClip', clipId: c.id, edge, delta: d }], label);
   };
-  const local = Math.min(Math.max(pb.time - c.start, 0), c.duration);
+  const local = clipLocalTime(c, pb.time);
 
   return (
     <div>
@@ -72,9 +72,8 @@ export function Inspector() {
         <h4>Animação · {local.toFixed(2)}s do clipe</h4>
         {propsForKind(c.kind).map((d) => {
           const ap = c.props[d.name];
-          // O ponto que a prévia mostra (com dois grupos no mesmo instante, o último).
-          const kfHere = keyframeAt(ap, local);
-          const value = evalClipProp(c, d.name, pb.time);
+          // Valor e ponto do mesmo instante (o que a prévia mostra; com dois grupos no mesmo tempo, o último).
+          const { value, keyframe: kfHere } = propAtPlayhead(c, d.name, pb.time);
           return (
             <div className="prop-row" key={d.name}>
               <label>{d.label}</label>
