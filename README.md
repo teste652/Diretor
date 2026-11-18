@@ -53,7 +53,7 @@ O painel da direita é um chat. Escreva o pedido (“anima o título entrando de
 - **Parar** interrompe a resposta. **Nova conversa** começa do zero (a IA esquece o que foi dito; o projeto fica igual). A conversa continua quando você abre o Diretor de novo.
 - Enquanto a IA trabalha, o que você escrever vira uma nota que ela lê na próxima consulta ao editor.
 
-Como funciona: para cada mensagem, o Diretor roda `claude -p` (ou `codex exec`) numa pasta vazia do próprio Diretor, retomando a mesma conversa, com um único conector, o servidor MCP do Diretor. O Claude Code roda sem nenhuma outra ferramenta (`--tools ""`, `--strict-mcp-config`); o Codex roda com o conector aprovado e sem poder mexer em arquivos (`--sandbox read-only`). Nada passa por servidores do Diretor. Para testar com outro programa, as variáveis `DIRETOR_CLAUDE_CLI` e `DIRETOR_CODEX_CLI` apontam o executável (o teste automático usa `scripts/ia-simulada.mjs`).
+Como funciona: para cada mensagem, o Diretor roda `claude -p` (ou `codex exec`) numa pasta vazia do próprio Diretor, retomando a mesma conversa, com um único conector, o servidor MCP do Diretor. O Claude Code roda sem nenhuma outra ferramenta (`--tools ""`, `--strict-mcp-config`); o Codex roda com o conector aprovado, sem terminal e sem poder mexer em arquivos (`--disable shell_tool`, `--sandbox read-only`). O Codex instalado pelo npm roda direto pelo `codex.exe` do pacote, sem abrir janela. Nada passa por servidores do Diretor. Para testar com outro programa, as variáveis `DIRETOR_CLAUDE_CLI` e `DIRETOR_CODEX_CLI` apontam o executável (o teste automático usa `scripts/ia-simulada.mjs`).
 
 ## Conectar ao Claude Desktop
 
@@ -63,7 +63,7 @@ Opcional: se preferir conversar no Claude Desktop, clique em **Usar pelo Claude 
 2. Feche o Claude Desktop por completo: botão direito no ícone dele, perto do relógio (ou dentro da setinha **^** ao lado, onde ficam os ícones escondidos), e **Sair**. Fechar a janela não basta. Aberto, ele pode regravar a configuração e desfazer a mudança.
 3. No Diretor, no painel do Claude (à direita), clique em **Conectar**.
 4. Abra o Claude Desktop de novo. O conector “diretor” aparece na lista de ferramentas.
-5. Deixe o editor aberto. O painel mostra “Claude conectado” quando o Claude usa as ferramentas.
+5. Deixe o editor aberto. O painel mostra “Claude Desktop conectado”, ao lado de “Usar pelo Claude Desktop”, quando o Claude Desktop usa as ferramentas.
 
 O botão grava o servidor “diretor” no `claude_desktop_config.json` do Claude Desktop e mantém o resto do arquivo (outros servidores e preferências). Na primeira vez, guarda uma cópia do arquivo como estava em `claude_desktop_config.antes-do-diretor.json`, na mesma pasta (as vezes seguintes não substituem essa cópia). Arquivo com erro de formato não é tocado: o editor avisa e mostra onde ele está, para corrigir o erro; depois disso o botão volta. O servidor roda com o próprio `Diretor.exe` (`ELECTRON_RUN_AS_NODE=1`), então não precisa do Node.
 
@@ -119,7 +119,7 @@ As operações são as mesmas que a interface usa (`src/core/operations.ts`): `a
 ## Testes
 
 ```bash
-npm test            # 152 testes: unitários + MCP real (cliente MCP → servidor stdio → ponte → editor) + exportação com ffmpeg
+npm test            # 154 testes: unitários + MCP real (cliente MCP → servidor stdio → ponte → editor) + exportação com ffmpeg
 npm run typecheck
 npm run test:e2e    # abre o app Electron e roda o roteiro da especificação (no Linux sem tela: xvfb-run -a node scripts/e2e.mjs)
 ```

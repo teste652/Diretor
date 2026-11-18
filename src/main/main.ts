@@ -132,7 +132,7 @@ function bridgeTimeoutMs(method: string, params: unknown): number {
   return Math.min(55_000, (wait + 8) * 1000);
 }
 
-function askRenderer(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
+function askRenderer(method: string, params: unknown, signal?: AbortSignal, client?: string): Promise<unknown> {
   if (!win || win.isDestroyed()) return Promise.resolve({ error: 'editor_closed', message: 'O editor não está aberto.' });
   if (signal?.aborted) return Promise.resolve({ error: 'cancelled' });
   const id = ++reqSeq;
@@ -156,7 +156,7 @@ function askRenderer(method: string, params: unknown, signal?: AbortSignal): Pro
       timer,
     });
     signal?.addEventListener('abort', onAbort, { once: true });
-    win!.webContents.send('bridge:request', { id, method, params });
+    win!.webContents.send('bridge:request', { id, method, params, client });
   });
 }
 
@@ -446,6 +446,12 @@ function mcpEntry(): McpEntry {
   return { command: process.execPath, args: [unpackedPath(join(__dirname, '..', 'mcp', 'server.cjs'))], env: { ELECTRON_RUN_AS_NODE: '1' } };
 }
 
+/** O mesmo servidor, marcado com quem o usa no chat do painel (o editor mostra o nome certo e sabe quem fez cada proposta). */
+function chatMcpEntry(kind: AiKind): McpEntry {
+  const e = mcpEntry();
+  return { ...e, env: { ...e.env, DIRETOR_CLIENT: kind } };
+}
+
 /**
  * O Claude Desktop está aberto? No Windows, a resposta vem do PowerShell, que custa caro
  * para rodar a cada 5 s com o cartão na tela: uma consulta por vez (quem chega durante uma
@@ -525,7 +531,7 @@ ipcMain.handle(
     let input: string;
     if (kind === 'claude') {
       const cfg = join(dir, 'mcp.json');
-      writeFileSync(cfg, JSON.stringify({ mcpServers: { diretor: mcpEntry() } }, null, 2));
+      writeFileSync(cfg, JSON.stringify({ mcpServers: { diretor: chatMcpEntry('claude') } }, null, 2));
       args = claudeArgs({ mcpConfigFile: cfg, sessionId });
       input = claudeInput(text, imgs);
     } else {
@@ -537,7 +543,7 @@ ipcMain.handle(
         writeFileSync(f, Buffer.from(img.data, 'base64'));
         temp.push(f);
       });
-      args = codexArgs({ mcp: mcpEntry(), cwd: dir, sessionId, imageFiles: temp });
+      args = codexArgs({ mcp: chatMcpEntry('codex'), cwd: dir, sessionId, imageFiles: temp });
       input = text || 'Veja a imagem.';
     }
     const sender = e.sender;
@@ -567,14 +573,31 @@ function stopAllAi(): void {
   for (const r of aiRuns.values()) r.stop();
 }
 
+/** Imagens que foram para o Codex: não ficam no disco depois (nem se o Diretor fechou no meio de uma resposta). */
+function clearAiImages(): void {
+  try {
+    rmSync(join(app.getPath('userData'), 'ia', 'imagens'), { recursive: true, force: true });
+  } catch {
+    /* em uso: fica para a próxima vez */
+  }
+}
+
 /** Abre uma janela do PowerShell (que a pessoa vê) para instalar ou entrar na conta. */
 ipcMain.handle('ai:terminal', (_e, { kind, action }: { kind: AiKind; action: 'install' | 'login' }) => {
   if (process.platform !== 'win32') return { error: 'Abra um terminal e rode o programa para entrar na conta.' };
-  const script = terminalScript(kind, action, findCli(kind));
-  // detached: ganha a própria janela de console, que fica aberta (-NoExit) até a pessoa fechar.
-  const p = spawn('powershell.exe', ['-NoProfile', '-NoExit', '-ExecutionPolicy', 'Bypass', '-Command', script], { detached: true, stdio: 'ignore', windowsHide: false });
+  if ((kind !== 'claude' && kind !== 'codex') || (action !== 'install' && action !== 'login')) return { error: 'Pedido inválido.' };
+  const cli = findCli(kind);
+  // O script vai codificado (sem problema de aspas) e o caminho do programa vai por variável, nunca no texto.
+  const encoded = Buffer.from(terminalScript(kind, action), 'utf16le').toString('base64');
+  // "start" do cmd abre uma janela de console de verdade, com teclado, que fica aberta (-NoExit)
+  // até a pessoa fechar, mesmo se o Diretor fechar antes. (Com detached, o PowerShell não ganha janela.)
+  const p = spawn('cmd.exe', ['/d', '/c', `start "Diretor" powershell.exe -NoProfile -NoExit -ExecutionPolicy Bypass -EncodedCommand ${encoded}`], {
+    windowsVerbatimArguments: true,
+    windowsHide: true,
+    stdio: 'ignore',
+    env: { ...process.env, DIRETOR_CLI: cli?.path ?? '' },
+  });
   p.on('error', () => undefined);
-  p.unref();
   return { ok: true };
 });
 
@@ -584,8 +607,12 @@ ipcMain.handle('ai:terminal', (_e, { kind, action }: { kind: AiKind; action: 'in
  * Um PowerShell fica aberto em segundo plano depois do primeiro uso, para a tecla sair na hora.
  */
 let voiceShell: ChildProcessWithoutNullStreams | null = null;
+let lastDictate = 0;
 ipcMain.handle('voice:dictate', () => {
   if (process.platform !== 'win32') return { error: 'O ditado por voz usa o Windows+H do Windows.' };
+  // Dois pedidos seguidos abririam e fechariam o painel do ditado.
+  if (performance.now() - lastDictate < 800) return { ok: true };
+  lastDictate = performance.now();
   if (!voiceShell || voiceShell.exitCode !== null) {
     voiceShell = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '-'], { windowsHide: true });
     voiceShell.on('error', () => (voiceShell = null));
@@ -597,7 +624,8 @@ ipcMain.handle('voice:dictate', () => {
     );
   }
   voiceShell.stdin.write(
-    '$z=[System.UIntPtr]::Zero; [DiretorVoz.Teclas]::keybd_event(0x5B,0,0,$z); [DiretorVoz.Teclas]::keybd_event(0x48,0,0,$z); [DiretorVoz.Teclas]::keybd_event(0x48,0,2,$z); [DiretorVoz.Teclas]::keybd_event(0x5B,0,2,$z)\n',
+    // Solta o Ctrl antes (Ctrl+Windows+H não abre o ditado), depois Windows+H.
+    '$z=[System.UIntPtr]::Zero; foreach ($k in 0x11,0xA2,0xA3) { [DiretorVoz.Teclas]::keybd_event($k,0,2,$z) }; [DiretorVoz.Teclas]::keybd_event(0x5B,0,0,$z); [DiretorVoz.Teclas]::keybd_event(0x48,0,0,$z); [DiretorVoz.Teclas]::keybd_event(0x48,0,2,$z); [DiretorVoz.Teclas]::keybd_event(0x5B,0,2,$z)\n',
   );
   return { ok: true };
 });
@@ -687,6 +715,7 @@ app.whenReady().then(async () => {
   if (!app.hasSingleInstanceLock()) return;
   protocol.handle('media', serveMedia);
   createWindow();
+  clearAiImages();
   iniciarAtualizacao(() => win);
   try {
     const b = await startBridge(bridgeFilePath(), askRenderer);
@@ -705,6 +734,7 @@ app.on('window-all-closed', () => {
 
 // Sair no meio de uma exportação: espera o ffmpeg parar e o temporário sumir.
 app.on('will-quit', (event) => {
+  clearAiImages();
   if (!jobs.size) return;
   event.preventDefault();
   void abortAllExports().finally(() => app.quit());

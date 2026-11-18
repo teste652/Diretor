@@ -21,6 +21,8 @@ export function ChatPanel() {
   const [showEco, setShowEco] = useState(false);
   const [showDesktop, setShowDesktop] = useState(false);
   const [dragging, setDragging] = useState(false);
+  // Imagens ainda sendo lidas: Enviar espera, para a imagem não ficar para a próxima mensagem.
+  const [loadingImages, setLoadingImages] = useState(0);
   const [, force] = useState(0);
   const feedRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLTextAreaElement>(null);
@@ -63,17 +65,25 @@ export function ChatPanel() {
     feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
   }, [lastActivity, lastEntry, running, tab, p?.id, p?.current, p?.status, req?.status]);
 
-  const connected = Date.now() - bridgeStats.lastCallAt < 180_000;
+  const connected = Date.now() - bridgeStats.lastDesktopCallAt < 180_000;
 
-  const addFiles = async (files: Iterable<Blob>) => {
+  const addFiles = async (list: Iterable<Blob>) => {
+    // Copia a lista antes de esperar: o seletor de arquivos é limpo logo depois e a esvaziaria.
+    const files = [...list];
+    if (!files.length) return;
+    setLoadingImages((n) => n + 1);
     const got: ChatImage[] = [];
     let skipped = 0;
-    for (const f of files) {
-      const img = await readImage(f).catch(() => null);
-      if (img) got.push(img);
-      else skipped++;
+    try {
+      for (const f of files) {
+        const img = await readImage(f).catch(() => null);
+        if (img) got.push(img);
+        else skipped++;
+      }
+    } finally {
+      setLoadingImages((n) => n - 1);
     }
-    if (skipped) showToast('Só dá para mandar imagens (PNG, JPG, WEBP ou GIF).', true);
+    if (skipped) showToast('Só dá para mandar imagens (PNG, JPG, WEBP ou GIF) que abram normalmente.', true);
     if (got.length) setImages((cur) => [...cur, ...got].slice(0, 8));
   };
 
@@ -87,6 +97,10 @@ export function ChatPanel() {
       return;
     }
     if (!t && !images.length) return;
+    if (loadingImages > 0) {
+      showToast('Espere a imagem carregar.');
+      return;
+    }
     if (!cli) {
       showToast(`Instale o ${AI_APP[tab]} primeiro (botão acima).`, true);
       return;
@@ -208,7 +222,7 @@ export function ChatPanel() {
           </div>
         )}
 
-        {p && <ProposalCard p={p} />}
+        {p && <ProposalCard key={p.id} p={p} />}
 
       </div>
 
@@ -252,6 +266,8 @@ export function ChatPanel() {
           value={text}
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
+            // Excel e Word copiam texto junto com uma imagem dele: nesse caso vale o texto.
+            if (e.clipboardData.getData('text/plain')) return;
             const files = [...e.clipboardData.items].filter((it) => it.kind === 'file').map((it) => it.getAsFile()).filter((f): f is File => !!f);
             if (!files.length) return;
             e.preventDefault();
@@ -272,8 +288,9 @@ export function ChatPanel() {
             multiple
             hidden
             onChange={(e) => {
-              if (e.target.files) void addFiles(e.target.files);
+              const files = e.target.files ? [...e.target.files] : [];
               e.target.value = '';
+              void addFiles(files);
             }}
           />
           <button className="btn ghost icon" title="Mandar imagem (ou cole com Ctrl+V, ou arraste para cá)" onClick={() => fileRef.current?.click()} disabled={running} data-testid="ai-attach">
@@ -291,7 +308,7 @@ export function ChatPanel() {
               {Icon.stop}
             </button>
           ) : (
-            <button className="btn primary icon" title="Enviar (Enter)" onClick={() => void send()} data-testid="ai-send">
+            <button className="btn primary icon" title="Enviar (Enter)" onClick={() => void send()} disabled={loadingImages > 0} data-testid="ai-send">
               {Icon.send}
             </button>
           )}
@@ -438,14 +455,12 @@ function ProposalCard({ p }: { p: Proposal }) {
   // Trava curta quando a etapa muda: um clique duplo em Aceitar não decide a próxima etapa sem você vê-la.
   const [locked, setLocked] = useState(false);
   const [sentToChat, setSentToChat] = useState(false);
-  // No chat do Diretor, "Refazer" já pede ao assistente que fez a proposta (se ele não estiver ocupado).
-  const redo = () => {
+  // Proposta feita no chat do Diretor: "Refazer" já pede ao mesmo assistente (se ele não estiver ocupado).
+  // Feita pelo Claude Desktop: só registra o pedido, e ele recebe na próxima consulta.
+  const redo = async () => {
     s.requestRedo(p.id);
-    const k = chat.get().lastKind;
-    if (k && chat.get().cli[k] && !chat.running(k)) {
-      setSentToChat(true);
-      void chat.send(k, 'Refaça a proposta desatualizada com o contexto atual.');
-    }
+    const k = chat.ownerOf(p.id);
+    if (k && chat.get().cli[k] && !chat.running(k)) setSentToChat(await chat.send(k, 'Refaça a proposta desatualizada com o contexto atual.'));
   };
   useEffect(() => {
     setLocked(true);
@@ -477,7 +492,7 @@ function ProposalCard({ p }: { p: Proposal }) {
       </div>
       {stale ? (
         <div className="row">
-          <button className="btn primary" disabled={p.redoRequested || locked} onClick={() => redo()}>
+          <button className="btn primary" disabled={p.redoRequested || locked} onClick={() => void redo()}>
             {p.redoRequested ? 'Pedido registrado' : 'Refazer com contexto atual'}
           </button>
           <button className="btn" disabled={locked} onClick={() => s.discardStep(p.id)}>

@@ -84,14 +84,45 @@ export function cliCandidates(kind: AiKind, env: Env = process.env, platform: No
  * Rodar o alvo direto evita o cmd.exe, que estraga textos com aspas e acentos.
  */
 export function shimTarget(cmdFile: string, text: string): string | null {
-  const m = /%~?dp0%?\\([^"\r\n%]+?\.(?:c?js|mjs|exe))"/i.exec(text);
-  return m ? resolve(dirname(cmdFile), m[1].replace(/\\/g, '/')) : null;
+  // O atalho do npm cita antes o node.exe ("IF EXIST %dp0%\node.exe"): o programa é o último caminho, e nunca o node.exe.
+  const targets = [...text.matchAll(/%~?dp0%?\\([^"\r\n%]+?\.(?:c?js|mjs|exe))"/gi)].map((m) => m[1]).filter((t) => !/(^|\\)node\.exe$/i.test(t));
+  const t = targets[targets.length - 1];
+  return t ? resolve(dirname(cmdFile), t.replace(/\\/g, '/')) : null;
+}
+
+const CODEX_TRIPLE: Record<string, [string, string]> = {
+  'win32-x64': ['@openai/codex-win32-x64', 'x86_64-pc-windows-msvc'],
+  'win32-arm64': ['@openai/codex-win32-arm64', 'aarch64-pc-windows-msvc'],
+  'linux-x64': ['@openai/codex-linux-x64', 'x86_64-unknown-linux-musl'],
+  'linux-arm64': ['@openai/codex-linux-arm64', 'aarch64-unknown-linux-musl'],
+  'darwin-x64': ['@openai/codex-darwin-x64', 'x86_64-apple-darwin'],
+  'darwin-arm64': ['@openai/codex-darwin-arm64', 'aarch64-apple-darwin'],
+};
+
+/**
+ * O Codex do npm é um .js que só inicia o programa de verdade (codex.exe). Rodar o .js pelo
+ * Diretor faria o Windows abrir uma janela preta a cada mensagem: chama o codex.exe direto.
+ */
+export function codexNative(jsFile: string, platform: string = process.platform, arch: string = process.arch): string | null {
+  if (!/[\\/]@openai[\\/]codex[\\/]bin[\\/]codex\.js$/i.test(jsFile)) return null;
+  const t = CODEX_TRIPLE[`${platform}-${arch}`];
+  if (!t) return null;
+  const [pkg, triple] = t;
+  const root = resolve(dirname(jsFile), '..');
+  const exe = platform === 'win32' ? 'codex.exe' : 'codex';
+  const tail = ['vendor', triple, 'bin', exe];
+  const candidates = [join(root, 'node_modules', ...pkg.split('/'), ...tail), join(root, '..', '..', ...pkg.split('/'), ...tail), join(root, ...tail)];
+  return candidates.find((c) => existsSync(c)) ?? null;
 }
 
 /** Monta como iniciar um arquivo encontrado; null se ele não dá para ser iniciado sem o cmd.exe. */
 export function launchFor(file: string, nodeExec: string = process.execPath, depth = 0): CliLaunch | null {
   const ext = extname(file).toLowerCase();
-  if (ext === '.js' || ext === '.mjs' || ext === '.cjs') return { path: file, command: nodeExec, args: [file], env: { ELECTRON_RUN_AS_NODE: '1' } };
+  if (ext === '.js' || ext === '.mjs' || ext === '.cjs') {
+    const native = codexNative(file);
+    if (native) return { path: file, command: native, args: [], env: { CODEX_MANAGED_BY_NPM: '1' } };
+    return { path: file, command: nodeExec, args: [file], env: nodeExec === process.execPath ? { ELECTRON_RUN_AS_NODE: '1' } : undefined };
+  }
   if (ext === '.cmd' || ext === '.bat') {
     if (depth > 0) return null;
     let text: string;
@@ -108,10 +139,22 @@ export function launchFor(file: string, nodeExec: string = process.execPath, dep
   return { path: file, command: file, args: [] };
 }
 
+/** node.exe do computador, se houver: um .js rodado por ele não abre janelas pretas para o que ele iniciar. */
+function consoleNode(env: Env, platform: NodeJS.Platform): string | null {
+  if (platform !== 'win32') return null;
+  const path = env.PATH ?? env.Path ?? '';
+  for (const d of path.split(delimiter).filter(Boolean)) {
+    const f = join(d, 'node.exe');
+    if (existsSync(f)) return f;
+  }
+  return null;
+}
+
 export function findCli(kind: AiKind, env: Env = process.env, platform: NodeJS.Platform = process.platform): CliLaunch | null {
+  const nodeExec = consoleNode(env, platform) ?? process.execPath;
   for (const f of cliCandidates(kind, env, platform)) {
     if (!existsSync(f)) continue;
-    const l = launchFor(f);
+    const l = launchFor(f, nodeExec);
     if (l) return l;
   }
   return null;
@@ -163,13 +206,15 @@ export function codexArgs(o: { mcp: McpEntry; cwd: string; sessionId?: string; i
     'approval_policy="never"',
     `developer_instructions=${toml(INSTRUCTIONS)}`,
   ].flatMap((c) => ['-c', c]);
-  const base = ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'read-only', '--cd', o.cwd, ...cfg];
+  // Sem terminal e sem abrir imagens do disco: o Codex só mexe no projeto pelo conector do Diretor.
+  const tools = ['shell_tool', 'unified_exec', 'view_image'].flatMap((f) => ['--disable', f]);
+  const base = ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'read-only', '--cd', o.cwd, ...tools, ...cfg];
   // O texto vem pela entrada ("-"). As imagens ficam depois dele: "-i" aceita vários arquivos e engoliria o "-".
   const images = (o.imageFiles ?? []).flatMap((f) => ['-i', f]);
   return o.sessionId ? [...base, 'resume', o.sessionId, '-', ...images] : [...base, '-', ...images];
 }
 
-const LOGIN = /log ?in|api key|auth|unauthori[sz]ed|401|credential|subscription/i;
+const LOGIN = /log ?in|sign ?in|log ?out|api key|auth|unauthori[sz]ed|401|credential|subscription|refresh token|access token/i;
 
 /** Uma linha de saída do Claude Code (stream-json) vira eventos para o chat. */
 export function parseClaudeLine(line: string): AiEvent[] {
@@ -181,6 +226,8 @@ export function parseClaudeLine(line: string): AiEvent[] {
   }
   if (m.type === 'system' && m.subtype === 'init' && typeof m.session_id === 'string') return [{ type: 'session', id: m.session_id }];
   if (m.type === 'assistant') {
+    // Erro da API (sem login, limite de uso): o Claude Code manda como se fosse uma resposta, e de novo no "result".
+    if (m.error || m.is_api_error_message) return [];
     const content = ((m.message as { content?: unknown[] })?.content ?? []) as { type: string; text?: string; name?: string }[];
     const out: AiEvent[] = [];
     for (const c of content) {
@@ -240,7 +287,10 @@ export function parseCodexLine(line: string): AiEvent[] {
 
 /** Mensagem curta para quando o programa termina sem dizer o porquê. */
 export function exitMessage(kind: AiKind, code: number | null, stderr: string): string {
-  const tail = stderr.trim().split(/\r?\n/).filter(Boolean).slice(-3).join(' ').slice(0, 400);
+  const lines = stderr.trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  // O Codex pode acrescentar um "Stack backtrace" depois do erro: a linha que importa começa com "Error".
+  const errLine = [...lines].reverse().find((l) => /^error\b/i.test(l));
+  const tail = (errLine ?? lines.slice(-3).join(' ')).slice(0, 400);
   const name = kind === 'claude' ? 'O Claude Code' : 'O Codex';
   return tail ? `${name} parou: ${tail}` : `${name} parou sem responder (código ${code ?? '?'}).`;
 }
@@ -260,13 +310,21 @@ export function runAssistant(o: RunOptions): { stop: () => void; child: ChildPro
   // Sem ELECTRON_RUN_AS_NODE herdado: ele vale só para quem precisa (o .js do npm e o servidor do Diretor).
   const env: Env = { ...process.env, ...o.launch.env };
   if (!o.launch.env?.ELECTRON_RUN_AS_NODE) delete env.ELECTRON_RUN_AS_NODE;
+  delete env.RUST_BACKTRACE;
+  delete env.RUST_LIB_BACKTRACE;
   const child = spawn(o.launch.command, [...o.launch.args, ...o.args], { cwd: o.cwd, env: env as NodeJS.ProcessEnv, windowsHide: true, stdio: 'pipe' });
   let finished = false;
   let stopped = false;
   let stderr = '';
   let buf = '';
+  let lastError = '';
   const emit = (ev: AiEvent) => {
     if (finished) return;
+    // O Codex manda o mesmo erro duas vezes ("error" e "turn.failed"): mostra uma.
+    if (ev.type === 'error') {
+      if (ev.message === lastError) return;
+      lastError = ev.message;
+    }
     if (ev.type === 'done') finished = true;
     o.onEvent(ev);
   };
@@ -314,33 +372,34 @@ export function runAssistant(o: RunOptions): { stop: () => void; child: ChildPro
 /**
  * Script do PowerShell para instalar e/ou entrar na conta, numa janela que a pessoa vê.
  * Instalar: o instalador oficial (Claude Code) ou o npm (Codex). Entrar: o próprio programa pede o login.
+ * O caminho do programa já instalado chega pela variável DIRETOR_CLI, nunca no texto do script
+ * (um nome de pasta com aspas não vira comando).
  */
-export function terminalScript(kind: AiKind, action: 'install' | 'login', cli: CliLaunch | null): string {
-  const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+export function terminalScript(kind: AiKind, action: 'install' | 'login'): string {
+  const q = (s: string) => `'${s.replace(/['‘’‚‛]/g, '$&$&')}'`;
   const say = (s: string) => `Write-Host ${q(s)} -ForegroundColor Cyan`;
+  // O Diretor guarda o PATH de quando abriu: relê o atual (Node.js ou Claude Code instalados depois).
+  const freshPath = "$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')";
   if (kind === 'claude') {
-    const run = cli ? `& ${q(cli.path)}` : `& (Join-Path $env:USERPROFILE '.local\\bin\\claude.exe')`;
-    if (action === 'login') return [say('Entre na sua conta do Claude (plano Pro ou Max). Quando terminar, feche esta janela e volte ao Diretor.'), run].join('; ');
-    return [
-      say('Instalando o Claude Code (instalador oficial da Anthropic)...'),
-      'irm https://claude.ai/install.ps1 | iex',
-      say('Agora entre na sua conta do Claude (plano Pro ou Max). Quando terminar, feche esta janela e volte ao Diretor.'),
-      run,
-    ].join('; ');
+    const installed = "Join-Path $env:USERPROFILE '.local\\bin\\claude.exe'";
+    const signIn = say('Entre na sua conta do Claude (plano Pro ou Max). Quando terminar, feche esta janela e volte ao Diretor.');
+    if (action === 'login') return [freshPath, signIn, `$cli = if ($env:DIRETOR_CLI) { $env:DIRETOR_CLI } else { ${installed} }`, '& $cli'].join('; ');
+    return [freshPath, say('Instalando o Claude Code (instalador oficial da Anthropic)...'), 'irm https://claude.ai/install.ps1 | iex', signIn, `& (${installed})`].join('; ');
   }
-  const run = cli ? `& ${q(cli.path)} login` : 'codex login';
-  if (action === 'login') return [say('Entre na sua conta do ChatGPT (plano Plus ou maior). Quando terminar, volte ao Diretor.'), run].join('; ');
+  const signIn = say('Entre na sua conta do ChatGPT (plano Plus ou maior). Quando terminar, volte ao Diretor.');
+  if (action === 'login') return [freshPath, signIn, 'if ($env:DIRETOR_CLI) { & $env:DIRETOR_CLI login } else { codex login }'].join('; ');
   const noNode = [
     say('O Codex precisa do Node.js. Abrindo a página para baixar: instale a versão LTS e clique de novo em Instalar no Diretor.'),
     "Start-Process 'https://nodejs.org/pt'",
     'return',
   ].join('; ');
   return [
+    freshPath,
     `if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { ${noNode} }`,
     say('Instalando o Codex...'),
     'npm install -g @openai/codex',
-    say('Agora entre na sua conta do ChatGPT (plano Plus ou maior). Quando terminar, volte ao Diretor.'),
-    // Logo depois do npm, o PATH desta janela ainda não tem o codex: usa o caminho do npm.
-    "& (Join-Path $env:APPDATA 'npm\\codex.cmd') login",
+    signIn,
+    // O codex.cmd fica na pasta global do npm, que nem sempre está no PATH desta janela.
+    "& (Join-Path (npm prefix -g).Trim() 'codex.cmd') login",
   ].join('; ');
 }

@@ -8,7 +8,8 @@ import { createServer, type Server } from 'node:http';
 import { dirname } from 'node:path';
 
 /** `signal` é abortado se o servidor MCP desistir da chamada (cancelada pelo Claude ou tempo esgotado). */
-export type BridgeHandler = (method: string, params: unknown, signal: AbortSignal) => Promise<unknown>;
+/** `client`: quem chamou ("claude" ou "codex" no chat do painel; vazio no Claude Desktop). */
+export type BridgeHandler = (method: string, params: unknown, signal: AbortSignal, client?: string) => Promise<unknown>;
 
 export interface BridgeInfo {
   port: number;
@@ -40,8 +41,8 @@ export async function startBridge(infoFile: string, handler: BridgeHandler): Pro
     });
     req.on('end', async () => {
       try {
-        const { method, params } = JSON.parse(body || '{}');
-        const result = await handler(String(method), params ?? {}, gone.signal);
+        const { method, params, client } = JSON.parse(body || '{}');
+        const result = await handler(String(method), params ?? {}, gone.signal, client === 'claude' || client === 'codex' ? client : undefined);
         if (gone.signal.aborted) return;
         res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ result }));
       } catch (e) {

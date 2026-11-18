@@ -685,7 +685,15 @@ check('chat: o botão Parar encerra a resposta', stopped);
 await page.fill('[data-testid=ai-input]', 'erro-login');
 await page.press('[data-testid=ai-input]', 'Enter');
 await page.waitForSelector('[data-testid=ai-msg-error] button', { timeout: 30_000 });
-check('chat: sem login, oferece "Entrar na conta"', /Entrar na conta/.test((await page.textContent('[data-testid=ai-msg-error]')) ?? ''));
+const loginBubbles = await ev(() => ({
+  errors: document.querySelectorAll('[data-testid=ai-msg-error]').length,
+  asReply: [...document.querySelectorAll('[data-testid=ai-msg-assistant]')].some((el) => /Not logged in/.test(el.textContent ?? '')),
+}));
+check(
+  'chat: sem login, um aviso só, com "Entrar na conta" (não aparece como resposta)',
+  /Entrar na conta/.test((await page.textContent('[data-testid=ai-msg-error]')) ?? '') && loginBubbles.errors === 1 && !loginBubbles.asReply,
+  JSON.stringify(loginBubbles),
+);
 
 // Aba do Codex: a mesma coisa pelo `codex exec`, com o conector aprovado e sem mexer em arquivos.
 await page.click('[data-testid=ai-tab-codex]');
@@ -698,10 +706,18 @@ await shot('7-chat-codex');
 const cx = iaCalls().find((c) => c.codex);
 const propCx = await ev(() => window.__diretor.session.openProposal?.title ?? null);
 const cfgOf = (key) => cx?.args.find((a, i) => cx.args[i - 1] === '-c' && a.startsWith(`${key}=`));
+const disabled = cx?.args.filter((_, i) => cx.args[i - 1] === '--disable') ?? [];
+const codexLog = await ev(() => window.__diretor.session.activity.map((a) => a.text).filter((t) => /^Codex /.test(t)));
 check(
-  'chat: o Codex recebe o conector do Diretor aprovado e deixa a edição como rascunho',
-  cx && propCx === 'Codex: entrada suave' && cx.args[cx.args.indexOf('--sandbox') + 1] === 'read-only' && cfgOf('approval_policy') === 'approval_policy="never"' && samePath(cx.server.command, info.mcp.command),
-  JSON.stringify({ proposta: propCx, sandbox: cx?.args[cx.args.indexOf('--sandbox') + 1] }),
+  'chat: o Codex recebe o conector do Diretor aprovado, sem terminal, e deixa a edição como rascunho',
+  cx &&
+    propCx === 'Codex: entrada suave' &&
+    cx.args[cx.args.indexOf('--sandbox') + 1] === 'read-only' &&
+    disabled.includes('shell_tool') &&
+    cfgOf('approval_policy') === 'approval_policy="never"' &&
+    samePath(cx.server.command, info.mcp.command) &&
+    codexLog.includes('Codex enviou uma proposta'),
+  JSON.stringify({ proposta: propCx, sandbox: cx?.args[cx.args.indexOf('--sandbox') + 1], desligado: disabled, atividade: codexLog }),
 );
 await discardOpen();
 await page.click('[data-testid=ai-tab-claude]');

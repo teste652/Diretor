@@ -41,12 +41,11 @@ const state: {
   convos: Record<AiKind, Convo>;
   cli: Record<AiKind, string | null | undefined>;
   platform: string;
-  /** O último assistente que recebeu uma mensagem (o "Refazer" do rascunho pede a ele). */
-  lastKind?: AiKind;
   version: number;
 } = { convos: { claude: { entries: [] }, codex: { entries: [] } }, cli: { claude: undefined, codex: undefined }, platform: '', version: 0 };
 
 let seq = 0;
+const owners = new Map<string, AiKind>();
 const listeners = new Set<() => void>();
 function changed(): void {
   state.version++;
@@ -76,10 +75,11 @@ try {
       sessionId: typeof c.sessionId === 'string' ? c.sessionId : undefined,
       entries: c.entries
         .filter((e: ChatEntry) => e && typeof e.text === 'string')
-        .map((e: ChatEntry & { imageCount?: number }) => ({
+        // A contagem vira texto uma vez só (sem o campo, ela não se repete a cada abertura).
+        .map(({ imageCount, ...e }: ChatEntry & { imageCount?: number }) => ({
           ...e,
           id: ++seq,
-          text: e.imageCount ? `${e.text}${e.text ? ' ' : ''}(${e.imageCount} imagem${e.imageCount > 1 ? 'ns' : ''})` : e.text,
+          text: imageCount ? `${e.text}${e.text ? ' ' : ''}(${imageCount} ${imageCount > 1 ? 'imagens' : 'imagem'})` : e.text,
         })),
     };
   }
@@ -141,10 +141,10 @@ export const chat = {
     return () => listeners.delete(fn);
   },
   running: (kind: AiKind) => !!state.convos[kind].runId,
-  /** Quem está trabalhando agora (para as linhas de atividade do conector). */
-  activeName(): string {
-    if (state.convos.codex.runId && !state.convos.claude.runId) return 'Codex';
-    return 'Claude';
+  /** Quem fez a proposta pelo chat do painel (undefined: Claude Desktop ou outra conversa). */
+  ownerOf: (proposalId: string): AiKind | undefined => owners.get(proposalId),
+  markProposal(proposalId: string, kind: AiKind): void {
+    owners.set(proposalId, kind);
   },
   async refresh(): Promise<void> {
     wire();
@@ -162,7 +162,6 @@ export const chat = {
     const t = text.trim();
     if ((!t && !images.length) || state.convos[kind].runId) return false;
     push(kind, { role: 'user', text: t, images: images.map((i) => i.url) });
-    state.lastKind = kind;
     return start(kind, t, images, true);
   },
   stop(kind: AiKind): void {
@@ -233,19 +232,23 @@ export async function readImage(file: Blob): Promise<ChatImage | null> {
     r.readAsDataURL(file);
   });
   const img = new Image();
-  await new Promise<void>((resolve, reject) => {
-    img.onload = () => resolve();
-    img.onerror = () => reject(new Error('imagem inválida'));
+  const ok = await new Promise<boolean>((resolve) => {
+    img.onload = () => resolve(true);
+    img.onerror = () => resolve(false);
     img.src = url;
-  }).catch(() => undefined);
+  });
+  // Arquivo quebrado ou de outro formato com nome de imagem: recusa aqui, não na IA.
+  if (!ok || !img.naturalWidth) return null;
   const MAX = 1600;
   const big = Math.max(img.naturalWidth, img.naturalHeight) > MAX || file.size > 3_500_000;
-  if (!big || !img.naturalWidth) return { mime: file.type, data: url.slice(url.indexOf(',') + 1), url };
+  if (!big) return { mime: file.type, data: url.slice(url.indexOf(',') + 1), url };
   const scale = Math.min(1, MAX / Math.max(img.naturalWidth, img.naturalHeight));
   const canvas = document.createElement('canvas');
   canvas.width = Math.round(img.naturalWidth * scale);
   canvas.height = Math.round(img.naturalHeight * scale);
   canvas.getContext('2d')!.drawImage(img, 0, 0, canvas.width, canvas.height);
-  const out = canvas.toDataURL('image/jpeg', 0.88);
-  return { mime: 'image/jpeg', data: out.slice(out.indexOf(',') + 1), url: out };
+  // JPEG não tem transparência (o fundo ficaria preto): PNG, WEBP e GIF viram WEBP, que tem.
+  const mime = file.type === 'image/jpeg' ? 'image/jpeg' : 'image/webp';
+  const out = canvas.toDataURL(mime, 0.88);
+  return { mime, data: out.slice(out.indexOf(',') + 1), url: out };
 }

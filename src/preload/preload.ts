@@ -20,8 +20,8 @@ const api = {
   connectClaude: (): Promise<{ results?: ConnectResult[]; error?: string; claudeRunning?: boolean | null }> => ipcRenderer.invoke('claude:connect'),
   copyClaudeConfig: (): Promise<boolean> => ipcRenderer.invoke('claude:copyConfig'),
   showItem: (p: string) => ipcRenderer.invoke('shell:showItem', p),
-  onBridgeRequest: (fn: (req: { id: number; method: string; params: unknown }) => void) => {
-    const h = (_e: unknown, req: { id: number; method: string; params: unknown }) => fn(req);
+  onBridgeRequest: (fn: (req: { id: number; method: string; params: unknown; client?: 'claude' | 'codex' }) => void) => {
+    const h = (_e: unknown, req: { id: number; method: string; params: unknown; client?: 'claude' | 'codex' }) => fn(req);
     ipcRenderer.on('bridge:request', h);
     return () => ipcRenderer.removeListener('bridge:request', h);
   },

@@ -34,7 +34,8 @@ export async function callEditor(method: string, params: unknown = {}, signal?: 
     const res = await fetch(`http://127.0.0.1:${info.port}/rpc`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${info.token}` },
-      body: JSON.stringify({ method, params }),
+      // Quem usa este servidor: o chat do painel marca (DIRETOR_CLIENT); o Claude Desktop não.
+      body: JSON.stringify({ method, params, client: process.env.DIRETOR_CLIENT || undefined }),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(callTimeoutMs(method, params))]) : AbortSignal.timeout(callTimeoutMs(method, params)),
     });
     const body = (await res.json()) as { result?: unknown; error?: string };

@@ -58,7 +58,12 @@ if (codex) out({ type: 'thread.started', thread_id: session });
 else out({ type: 'system', subtype: 'init', session_id: session, tools: [], mcp_servers: [{ name: 'diretor', status: 'connected' }] });
 
 if (/erro-login/.test(text)) {
-  finish(false, codex ? '401 Unauthorized: please run codex login' : 'Not logged in · Please run /login');
+  // Como os programas de verdade: o Claude Code manda o erro também como uma "resposta" sintética,
+  // e o Codex manda o mesmo erro duas vezes ("error" e "turn.failed"). O painel tem de mostrar um só.
+  const msg = codex ? '401 Unauthorized: please run codex login' : 'Not logged in · Please run /login';
+  if (codex) out({ type: 'error', message: msg });
+  else out({ type: 'assistant', message: { model: '<synthetic>', content: [{ type: 'text', text: msg }] }, error: 'authentication_failed', is_api_error_message: true, session_id: session });
+  finish(false, msg);
   process.exit(1);
 }
 if (/demorar/.test(text)) {

@@ -68,6 +68,7 @@ export function App() {
   }, [s.adjustMode]);
 
   useEffect(() => {
+    let dictatePending = false;
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement;
       const mod = e.ctrlKey || e.metaKey;
@@ -79,10 +80,11 @@ export function App() {
         setTimeout(() => void (key === 's' ? saveProject(e.shiftKey) : openProject()), 0);
         return;
       }
-      // Ctrl+D: falar com a IA (vale em qualquer lugar, até com o cursor num campo).
+      // Ctrl+D: falar com a IA (vale em qualquer lugar, até com o cursor num campo). O ditado abre
+      // quando o Ctrl é solto: com ele apertado, o Windows recebe Ctrl+Windows+H, que não abre nada.
       if (mod && key === 'd' && !e.shiftKey && !e.altKey) {
         e.preventDefault();
-        window.dispatchEvent(new Event('diretor:dictate'));
+        if (!e.repeat) dictatePending = true;
         return;
       }
       if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return;
@@ -93,8 +95,20 @@ export function App() {
       else if (e.key === 'ArrowRight') playback.seek(playback.get().time + 1 / session.view.settings.fps);
       else if (e.key === 'ArrowLeft') playback.seek(playback.get().time - 1 / session.view.settings.fps);
     };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (!dictatePending || (e.key !== 'Control' && e.key !== 'Meta')) return;
+      dictatePending = false;
+      window.dispatchEvent(new Event('diretor:dictate'));
+    };
+    const onBlur = () => (dictatePending = false);
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    };
   }, []);
 
   // Fechar/recarregar com mudanças não salvas ou exportando: o processo principal pergunta antes.

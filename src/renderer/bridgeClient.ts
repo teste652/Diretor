@@ -2,7 +2,8 @@ import { byteSize, handleBridge } from '../core/api';
 import { chat } from './chat';
 import { session } from './store';
 
-export const bridgeStats = { lastCallAt: 0, lastBytesOut: 0, totalBytesOut: 0, calls: 0 };
+/** lastDesktopCallAt: só as chamadas do Claude Desktop (as do chat do painel vêm marcadas). */
+export const bridgeStats = { lastCallAt: 0, lastDesktopCallAt: 0, lastBytesOut: 0, totalBytesOut: 0, calls: 0 };
 
 const LABEL: Record<string, string> = {
   status: 'conferiu o editor',
@@ -19,7 +20,7 @@ export function connectBridge(): () => void {
   // Chamadas em andamento: o Claude pode desistir de uma (botão parar, tempo esgotado).
   const inflight = new Map<number, AbortController>();
   const offCancel = api.onBridgeCancel((id) => inflight.get(id)?.abort());
-  const offRequest = api.onBridgeRequest(async ({ id, method, params }) => {
+  const offRequest = api.onBridgeRequest(async ({ id, method, params, client }) => {
     const ctrl = new AbortController();
     inflight.set(id, ctrl);
     let result: unknown;
@@ -34,10 +35,14 @@ export function connectBridge(): () => void {
     if (ctrl.signal.aborted) return;
     const out = byteSize(result);
     bridgeStats.lastCallAt = Date.now();
+    if (!client) bridgeStats.lastDesktopCallAt = Date.now();
+    // Quem fez cada proposta: o "Refazer" pede a ele, e só a ele.
+    const pid = (result as { id?: unknown } | null)?.id;
+    if (method === 'propose_edit' && client && typeof pid === 'string') chat.markProposal(pid, client);
     bridgeStats.lastBytesOut = out;
     bridgeStats.totalBytesOut += out;
     bridgeStats.calls++;
-    session.log('tool', `${chat.activeName()} ${LABEL[method] ?? method}`, { bytesOut: out, bytesIn: byteSize(params) });
+    session.log('tool', `${client === 'codex' ? 'Codex' : 'Claude'} ${LABEL[method] ?? method}`, { bytesOut: out, bytesIn: byteSize(params) });
     api.bridgeRespond(id, result);
   });
   return () => {
