@@ -4,6 +4,7 @@
 #   o instalador, e o mesmo roteiro no app instalado por ele.
 # - Na main: publica o instalador num link fixo, que sempre baixa a versão mais nova:
 #   https://github.com/<dono>/<repositório>/releases/download/teste/Diretor-Setup.exe
+#   Junto vai o latest.yml, onde o Diretor instalado vê que há versão nova e se atualiza sozinho.
 name: CI
 
 on:
@@ -26,6 +27,8 @@ jobs:
     timeout-minutes: 45
     env:
       VERSAO: 0.1.${{ github.run_number }}
+      # Nos testes, o Diretor não procura versão nova (o teste da atualização liga de novo).
+      DIRETOR_SEM_ATUALIZAR: '1'
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -66,6 +69,10 @@ jobs:
       - name: Roteiro de ponta a ponta no app instalado
         run: node scripts/e2e.mjs
 
+      # Uma versão nova anunciada por um servidor local: baixa, fecha, instala e abre de novo.
+      - name: Atualização automática no app instalado
+        run: node scripts/update-check.mjs
+
       # Atualizar com o Claude Desktop aberto (o servidor do Claude roda do Diretor.exe instalado).
       - name: Instalar por cima com o servidor do Claude aberto
         run: node scripts/installer-check.mjs atualizar
@@ -90,7 +97,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: Diretor-Setup
-          path: release/Diretor-Setup.exe
+          path: |
+            release/Diretor-Setup.exe
+            release/latest.yml
           if-no-files-found: error
           retention-days: 1
 
@@ -142,12 +151,14 @@ jobs:
           3. Abra o Claude Desktop de novo. O conector "diretor" aparece nele.
 
           **Atualizar**
-          1. Salve o seu projeto e feche o Diretor. Se esquecer, o instalador pede.
-          2. Baixe de novo por este mesmo link e instale por cima. Seus projetos continuam onde você salvou.
-          3. Se o Claude Desktop estava aberto, feche ele por completo e abra de novo.
+          O Diretor se atualiza sozinho: ao abrir (e a cada quatro horas) ele procura versão nova, baixa e pergunta se pode reiniciar. Se escolher "Depois", ela é instalada quando você fechar o Diretor. Se o Claude Desktop estava conectado, depois feche ele por completo e abra de novo.
+
+          Para atualizar à mão (ou se a sua versão é de antes da atualização automática): salve o projeto, feche o Diretor, baixe de novo por este mesmo link e instale por cima. Seus projetos continuam onde você salvou.
           EOF
           if ! gh release view "$TAG" > /dev/null 2>&1; then
+            # O latest.yml (que anuncia a versão nova aos apps instalados) só depois do instalador.
             gh release create "$TAG" "instalador/$NOME" --target "$GITHUB_SHA" --title "$TITLE" --notes-file notas.md --prerelease
+            gh release upload "$TAG" instalador/latest.yml
           else
             # Sobe com outro nome e só então troca: o link não fica sem arquivo durante o upload,
             # e se o upload falhar a versão anterior continua lá.
@@ -160,6 +171,8 @@ jobs:
             [ -n "$NOVO" ] || { echo "::error::O upload terminou, mas o arquivo novo não aparece na versão de teste. O link continua com a versão anterior."; exit 1; }
             for id in $(asset_ids "$NOME"); do gh api -X DELETE "repos/$GH_REPO/releases/assets/$id"; done
             gh api -X PATCH "repos/$GH_REPO/releases/assets/$NOVO" -f name="$NOME" > /dev/null
+            # Só com o instalador novo no lugar os apps instalados ficam sabendo da versão nova.
+            gh release upload "$TAG" instalador/latest.yml --clobber
             gh release edit "$TAG" --title "$TITLE" --notes-file notas.md --prerelease
           fi
           echo "Publicado: https://github.com/$GH_REPO/releases/download/$TAG/$NOME"

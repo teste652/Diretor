@@ -10,6 +10,7 @@ import { bridgeFilePath } from '../shared/paths';
 import { startBridge } from './bridge';
 import { claudeConfigDirs, claudeDesktopRunning, connectClaude, type McpEntry, readClaudeConfigs, unpackedPath } from './claudeDesktop';
 import { type MoveResult, moveIntoPlace } from './replace';
+import { iniciarAtualizacao } from './updater';
 
 app.setName('Diretor');
 
@@ -578,6 +579,7 @@ app.whenReady().then(async () => {
   if (!app.hasSingleInstanceLock()) return;
   protocol.handle('media', serveMedia);
   createWindow();
+  iniciarAtualizacao(() => win);
   try {
     const b = await startBridge(bridgeFilePath(), askRenderer);
     closeBridge = b.close;
