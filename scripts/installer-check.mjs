@@ -40,6 +40,17 @@ function startBystander() {
   return state;
 }
 const bystanderName = 'um Diretor.exe de outra pasta continua aberto (só fecha o que roda da pasta instalada)';
+/** O outro Diretor.exe ainda está aberto? Espera o aviso de saída chegar (o spawnSync segura tudo enquanto roda). */
+async function bystanderAlive(state) {
+  await wait(500);
+  if (state.exited) return false;
+  try {
+    process.kill(state.proc.pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // Quando o outro Diretor.exe foi fechado, o instalador não usou o PowerShell (fechou pelo nome do
 // programa). Mostra o que o PowerShell de 32 bits, o que o instalador usa, responde aqui.
@@ -93,19 +104,22 @@ if (mode === 'atualizar') {
   for (let i = 0; i < 20 && !exited; i++) await wait(250);
   check('o instalador fechou o servidor do Claude', exited);
   check('a versão nova ficou no lugar da antiga', existsSync(app) && existsSync(server) && !existsSync(mark));
-  check(bystanderName, !bystander.exited);
-  if (bystander.exited) powershellReport();
+  const alive = await bystanderAlive(bystander);
+  check(bystanderName, alive);
+  if (!alive) powershellReport();
   if (!exited) srv.kill();
   bystander.proc.kill();
 } else {
   // Uma configuração do Claude Desktop no perfil de verdade (esta máquina é do CI, sem Claude):
   // a da instalação clássica com o Diretor desta instalação, outro servidor e preferências,
   // e a do Claude Desktop 4 com um Diretor de outra instalação, que tem de ficar.
+  // No fim, as duas pastas são apagadas inteiras: o teste não roda se alguma já existe.
   const classic = join(process.env.APPDATA, 'Claude');
-  const moved = join(process.env.LOCALAPPDATA, 'Claude-Data', 'claude_pzs8sxrjxfjjc');
-  for (const d of [classic, moved]) {
-    if (existsSync(join(d, CONFIG))) {
-      console.error(`✗ Já existe uma configuração do Claude Desktop em ${d}. Este teste só roda numa máquina sem ele (CI).`);
+  const movedRoot = join(process.env.LOCALAPPDATA, 'Claude-Data');
+  const moved = join(movedRoot, 'claude_pzs8sxrjxfjjc');
+  for (const d of [classic, movedRoot]) {
+    if (existsSync(d)) {
+      console.error(`✗ ${d} já existe (é do Claude Desktop). Este teste só roda numa máquina sem ele (CI).`);
       process.exit(2);
     }
   }
@@ -113,34 +127,48 @@ if (mode === 'atualizar') {
     console.error(`✗ A pasta instalada tem espaço (${installDir}); o parâmetro _?= do desinstalador não aceita aspas.`);
     process.exit(2);
   }
+  // O desinstalador só pede para fechar o Claude Desktop quando o Diretor desta instalação está
+  // na configuração dele: pergunta isso ao desconectar.cjs, que com --verificar não muda nada.
+  const verify = () =>
+    spawnSync(app, [join(installDir, 'resources', 'app.asar.unpacked', 'dist', 'mcp', 'desconectar.cjs'), '--verificar'], {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+  const before = verify();
   const mine = { command: app, args: [server], env: { ELECTRON_RUN_AS_NODE: '1' } };
+  const mineText = JSON.stringify({ preferences: { ci: true }, mcpServers: { outro: { command: 'outro.exe', args: [] }, diretor: mine } }, null, 2).replace(/\n/g, '\r\n');
   mkdirSync(classic, { recursive: true });
-  writeFileSync(
-    join(classic, CONFIG),
-    JSON.stringify({ preferences: { ci: true }, mcpServers: { outro: { command: 'outro.exe', args: [] }, diretor: mine } }, null, 2).replace(/\n/g, '\r\n'),
-  );
+  writeFileSync(join(classic, CONFIG), mineText);
   const other = JSON.stringify({ mcpServers: { diretor: { command: 'node', args: ['C:\\dev\\diretor\\dist\\mcp\\server.cjs'] } } });
   mkdirSync(moved, { recursive: true });
   writeFileSync(join(moved, CONFIG), other);
+  const after = verify();
+  check(
+    'o desinstalador sabe quando o Diretor desta instalação está na configuração do Claude Desktop, sem mexer nela',
+    before.status === 0 && after.status === 10 && readFileSync(join(classic, CONFIG), 'utf8') === mineText && readFileSync(join(moved, CONFIG), 'utf8') === other,
+    `sem a entrada: código ${before.status}; com ela: código ${after.status}${after.stdout?.trim() ? `\n${after.stdout.trim()}` : ''}${after.stderr?.trim() ? `\n${after.stderr.trim()}` : ''}`,
+  );
 
   // _?= faz o desinstalador rodar daqui e esperar até o fim (sem ele, ele se copia e volta na hora).
   const bystander = startBystander();
   await wait(500);
   const r = spawnSync(join(installDir, 'Uninstall Diretor.exe'), ['/S', `_?=${installDir}`], { stdio: 'inherit', timeout: 300_000 });
   check('desinstalar sem perguntas', r.status === 0, `código ${r.status}${r.error ? `, ${r.error.message}` : ''}`);
-  check(bystanderName, !bystander.exited);
-  if (bystander.exited) powershellReport();
+  const alive = await bystanderAlive(bystander);
+  check(bystanderName, alive);
+  if (!alive) powershellReport();
   bystander.proc.kill();
   check('os arquivos do Diretor saíram', !existsSync(app) && !existsSync(server));
-  const after = JSON.parse(readFileSync(join(classic, CONFIG), 'utf8'));
+  const left = JSON.parse(readFileSync(join(classic, CONFIG), 'utf8'));
   check(
     'o Diretor saiu da configuração do Claude Desktop, e o resto ficou',
-    after.mcpServers?.diretor === undefined && after.mcpServers?.outro?.command === 'outro.exe' && after.preferences?.ci === true,
-    JSON.stringify(after),
+    left.mcpServers?.diretor === undefined && left.mcpServers?.outro?.command === 'outro.exe' && left.preferences?.ci === true,
+    JSON.stringify(left),
   );
   check('o Diretor de outra instalação continua na configuração', readFileSync(join(moved, CONFIG), 'utf8') === other);
   rmSync(classic, { recursive: true, force: true });
-  rmSync(join(process.env.LOCALAPPDATA, 'Claude-Data'), { recursive: true, force: true });
+  rmSync(movedRoot, { recursive: true, force: true });
 }
 
 const failed = results.filter((ok) => !ok).length;

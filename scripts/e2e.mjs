@@ -99,7 +99,9 @@ for (const d of claudeLeft) {
 }
 
 // Perfil próprio do Electron: não esbarra num Diretor de verdade aberto na mesma máquina.
-const appEnv = { ...process.env, ...profileEnv, DIRETOR_BRIDGE_FILE: bridgeFile, DIRETOR_USER_DATA: join(out, 'perfil-electron') };
+// Sem CLAUDE_USER_DATA_DIR: ele mandaria o Conectar gravar na pasta de um Claude Desktop de verdade.
+const appEnv = Object.fromEntries(Object.entries({ ...process.env, ...profileEnv }).filter(([k]) => k.toUpperCase() !== 'CLAUDE_USER_DATA_DIR'));
+Object.assign(appEnv, { DIRETOR_BRIDGE_FILE: bridgeFile, DIRETOR_USER_DATA: join(out, 'perfil-electron') });
 if (installed) delete appEnv.DIRETOR_FFMPEG; // o app instalado tem de usar o ffmpeg que vem com ele
 const app = await _electron.launch({
   executablePath: installed ?? electronPath,
@@ -136,7 +138,8 @@ if (claudeDirs.length) {
   const steps = (await page.textContent('[data-testid=claude-setup]')) ?? '';
   await shot('0-claude-passos');
   await page.click('[data-testid=claude-connect]');
-  await page.waitForFunction(() => /Pronto/.test(document.querySelector('[data-testid=claude-setup-msg]')?.textContent ?? ''), null, { timeout: 10_000 });
+  // O clique também confere se o Claude Desktop está aberto (no Windows, pelo PowerShell).
+  await page.waitForFunction(() => /Pronto/.test(document.querySelector('[data-testid=claude-setup-msg]')?.textContent ?? ''), null, { timeout: 20_000 });
   await shot('0-claude-conectado');
   const cfgs = claudeDirs.map((d) => JSON.parse(readFileSync(join(d, 'claude_desktop_config.json'), 'utf8')));
   const entry = cfgs[0].mcpServers?.diretor;

@@ -13,8 +13,10 @@ const api = {
     ipcRenderer.invoke('export:finish', jobId, abandon),
   exportCancel: (jobId: number) => ipcRenderer.invoke('export:cancel', jobId),
   appInfo: (): Promise<{ version: string; packaged: boolean; ffmpeg: string; mcp: McpEntry; bridgeFile: string; platform: string }> => ipcRenderer.invoke('app:info'),
-  claudeStatus: (): Promise<{ configs: ConfigState[]; serverFound: boolean; claudeRunning: boolean | null }> => ipcRenderer.invoke('claude:status'),
-  connectClaude: (): Promise<{ results?: ConnectResult[]; error?: string }> => ipcRenderer.invoke('claude:connect'),
+  /** fresh: conferir agora se o Claude Desktop está aberto, sem usar a resposta dos últimos segundos. */
+  claudeStatus: (fresh?: boolean): Promise<{ configs: ConfigState[]; serverFound: boolean; claudeRunning: boolean | null }> =>
+    ipcRenderer.invoke('claude:status', fresh === true),
+  connectClaude: (): Promise<{ results?: ConnectResult[]; error?: string; claudeRunning?: boolean | null }> => ipcRenderer.invoke('claude:connect'),
   copyClaudeConfig: (): Promise<boolean> => ipcRenderer.invoke('claude:copyConfig'),
   showItem: (p: string) => ipcRenderer.invoke('shell:showItem', p),
   onBridgeRequest: (fn: (req: { id: number; method: string; params: unknown }) => void) => {

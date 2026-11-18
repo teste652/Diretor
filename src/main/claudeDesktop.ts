@@ -1,6 +1,7 @@
 // "Conectar ao Claude Desktop": grava o servidor MCP "diretor" na configuração do
 // Claude Desktop (claude_desktop_config.json) sem mexer no resto do arquivo.
 
+import { execFile } from 'node:child_process';
 import { constants, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { copyFile, rename as fsRename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -316,12 +317,13 @@ function sameCommand(a: unknown, b: string, platform: NodeJS.Platform): boolean 
 /**
  * Tira o servidor "diretor" da configuração, mas só quando ele executa `command`
  * (esta instalação). Usado ao desinstalar, para o Claude Desktop não ficar tentando
- * abrir um programa que não existe mais.
+ * abrir um programa que não existe mais. Com `dryRun`, só diz o que faria ("removed":
+ * tiraria), sem gravar nada.
  */
 export async function disconnectClaude(
   dirs: string[],
   command: string,
-  opts: { platform?: NodeJS.Platform; rename?: Rename } = {},
+  opts: { platform?: NodeJS.Platform; rename?: Rename; dryRun?: boolean } = {},
 ): Promise<DisconnectResult[]> {
   const platform = opts.platform ?? process.platform;
   const rename = opts.rename ?? fsRename;
@@ -345,13 +347,43 @@ export async function disconnectClaude(
     }
     const rest = Object.fromEntries(Object.entries(servers).filter(([k]) => k !== SERVER_NAME));
     try {
-      await writeConfig(file, format({ ...parsed.json, mcpServers: rest }, parsed.raw), rename);
+      if (!opts.dryRun) await writeConfig(file, format({ ...parsed.json, mcpServers: rest }, parsed.raw), rename);
       results.push({ file, state: 'removed' });
     } catch (e) {
       results.push({ file, state: 'error', error: (e as Error).message });
     }
   }
   return results;
+}
+
+/**
+ * O Claude Desktop aberto, no Windows: o do pacote da Microsoft Store (WindowsApps) ou o do
+ * instalador clássico (AnthropicClaude). O Claude Code também se chama claude.exe; por isso
+ * olha a pasta de onde ele roda. Conta só o processo principal: os auxiliares do Electron
+ * (--type=renderer, gpu-process, crashpad-handler…) podem ficar mais um pouco depois de sair.
+ * O desinstalador faz a mesma conta (DIRETOR_PS_CLAUDE, em build/installer.nsh).
+ */
+export const CLAUDE_RUNNING_PS =
+  "@(Get-CimInstance Win32_Process -Filter 'Name=''claude.exe''' | Where-Object { $_.ExecutablePath -match 'WindowsApps|AnthropicClaude' -and $_.CommandLine -notmatch '--type=' }).Count";
+
+/**
+ * O Claude Desktop está aberto? Aberto, ele pode regravar a configuração e desfazer o
+ * Conectar, e só lê a configuração ao abrir. null quando não dá para saber.
+ */
+export function claudeDesktopRunning(platform: NodeJS.Platform = process.platform): Promise<boolean | null> {
+  return new Promise((done) => {
+    if (platform === 'win32') {
+      // Aberto de um terminal do PowerShell 7, o Diretor herda uma lista de módulos que o Windows PowerShell não carrega.
+      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toLowerCase() !== 'psmodulepath'));
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', CLAUDE_RUNNING_PS], { env, timeout: 8000, windowsHide: true }, (err, out) => {
+        const n = Number(String(out).trim());
+        done(err || String(out).trim() === '' || !Number.isFinite(n) ? null : n > 0);
+      });
+    } else if (platform === 'darwin') {
+      // Só o app ("Claude"), não os auxiliares ("Claude Helper…").
+      execFile('pgrep', ['-x', 'Claude'], { timeout: 4000 }, (err) => done(!err ? true : err.code === 1 ? false : null));
+    } else done(null);
+  });
 }
 
 /** O servidor MCP vem dentro do app; no instalador ele fica fora do app.asar para poder ser executado. */

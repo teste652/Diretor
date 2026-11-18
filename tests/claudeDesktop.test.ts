@@ -1,14 +1,17 @@
 // Botão "Conectar ao Claude Desktop": grava o servidor "diretor" na configuração
 // do Claude Desktop sem estragar o resto dela (outros servidores, preferências).
-import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
+import { copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   BACKUP_NAME,
+  CLAUDE_RUNNING_PS,
   CONFIG_NAME,
   claudeConfigCandidates,
   claudeConfigDirs,
+  claudeDesktopRunning,
   connectClaude,
   disconnectClaude,
   readClaudeConfigs,
@@ -373,6 +376,65 @@ describe('desconectar (ao desinstalar)', () => {
     expect(readFileSync(join(dirs[0], CONFIG_NAME), 'utf8')).toBe('{"mcpServers":{"outro":{"command":"x"}}}');
     expect(existsSync(join(dirs[1], CONFIG_NAME))).toBe(false);
   });
+
+  it('só verificar (o desinstalador, antes de pedir para fechar o Claude): diz o que tiraria e não grava nada', async () => {
+    const mine = JSON.stringify({ mcpServers: { outro: { command: 'x' }, diretor: ENTRY } });
+    const other = JSON.stringify({ mcpServers: { diretor: { command: 'node', args: ['C:\\dev\\server.cjs'] } } });
+    const dirs = [dirWith(mine), dirWith(other), dirWith()];
+    const rs = await disconnectClaude(dirs, ENTRY.command, { platform: 'win32', dryRun: true });
+    expect(rs.map((r) => r.state)).toEqual(['removed', 'kept', 'absent']);
+    expect(readFileSync(join(dirs[0], CONFIG_NAME), 'utf8')).toBe(mine);
+    expect(readdirSync(dirs[0])).toEqual([CONFIG_NAME]);
+  });
+});
+
+// O app e o desinstalador só contam o Claude Desktop (não o Claude Code, que também se chama
+// claude.exe) e só o processo principal (não os auxiliares, que podem ficar depois de sair).
+describe('Claude Desktop aberto', () => {
+  /** O processo principal e o desinstalador fazem a mesma conta. */
+  const nsisPs = () => {
+    const m = /^!define DIRETOR_PS_CLAUDE "(.*)"$/m.exec(readFileSync(join(__dirname, '..', 'build', 'installer.nsh'), 'utf8'));
+    return (m?.[1] ?? '').replace(/\$\$/g, '$');
+  };
+
+  it('o app e o desinstalador olham a mesma pasta e deixam os auxiliares de fora', () => {
+    for (const ps of [CLAUDE_RUNNING_PS, nsisPs()]) {
+      expect(ps).toContain("$_.ExecutablePath -match 'WindowsApps|AnthropicClaude'");
+      expect(ps).toContain("$_.CommandLine -notmatch '--type='");
+    }
+  });
+
+  // Processos de mentira com o nome claude.exe (o próprio Node, copiado), cada um numa pasta.
+  it.runIf(process.platform === 'win32')(
+    'no Windows: o do instalador clássico conta; um auxiliar dele e o Claude Code não',
+    async () => {
+      const home = scratch();
+      const fake = (dir: string, extra: string[] = []) => {
+        mkdirSync(dir, { recursive: true });
+        const exe = join(dir, 'claude.exe');
+        if (!existsSync(exe)) copyFileSync(process.execPath, exe);
+        return spawn(exe, ['-e', 'setTimeout(() => {}, 120000)', ...(extra.length ? ['--', ...extra] : [])], { stdio: 'ignore' });
+      };
+      const started: ChildProcess[] = [];
+      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toLowerCase() !== 'psmodulepath'));
+      const uninstallerSays = () => spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', nsisPs()], { env, timeout: 60_000 }).status;
+      const settle = () => new Promise((r) => setTimeout(r, 1000));
+      try {
+        started.push(fake(join(home, '.local', 'bin')));
+        started.push(fake(join(home, 'AnthropicClaude', 'app-0.14.10'), ['--type=renderer']));
+        await settle();
+        expect(await claudeDesktopRunning()).toBe(false);
+        expect(uninstallerSays()).toBe(0);
+        started.push(fake(join(home, 'AnthropicClaude', 'app-0.14.10')));
+        await settle();
+        expect(await claudeDesktopRunning()).toBe(true);
+        expect(uninstallerSays()).toBe(10);
+      } finally {
+        for (const p of started) p.kill();
+      }
+    },
+    60_000,
+  );
 });
 
 describe('situação da conexão', () => {
