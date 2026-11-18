@@ -9,3 +9,4 @@ const withNode = { mcpServers: { diretor: { command: 'node', args: [server] } } 
 const withElectron = { mcpServers: { diretor: { command: electron, args: [server], env: { ELECTRON_RUN_AS_NODE: '1' } } } };
 console.log('Opção A (com o Node.js instalado):\n' + JSON.stringify(withNode, null, 2));
 console.log('\nOpção B (sem Node, usando o Electron do projeto):\n' + JSON.stringify(withElectron, null, 2));
+if (!existsSync(electron)) console.warn('\nPara a opção B, rode "npm start" uma vez antes: ele baixa o Electron.');
