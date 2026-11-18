@@ -2,12 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { createProject, parseProject } from '../core/model';
 import { connectBridge } from './bridgeClient';
 import { ChatPanel } from './ChatPanel';
-import { cancelExport, exportProject } from './exporter';
+import { cancelExport, exportProject, isExporting } from './exporter';
 import { LeftPanel, importPaths } from './MediaPanel';
 import { Preview, previewSettled, togglePlay } from './Preview';
 import { playback, session, useSession } from './store';
-import { addCaptionAtPlayhead, deleteSelection, Timeline } from './Timeline';
-import type { Op } from '../core/operations';
+import { addCaptionAtPlayhead, deleteSelectedKeyframeOrClip, Timeline } from './Timeline';
 import { Icon, TextField, ToastHost, run, showToast } from './ui';
 
 export async function saveProject(saveAs = false, path?: string): Promise<string | null> {
@@ -92,10 +91,10 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  // Fechar/recarregar com mudanças não salvas: o processo principal pergunta antes.
+  // Fechar/recarregar com mudanças não salvas ou exportando: o processo principal pergunta antes.
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (!session.dirty) return;
+      if (!session.dirty && !isExporting()) return;
       e.preventDefault();
       e.returnValue = '';
     };
@@ -200,23 +199,6 @@ export function App() {
       )}
     </div>
   );
-}
-
-/** Delete: com um ponto de animação selecionado, apaga os pontos daquele instante; senão, o clipe. */
-function deleteSelectedKeyframeOrClip() {
-  const sel = session.selection.keyframe;
-  if (sel) {
-    const c = session.view.clips.find((x) => x.id === sel.clipId);
-    const k = c?.props[sel.prop]?.keyframes.find((x) => x.id === sel.keyframeId);
-    if (c && k) {
-      const ops: Op[] = [];
-      for (const [prop, ap] of Object.entries(c.props))
-        for (const x of ap.keyframes) if (Math.abs(x.t - k.t) < 1e-3) ops.push({ op: 'removeKeyframe', clipId: c.id, prop, keyframeId: x.id });
-      if (run(ops, 'Remover ponto')) session.setSelection({ clipIds: [c.id] });
-      return;
-    }
-  }
-  deleteSelection();
 }
 
 // Ganchos para o teste de ponta a ponta (scripts/e2e.mjs).

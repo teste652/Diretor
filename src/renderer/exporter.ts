@@ -10,14 +10,23 @@ export interface ExportProgress {
 
 type ExportResult = { ok: boolean; outPath?: string; error?: string; cancelled?: boolean };
 
-/** Exportação em andamento (para o botão Cancelar agir na hora, mesmo no meio de um quadro). */
-let current: { jobId: number; signal: { cancelled: boolean } } | null = null;
+/**
+ * Exportação em andamento. O botão Cancelar age em qualquer fase: conferência dos
+ * vídeos, quadros e finalização. `jobId` só existe depois de escolhido o arquivo.
+ */
+let current: { jobId: number | null; signal: { cancelled: boolean }; abort: AbortController } | null = null;
+
+/** Há um ffmpeg gravando (fechar a janela agora cancelaria a exportação). */
+export function isExporting(): boolean {
+  return current?.jobId != null;
+}
 
 export async function cancelExport(): Promise<void> {
   const job = current;
   if (!job) return;
   job.signal.cancelled = true;
-  await window.diretor?.exportCancel(job.jobId);
+  job.abort.abort();
+  if (job.jobId != null) await window.diretor?.exportCancel(job.jobId);
 }
 
 /**
@@ -31,17 +40,26 @@ export async function exportProject(
   const api = window.diretor;
   if (!api) return { ok: false, error: 'Exportação disponível apenas no aplicativo.' };
   if (project.clips.length === 0) return { ok: false, error: 'O projeto está vazio.' };
+  if (current) return { ok: false, error: 'Já há uma exportação em andamento.' };
   const signal = opts.signal ?? { cancelled: false };
+  const me = { jobId: null as number | null, signal, abort: new AbortController() };
+  current = me;
+  const cancelled: ExportResult = { ok: false, cancelled: true };
   const pool = new VideoPool(() => undefined, false);
   try {
-    // Antes de pedir o arquivo de saída: todos os vídeos abrem?
-    const bad = await preflight(pool, project);
+    // Antes de pedir o arquivo de saída: todos os vídeos abrem? (Cancelar aqui não abre a janela de salvar.)
+    const bad = await preflight(pool, project, me.abort.signal);
+    if (signal.cancelled) return cancelled;
     if (bad.length) return { ok: false, error: `Não consegui abrir estes vídeos:\n${bad.join('\n')}` };
     const started = await api.exportStart(project, opts.outPath);
-    if (!started) return { ok: false, cancelled: true };
+    if (!started) return cancelled;
     if (started.error) return { ok: false, error: started.error };
     const { jobId, outPath } = started as { jobId: number; outPath: string };
-    current = { jobId, signal };
+    me.jobId = jobId;
+    if (signal.cancelled) {
+      await api.exportCancel(jobId);
+      return cancelled;
+    }
     const { width: W, height: H, fps } = project.settings;
     const canvas = new OffscreenCanvas(W, H);
     const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
@@ -49,9 +67,10 @@ export async function exportProject(
     const stop = async (error: string): Promise<ExportResult> => {
       if (signal.cancelled) {
         await api.exportCancel(jobId);
-        return { ok: false, cancelled: true };
+        return cancelled;
       }
-      const res = await api.exportFinish(jobId);
+      // Falhou no meio: para o ffmpeg sem gravar nada no destino.
+      const res = await api.exportFinish(jobId, true);
       return { ok: false, error: res?.error ? `${error}\n${res.error}` : error };
     };
     try {
@@ -71,14 +90,18 @@ export async function exportProject(
         if (!accepted) return await stop('O ffmpeg parou antes do fim da exportação.');
         opts.onProgress?.({ frame: f + 1, total });
       }
+      if (signal.cancelled) return await stop('Cancelado.');
       const res = await api.exportFinish(jobId);
-      return res.ok ? { ok: true, outPath } : { ok: false, error: res.error };
+      if (res.ok) return { ok: true, outPath: res.outPath ?? outPath };
+      // Cancelar enquanto o ffmpeg finaliza é cancelamento, não "Falha na exportação".
+      if (res.cancelled || signal.cancelled) return cancelled;
+      return { ok: false, error: res.error };
     } catch (e) {
       await api.exportCancel(jobId);
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   } finally {
-    current = null;
+    if (current === me) current = null;
     pool.dispose();
   }
 }

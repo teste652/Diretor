@@ -7,7 +7,8 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { dirname } from 'node:path';
 
-export type BridgeHandler = (method: string, params: unknown) => Promise<unknown>;
+/** `signal` é abortado se o servidor MCP desistir da chamada (cancelada pelo Claude ou tempo esgotado). */
+export type BridgeHandler = (method: string, params: unknown, signal: AbortSignal) => Promise<unknown>;
 
 export interface BridgeInfo {
   port: number;
@@ -26,6 +27,11 @@ export async function startBridge(infoFile: string, handler: BridgeHandler): Pro
       res.writeHead(401).end();
       return;
     }
+    // Conexão fechada antes da resposta = quem chamou desistiu: avisa o editor para parar de esperar.
+    const gone = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) gone.abort();
+    });
     let body = '';
     req.setEncoding('utf8');
     req.on('data', (c) => {
@@ -35,9 +41,11 @@ export async function startBridge(infoFile: string, handler: BridgeHandler): Pro
     req.on('end', async () => {
       try {
         const { method, params } = JSON.parse(body || '{}');
-        const result = await handler(String(method), params ?? {});
+        const result = await handler(String(method), params ?? {}, gone.signal);
+        if (gone.signal.aborted) return;
         res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ result }));
       } catch (e) {
+        if (gone.signal.aborted) return;
         res.writeHead(500, { 'content-type': 'application/json' }).end(JSON.stringify({ error: e instanceof Error ? e.message : String(e) }));
       }
     });

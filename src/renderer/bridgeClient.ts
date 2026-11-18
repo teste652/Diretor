@@ -15,13 +15,22 @@ const LABEL: Record<string, string> = {
 export function connectBridge(): () => void {
   const api = window.diretor;
   if (!api) return () => undefined;
-  return api.onBridgeRequest(async ({ id, method, params }) => {
+  // Chamadas em andamento: o Claude pode desistir de uma (botão parar, tempo esgotado).
+  const inflight = new Map<number, AbortController>();
+  const offCancel = api.onBridgeCancel((id) => inflight.get(id)?.abort());
+  const offRequest = api.onBridgeRequest(async ({ id, method, params }) => {
+    const ctrl = new AbortController();
+    inflight.set(id, ctrl);
     let result: unknown;
     try {
-      result = await handleBridge(session, method, params);
+      result = await handleBridge(session, method, params, ctrl.signal);
     } catch (e) {
       result = { error: 'internal', message: e instanceof Error ? e.message : String(e) };
+    } finally {
+      inflight.delete(id);
     }
+    // Ninguém espera mais esta resposta.
+    if (ctrl.signal.aborted) return;
     const out = byteSize(result);
     bridgeStats.lastCallAt = Date.now();
     bridgeStats.lastBytesOut = out;
@@ -30,4 +39,9 @@ export function connectBridge(): () => void {
     session.log('tool', LABEL[method] ?? method, { bytesOut: out, bytesIn: byteSize(params) });
     api.bridgeRespond(id, result);
   });
+  return () => {
+    offRequest();
+    offCancel();
+    for (const c of inflight.values()) c.abort();
+  };
 }

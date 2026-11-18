@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { type Clip, type Project, createProject, findClip, parseProject } from '../src/core/model';
 import { type Op, OpValidationError, applyOps, clampTrimDelta } from '../src/core/operations';
-import { evalClipProp, keyframeGroups } from '../src/core/properties';
+import { evalClipProp, keyframeAt, keyframeGroups } from '../src/core/properties';
 
 function base(): Project {
   return applyOps(createProject(), [
@@ -127,6 +127,18 @@ describe('validação estrita', () => {
     expect(fails(p, [{ op: 'updateClip', clipId: 'v1', set: { volume: 1.5 } }])).toMatch(/volume/);
   });
 
+  it('campo com nome errado é recusado em qualquer operação, não ignorado', () => {
+    const p = base();
+    expect(fails(p, [{ op: 'addClip', clip: { kind: 'caption', text: 'Olá', start: 1, end: 4.5 } as never }])).toMatch(/Campo desconhecido em clip: end/);
+    expect(fails(p, [{ op: 'addClip', clip: { kind: 'title', text: 'x', fontSize: 120 } as never }])).toMatch(/fontSize/);
+    expect(fails(p, [{ op: 'setKeyframe', clipId: 't1', prop: 'x', t: 0, v: 1, easing: 'linear' } as never])).toMatch(/Campo desconhecido em setKeyframe: easing/);
+    expect(fails(p, [{ op: 'animate', clipId: 't1', preset: 'fadeIn', length: 2 } as never])).toMatch(/length/);
+    expect(fails(p, [{ op: 'updateClip', clipId: 't1', set: { start: 1 }, duraton: 3 } as never])).toMatch(/duraton/);
+    expect(fails(p, [{ op: 'trimClip', clipId: 'v1', edge: 'end', delta: -1, ripple: 'no' } as never])).toMatch(/ripple/);
+    // o que a interface manda continua valendo (inclusive campos opcionais ausentes)
+    expect(() => run(p, [{ op: 'setKeyframe', clipId: 't1', prop: 'x', t: 0, v: 1, keyframeId: undefined }])).not.toThrow();
+  });
+
   it('valores e propriedades obrigatórios', () => {
     const p = base();
     expect(fails(p, [{ op: 'setKeyframe', clipId: 't1', prop: 'x', t: 0 } as unknown as Op])).toMatch(/v deve/);
@@ -165,6 +177,29 @@ describe('pontos de animação', () => {
     p = run(p, [{ op: 'setKeyframe', clipId: 't1', prop: 'x', t: 2, v: 10, group: 'g', keyframeId: 'c' }]);
     p = run(p, [{ op: 'setKeyframe', clipId: 't1', prop: 'x', t: 2, v: 10, keyframeId: 'a' }]);
     expect(clip(p, 't1').props.x.keyframes.map((k) => k.id).sort()).toEqual(['a', 'c']);
+  });
+
+  it('com dois grupos no mesmo instante, o painel edita o ponto que a prévia mostra', () => {
+    const p = run(base(), [
+      { op: 'animate', clipId: 'c1', preset: 'fadeIn' },
+      { op: 'animate', clipId: 'c1', preset: 'fadeOut' },
+    ]);
+    const ap = clip(p, 'c1').props.opacity;
+    const shared = ap.keyframes.find((k) => ap.keyframes.some((o) => o !== k && Math.abs(o.t - k.t) < 1e-3))!;
+    const same = ap.keyframes.filter((k) => Math.abs(k.t - shared.t) < 1e-3);
+    expect(same).toHaveLength(2);
+    const shown = keyframeAt(ap, shared.t)!;
+    const edit = (id: string) => run(p, [{ op: 'setKeyframe', clipId: 'c1', prop: 'opacity', t: shared.t, v: 0.3, keyframeId: id }]);
+    expect(at(edit(shown.id), 'c1', 'opacity', shared.t)).toBeCloseTo(0.3, 5);
+    // O primeiro ponto do instante (o que o painel pegava antes) não muda o valor mostrado.
+    const hidden = same.find((k) => k.id !== shown.id)!;
+    expect(at(edit(hidden.id), 'c1', 'opacity', shared.t)).toBeCloseTo(1, 5);
+
+    const q = run(base(), [
+      { op: 'animate', clipId: 't1', preset: 'slowZoom' },
+      { op: 'animate', clipId: 't1', preset: 'popIn' },
+    ]);
+    expect(keyframeAt(clip(q, 't1').props.scale, 0)!.v).toBeCloseTo(at(q, 't1', 'scale', 0), 5);
   });
 
   it('remover o último ponto feito à mão mantém o valor que ele mostrava', () => {
@@ -224,6 +259,46 @@ describe('aparar', () => {
       [3, 0, null],
       [3.5, 50, null],
     ]);
+  });
+
+  it('aparar muito não deixa o título invisível nem perde as animações (entrada + saída)', () => {
+    let p = run(base(), [
+      { op: 'animate', clipId: 't1', preset: 'fadeIn' },
+      { op: 'animate', clipId: 't1', preset: 'fadeOut' },
+    ]);
+    p = run(p, [{ op: 'trimClip', clipId: 't1', edge: 'end', delta: -2.5 }]);
+    expect(clip(p, 't1').duration).toBe(0.5);
+    expect(at(p, 't1', 'opacity', 0.25)).toBeGreaterThan(0.5);
+    p = run(p, [{ op: 'trimClip', clipId: 't1', edge: 'end', delta: 2.5 }]);
+    expect(at(p, 't1', 'opacity', 1.5)).toBeGreaterThan(0.5);
+  });
+
+  it('o ponto feito à mão que sai pela borda guarda o valor da própria curva, não o da entrada', () => {
+    const hand: Op[] = [
+      { op: 'setKeyframe', clipId: 'v1', prop: 'x', t: 0.5, v: -100, keyframeId: 'h1' },
+      { op: 'setKeyframe', clipId: 'v1', prop: 'x', t: 4, v: 100, keyframeId: 'h2' },
+    ];
+    const expected = at(run(base(), hand), 'v1', 'x', 1); // conteúdo que vira o novo começo
+    let p = run(base(), [...hand, { op: 'animate', clipId: 'v1', preset: 'slideRightIn' }]);
+    p = run(p, [{ op: 'trimClip', clipId: 'v1', edge: 'start', delta: 1 }]);
+    const edge = clip(p, 'v1').props.x.keyframes.find((k) => k.group === undefined && k.t === 0);
+    expect(edge?.v).toBeCloseTo(expected, 2);
+    p = run(p, [{ op: 'clearKeyframes', clipId: 'v1', group: 'entrada' }]);
+    expect(at(p, 'v1', 'x', 0)).toBeCloseTo(expected, 2);
+  });
+
+  it('cortar o fim não passa o zero da saída para a curva feita à mão', () => {
+    const hand: Op[] = [
+      { op: 'setKeyframe', clipId: 't1', prop: 'opacity', t: 1, v: 1, keyframeId: 'o1' },
+      { op: 'setKeyframe', clipId: 't1', prop: 'opacity', t: 2.8, v: 0.5, keyframeId: 'o2' },
+    ];
+    const ref = run(base(), hand);
+    let p = run(base(), [...hand, { op: 'animate', clipId: 't1', preset: 'fadeOut' }]);
+    p = run(p, [{ op: 'trimClip', clipId: 't1', edge: 'end', delta: -0.5 }]);
+    p = run(p, [{ op: 'clearKeyframes', clipId: 't1', group: 'saida' }]);
+    // na borda, o valor exato da curva feita à mão; antes, a curva inteira era puxada para o zero da saída
+    expect(at(p, 't1', 'opacity', 2.5)).toBeCloseTo(at(ref, 't1', 'opacity', 2.5), 3);
+    expect(at(p, 't1', 'opacity', 2)).toBeGreaterThan(0.5);
   });
 
   it('o arraste é limitado ao arquivo e à duração mínima', () => {

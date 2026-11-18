@@ -76,6 +76,9 @@ export function ChatPanel() {
 
       {p && <ProposalCard p={p} />}
 
+      </div>
+
+      {/* Fora da área que rola: abre sempre à vista, logo acima da caixa de nota. */}
       {showEco && (
         <div className="eco-pop">
           <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -93,7 +96,6 @@ export function ChatPanel() {
           </p>
         </div>
       )}
-      </div>
 
       <div className="composer">
         <input
@@ -108,7 +110,7 @@ export function ChatPanel() {
             }
           }}
         />
-        <button className={`btn ${s.settings.economy ? 'on' : ''}`} onClick={() => setShowEco((v) => !v)} title="Modo econômico e teto de contexto">
+        <button className={`btn ${s.settings.economy ? 'on' : ''}`} onClick={() => setShowEco((v) => !v)} title="Modo econômico e teto de contexto" data-testid="eco-toggle">
           Modo econômico
         </button>
         <button

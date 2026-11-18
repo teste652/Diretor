@@ -52,34 +52,34 @@ Como funciona: o Claude Desktop inicia `server.cjs`; ele conversa com o editor a
 |---|---|
 | `get_context` | Lê revisão, seleção (clipes compactos, com keyframes) e playhead. Mínimo por padrão; `knownRevision` reaproveita o que o Claude já tem. |
 | `propose_edit` | Envia uma proposta em **etapas** (ex.: “Entrada”, “Saída”). Cada etapa vira rascunho, uma por vez. `requestId` torna a chamada idempotente. |
-| `get_proposal` | Mostra o que você decidiu (aceitou, ajustou, descartou) e as notas que você escreveu no painel. Pode esperar até 45 s por uma decisão (abaixo do limite de ~60 s do Claude Desktop). |
+| `get_proposal` | Mostra o que você decidiu (aceitou, ajustou, descartou) e as notas que você escreveu no painel. Pode esperar até 45 s por uma decisão (abaixo do limite de ~60 s do Claude Desktop). Se você parar o Claude no meio da espera, o editor desiste na hora e a sua nota fica para a próxima chamada. |
 | `cancel_proposal` | Cancela uma proposta pendente. |
 | `editor_status` | Confere se o editor está aberto. |
 
-As operações são as mesmas que a interface usa (`src/core/operations.ts`): `animate` (presets que viram keyframes editáveis), `setKeyframe`, `retimeGroup`, `setProperty`, `addClip`, `updateClip`, `trimClip` (aparar como nas bordas do clipe), `removeClip` etc. O editor valida alvo, parâmetros (tipos, faixas, campos desconhecidos), intervalo e revisão antes de mostrar qualquer coisa. Importar mídia e mexer nas faixas ficam só na interface.
+As operações são as mesmas que a interface usa (`src/core/operations.ts`): `animate` (presets que viram keyframes editáveis), `setKeyframe`, `retimeGroup`, `setProperty`, `addClip`, `updateClip`, `trimClip` (aparar como nas bordas do clipe), `removeClip` etc. O editor valida alvo, parâmetros (tipos, faixas, campos desconhecidos: um campo com nome errado é recusado, não ignorado), intervalo e revisão antes de mostrar qualquer coisa. Importar mídia, mexer nas faixas, renomear o projeto e mudar o formato ficam só na interface e nunca entram num rascunho do Claude.
 
 ## Usando
 
-- **Mídia:** “Adicionar mídia” importa um MP4 (o original nunca é alterado). O primeiro vídeo define o formato do projeto (tamanho, orientação e quadros por segundo).
+- **Mídia:** “Adicionar mídia” importa um MP4 (o original nunca é alterado). O primeiro vídeo define o formato do projeto (tamanho, orientação e quadros por segundo, inclusive 23,976/29,97 exatos). Se um vídeo do projeto foi movido ou apagado, o editor diz isso (não “formato não suportado”).
 - **Aparar:** arraste as bordas do clipe na linha do tempo, ou edite “Corte inicial” e “Duração” em Propriedades. Aparar o início de um vídeo mantém o clipe no lugar e puxa os vídeos seguintes da faixa, sem deixar buraco. As animações acompanham o conteúdo (entrada e saída presas às bordas acompanham a borda).
 - **Título e legendas:** botões “Título” e “Adicionar legenda”. Texto, início, fim e estilo ficam em Propriedades.
-- **Animação:** em Propriedades, cada propriedade (posição, escala, opacidade) tem o losango para criar/remover ponto no playhead. Pontos podem ser arrastados na linha do tempo; clique num ponto para editar tempo, valor e suavização. Grupos (Entrada, Saída) têm início e duração editáveis. “Animação pronta” aplica presets.
+- **Animação:** em Propriedades, cada propriedade (posição, escala, opacidade) tem o losango para criar/remover ponto no playhead. Pontos podem ser arrastados na linha do tempo; clique num ponto para editar tempo, valor e suavização (com um ponto selecionado, Delete e a lixeira removem só o ponto). Grupos (Entrada, Saída) têm início e duração editáveis. “Animação pronta” aplica presets. Quando duas animações se encontram no mesmo instante, o painel edita o ponto que a prévia mostra.
 - **Rascunho da IA:** aparece tracejado na linha do tempo e com o selo “Rascunho” na prévia. Editar um ponto do rascunho ajusta o rascunho. “Ajustar na linha do tempo” manda qualquer edição manual para o rascunho. Com o rascunho aberto, Ctrl+Z desfaz só os seus ajustes nele. “Aceitar” grava a etapa (uma entrada de histórico por etapa); “Descartar” pula para a próxima. Clipes que a proposta remove aparecem hachurados em vermelho na linha do tempo.
 - **Desatualizado:** se você editar o projeto ou selecionar outro clipe enquanto há um rascunho, ele fica “Desatualizado”. O Claude não refaz por conta própria: “Refazer com contexto atual” registra o pedido e, quando você disser “refaz” no Claude Desktop, ele recebe o contexto novo.
 - **Modo econômico** (ligado por padrão, lembrado entre sessões): contexto mínimo, respostas curtas, teto configurável de tamanho por ação. Se o Claude precisar de mais, recebe uma versão reduzida que cabe no teto e o editor pede sua autorização (vale uma vez; se você recusar, ele não pede de novo até você mudar o teto). Os tamanhos mostrados são métricas do editor; cota e consumo de tokens são do Claude Desktop. Nenhuma imagem ou trecho de vídeo é enviado ao chat nesta fase.
 - **Atalhos:** Espaço (reproduzir), Ctrl+Z / Ctrl+Y, Ctrl+S, Ctrl+O, Delete, ← → (quadro a quadro).
 - **Salvar / Abrir:** projeto em `.diretor.json`, que guarda caminhos para os originais. O editor avisa antes de fechar ou abrir outro projeto com mudanças não salvas.
-- **Exportar:** gera MP4 (H.264 + AAC) com o que já foi aceito. Antes de começar, confere se todos os vídeos abrem; “Cancelar” para na hora e apaga o arquivo pela metade.
+- **Exportar:** gera MP4 (H.264 + AAC) com o que já foi aceito. Antes de começar, confere se todos os vídeos abrem. O MP4 é gravado num arquivo temporário na mesma pasta e só substitui o destino quando fica pronto: “Cancelar” (em qualquer momento, inclusive na conferência e na finalização), fechar a janela ou o editor cair nunca deixam arquivo pela metade nem apagam um arquivo que já existia. Fechar a janela durante a exportação pede confirmação.
 
 ## Testes
 
 ```bash
-npm test            # 60 testes: unitários + MCP real (cliente MCP → servidor stdio → ponte → editor) + exportação com ffmpeg
+npm test            # 75 testes: unitários + MCP real (cliente MCP → servidor stdio → ponte → editor) + exportação com ffmpeg
 npm run typecheck
 npm run test:e2e    # abre o app Electron e roda o roteiro da especificação (no Linux sem tela: xvfb-run -a node scripts/e2e.mjs)
 ```
 
-O teste de ponta a ponta (32 verificações) importa e apara um MP4 com acento no nome, cria legenda e título, faz um cliente MCP pedir “subir suavemente no começo e desaparecer no fim”, ajusta a duração à mão (e desfaz/refaz dentro do rascunho), aceita a entrada, descarta a saída, testa proposta desatualizada, chamada repetida e conflito de `requestId`, desfaz/refaz, salva/reabre e exporta. Depois compara prévia × MP4 em 10 quadros (PSNR > 30 dB) e confere, pelo contador do vídeo de teste, que os dois mostram o quadro exato do original. Também testa vídeo ausente e cancelar a exportação. Capturas e o MP4 ficam em `.test-output/`.
+O teste de ponta a ponta (41 verificações) importa e apara um MP4 com acento no nome, cria legenda e título, faz um cliente MCP pedir “subir suavemente no começo e desaparecer no fim”, ajusta a duração à mão (e desfaz/refaz dentro do rascunho), aceita a entrada, descarta a saída, testa proposta desatualizada, chamada repetida e conflito de `requestId`, o Claude parando no meio de uma espera, desfaz/refaz, salva/reabre e exporta. Depois compara prévia × MP4 em 10 quadros (PSNR > 30 dB) e confere, pelo contador do vídeo de teste, que os dois mostram o quadro exato do original. Também testa vídeo ausente, cancelar a exportação no meio, na conferência e no último quadro (sem apagar o arquivo que já existia nem deixar ffmpeg rodando), a interface caindo no meio da exportação, e na interface: campo numérico ao trocar de clipe, arrasto da borda do vídeo, lixeira com ponto selecionado e o painel do modo econômico. Capturas e o MP4 ficam em `.test-output/`.
 
 O GitHub Actions roda tudo isso no Windows em cada PR (`.github/workflows/ci.yml`) e guarda as capturas e o MP4 como artefato.
 

@@ -96,6 +96,8 @@ export interface Settings {
   contextCeilingBytes: number;
 }
 
+export type WaitResult = 'changed' | 'timeout' | 'cancelled' | 'superseded';
+
 export interface ProposeInput {
   requestId?: string;
   baseRevision: number;
@@ -166,7 +168,7 @@ export class EditorSession {
   version = 0;
 
   private listeners = new Set<() => void>();
-  private waiters: { id: string; since: number; resolve: () => void }[] = [];
+  private waiters: { id: string; since: number; resolve: (why?: WaitResult) => void }[] = [];
   private viewCache: { key: string; project: Project } | null = null;
   private activitySeq = 0;
   private noteSeq = 0;
@@ -191,14 +193,15 @@ export class EditorSession {
       return !p || p.version > w.since;
     });
     this.waiters = this.waiters.filter((w) => !ready.includes(w));
-    for (const w of ready) w.resolve();
+    // A espera mais nova responde primeiro: é a que o Claude ainda está lendo e a que leva as notas.
+    for (const w of ready.reverse()) w.resolve();
   }
 
-  /** Acorda todas as esperas (nota nova do usuário, projeto trocado). */
+  /** Acorda todas as esperas (nota nova do usuário, projeto trocado), a mais nova primeiro. */
   private wakeAll(): void {
     const all = this.waiters;
     this.waiters = [];
-    for (const w of all) w.resolve();
+    for (const w of all.reverse()) w.resolve();
   }
 
   log(kind: ActivityEntry['kind'], text: string, extra: Partial<ActivityEntry> = {}): void {
@@ -290,6 +293,8 @@ export class EditorSession {
    * prévia. O resto é gravado no projeto (e desatualiza o rascunho).
    */
   dispatch(ops: Op[], label?: string): { ok: true; target: 'draft' | 'project' } | { ok: false; message: string } {
+    // Nada a fazer (ex.: botão de áudio sem vídeos): sem histórico vazio e sem desatualizar o rascunho.
+    if (Array.isArray(ops) && ops.length === 0) return { ok: true, target: this.activeStep ? 'draft' : 'project' };
     try {
       if (this.shouldRouteToDraft(ops)) {
         const p = this.openProposal!;
@@ -314,6 +319,8 @@ export class EditorSession {
   private shouldRouteToDraft(ops: Op[]): boolean {
     const step = this.activeStep;
     if (!step) return false;
+    // Importar mídia, faixas, nome e formato do projeto são do usuário: nunca entram na etapa do Claude.
+    if (ops.some((o) => USER_ONLY_OPS.includes(o.op) || o.op === 'renameProject' || o.op === 'setCanvas')) return false;
     if (this.adjustMode) return true;
     const d = this.draftInfo;
     return ops.some((o) => 'clipId' in o && d.clipIds.has(o.clipId));
@@ -641,7 +648,16 @@ export class EditorSession {
     const p = this.proposals.find((x) => x.id === input.appendTo);
     if (!p) return { ok: false, code: 'bad_request', message: `Proposta "${input.appendTo}" não encontrada.` };
     if (p.status !== 'active' && p.status !== 'done') {
-      return { ok: false, code: 'proposal_closed', message: `A proposta está "${p.status}". Leia o contexto e faça uma nova proposta.`, details: { status: p.status } };
+      // Mesma orientação do get_proposal: nunca refazer por conta própria.
+      const message =
+        p.status === 'stale'
+          ? p.redoRequested
+            ? `O usuário pediu para refazer: leia get_context e chame propose_edit com replaces="${p.id}" e um requestId novo.`
+            : 'O usuário mexeu no projeto e esta proposta ficou desatualizada. Não refaça por conta própria: espere com get_proposal (waitSeconds) até o usuário pedir "refazer".'
+          : p.status === 'cancelled'
+            ? 'Esta proposta foi descartada ou cancelada. Não a proponha de novo a menos que o usuário peça.'
+            : 'Esta proposta foi substituída por uma mais nova; continue por ela.';
+      return { ok: false, code: 'proposal_closed', message, details: { status: p.status, redoRequested: p.redoRequested } };
     }
     // Só as decisões desta proposta podem ter mudado a revisão desde então.
     if (input.baseRevision !== this.project.revision && p.expectedRevision !== this.project.revision) {
@@ -653,8 +669,17 @@ export class EditorSession {
       };
     }
     const open = this.openProposal;
-    if (p.status === 'done' && open && open.id !== p.id && open.status === 'active') {
-      return { ok: false, code: 'proposal_pending', message: `Há outra proposta aguardando decisão (${open.id}).`, details: { proposalId: open.id } };
+    // Uma proposta aberta por vez: não reabre uma concluída enquanto outra (ativa ou desatualizada) espera o usuário.
+    if (p.status === 'done' && open && open.id !== p.id) {
+      return {
+        ok: false,
+        code: 'proposal_pending',
+        message:
+          open.status === 'active'
+            ? `Há outra proposta aguardando decisão (${open.id}).`
+            : `Há uma proposta desatualizada aberta (${open.id}). Espere o usuário decidir (get_proposal com waitSeconds).`,
+        details: { proposalId: open.id, status: open.status },
+      };
     }
     // Base da simulação: projeto + rascunho atual + etapas ainda na fila.
     let base = this.view;
@@ -773,17 +798,29 @@ export class EditorSession {
     return true;
   }
 
-  /** Resolve quando a proposta mudar (decisão, ajuste, desatualização) ou no tempo limite. */
-  waitForProposal(id: string, sinceVersion: number, timeoutMs: number): Promise<void> {
+  /**
+   * Resolve quando a proposta mudar (decisão, ajuste, desatualização, nota), no
+   * tempo limite, se quem espera desistir (`signal`) ou se uma espera mais nova
+   * pela mesma proposta assumir: quem desistiu não leva as notas do usuário.
+   */
+  waitForProposal(id: string, sinceVersion: number, timeoutMs: number, signal?: AbortSignal): Promise<WaitResult> {
     const p = this.proposals.find((x) => x.id === id);
-    if (!p || p.version > sinceVersion) return Promise.resolve();
+    if (signal?.aborted) return Promise.resolve('cancelled');
+    if (!p || p.version > sinceVersion) return Promise.resolve('changed');
+    for (const old of this.waiters.filter((x) => x.id === id)) old.resolve('superseded');
     return new Promise((resolve) => {
-      const w = { id, since: sinceVersion, resolve };
-      this.waiters.push(w);
-      setTimeout(() => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const done = (why: WaitResult = 'changed') => {
         this.waiters = this.waiters.filter((x) => x !== w);
-        resolve();
-      }, timeoutMs);
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        resolve(why);
+      };
+      const onAbort = () => done('cancelled');
+      const w = { id, since: sinceVersion, resolve: done };
+      this.waiters.push(w);
+      timer = setTimeout(() => done('timeout'), timeoutMs);
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 }

@@ -122,6 +122,20 @@ export function evalProp(p: AnimProp | undefined, t: number, fallback: number): 
   return a.v + (b.v - a.v) * ease(a.ease, u);
 }
 
+/**
+ * Ponto que a prévia mostra neste instante. Com pontos de grupos diferentes no
+ * mesmo tempo (fim da entrada e começo da saída), vale o último na ordem usada
+ * por evalProp: é esse que o painel deve editar ou remover.
+ */
+export function keyframeAt(p: AnimProp | undefined, t: number, tol = 1e-3): Keyframe | undefined {
+  const kfs = p?.keyframes;
+  if (!kfs?.length) return undefined;
+  const s = isTimeSorted(kfs) ? kfs : sortedKeyframes(kfs);
+  let found: Keyframe | undefined;
+  for (const k of s) if (Math.abs(k.t - t) < tol) found = k;
+  return found;
+}
+
 export function evalClipProp(clip: Clip, name: string, timelineT: number): number {
   const def = propDef(name);
   return evalProp(clip.props[name], timelineT - clip.start, def?.default ?? 0);

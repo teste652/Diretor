@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { type Clip, type Track, newId, projectDuration } from '../core/model';
 import { type Op, clampTrimDelta } from '../core/operations';
+import { keyframeAt } from '../core/properties';
 import { fmtTime, playback, session, usePlayback, useSession } from './store';
 import { Icon, run } from './ui';
 
@@ -35,6 +36,23 @@ export function addTitleAtPlayhead() {
 export function deleteSelection() {
   const ops: Op[] = session.selection.clipIds.map((id) => ({ op: 'removeClip', clipId: id }));
   if (ops.length) run(ops, 'Remover clipe');
+}
+
+/** Delete e o botão da lixeira: com um ponto selecionado, remove só o ponto (todas as propriedades naquele instante). */
+export function deleteSelectedKeyframeOrClip() {
+  const sel = session.selection.keyframe;
+  if (sel) {
+    const c = session.view.clips.find((x) => x.id === sel.clipId);
+    const k = c?.props[sel.prop]?.keyframes.find((x) => x.id === sel.keyframeId);
+    if (c && k) {
+      const ops: Op[] = [];
+      for (const [prop, ap] of Object.entries(c.props))
+        for (const x of ap.keyframes) if (Math.abs(x.t - k.t) < 1e-3) ops.push({ op: 'removeKeyframe', clipId: c.id, prop, keyframeId: x.id });
+      if (run(ops, 'Remover ponto')) session.setSelection({ clipIds: [c.id] });
+      return;
+    }
+  }
+  deleteSelection();
 }
 
 const round = (n: number) => Math.round(n * 1000) / 1000;
@@ -99,16 +117,24 @@ export function Timeline() {
   const stepSec = pps > 150 ? 0.5 : pps > 60 ? 1 : pps > 25 ? 3 : 5;
   for (let t = 0; t <= total + 2; t += stepSec) ticks.push(t);
 
+  // Prévia do arrasto igual ao resultado do trimClip: o vídeo aparado no início fica
+  // no lugar (o fim acompanha) e os vídeos seguintes da faixa andam junto.
+  const dragged = drag && drag.kind !== 'scrub' && drag.kind !== 'kf' ? view.clips.find((x) => x.id === drag.clipId) : undefined;
   const geom = (c: Clip) => {
     let start = c.start;
     let dur = c.duration;
-    if (drag && 'clipId' in drag && drag.clipId === c.id) {
-      if (drag.kind === 'move') start = Math.max(0, start + drag.dt);
-      if (drag.kind === 'trimR') dur += clampTrimDelta(view, c, 'end', drag.dt);
-      if (drag.kind === 'trimL') {
-        const d = clampTrimDelta(view, c, 'start', drag.dt);
-        start += d;
-        dur -= d;
+    if (dragged && drag && drag.kind !== 'scrub' && drag.kind !== 'kf') {
+      const edge = drag.kind === 'trimL' ? 'start' : 'end';
+      const d = drag.kind === 'move' ? 0 : clampTrimDelta(view, dragged, edge, drag.dt);
+      if (dragged.id === c.id) {
+        if (drag.kind === 'move') start = Math.max(0, start + drag.dt);
+        if (drag.kind === 'trimR') dur += d;
+        if (drag.kind === 'trimL') {
+          if (c.kind !== 'video') start += d;
+          dur -= d;
+        }
+      } else if (drag.kind !== 'move' && dragged.kind === 'video' && c.trackId === dragged.trackId && c.start >= dragged.start + dragged.duration - 1e-3) {
+        start = Math.max(0, start + (edge === 'start' ? -d : d));
       }
     }
     return { left: start * pps, width: Math.max(4, dur * pps) };
@@ -130,7 +156,13 @@ export function Timeline() {
         <button className="btn ghost icon" title={s.activeStep ? 'Refazer ajuste do rascunho (Ctrl+Y)' : 'Refazer (Ctrl+Y)'} disabled={!s.canRedo} onClick={() => s.redo()}>
           {Icon.redo}
         </button>
-        <button className="btn ghost icon" title="Remover selecionado (Delete)" disabled={!s.selection.clipIds.length} onClick={deleteSelection}>
+        <button
+          className="btn ghost icon"
+          title={s.selection.keyframe ? 'Remover ponto selecionado (Delete)' : 'Remover clipe selecionado (Delete)'}
+          disabled={!s.selection.clipIds.length}
+          onClick={deleteSelectedKeyframeOrClip}
+          data-testid="trash"
+        >
           {Icon.trash}
         </button>
         <button className="btn" onClick={addCaptionAtPlayhead} data-testid="add-caption">
@@ -159,7 +191,8 @@ export function Timeline() {
                 {l.kind === 'audio' ? (
                   <button
                     className={`mini ${allMuted ? 'off' : ''}`}
-                    title={allMuted ? 'Ativar áudio' : 'Silenciar áudio'}
+                    title={videoClips.length ? (allMuted ? 'Ativar áudio' : 'Silenciar áudio') : 'Sem vídeos com áudio'}
+                    disabled={!videoClips.length}
                     onClick={() => run(videoClips.map((c) => ({ op: 'updateClip', clipId: c.id, set: { muted: !allMuted } }) as Op), 'Áudio')}
                   >
                     {allMuted ? Icon.mute : Icon.volume}
@@ -297,7 +330,8 @@ function ClipBlock(props: {
       const m = marks.get(key);
       const draft = props.draftKfs.has(k.id);
       const sel = props.selectedKf?.keyframeId === k.id;
-      if (!m) marks.set(key, { t: k.t, prop, id: k.id, draft, sel });
+      // O losango seleciona o ponto que a prévia mostra nesse instante.
+      if (!m) marks.set(key, { t: k.t, prop, id: keyframeAt(ap, k.t)?.id ?? k.id, draft, sel });
       else {
         m.draft ||= draft;
         m.sel ||= sel;

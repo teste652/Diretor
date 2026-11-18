@@ -62,7 +62,7 @@ export function buildContext(s: EditorSession, params: ContextParams = {}): Reco
     s.selection.keyframe?.keyframeId ?? null,
     Math.round(s.playhead * p.settings.fps),
     economy,
-    open ? [open.id, open.status] : null,
+    open ? [open.id, open.status, open.redoRequested] : null,
     params.include ?? [],
     params.range ?? null,
   ]);
@@ -131,11 +131,15 @@ const TRUNCATED_HINT = {
 
 /** Versão reduzida que cabe no teto: encolhe até sobrar só ids, tipos e tempos. */
 function reducedContext(ctx: Record<string, unknown>, selected: Clip[], neededBytes: number, ceiling: number, why: keyof typeof TRUNCATED_HINT): Record<string, unknown> {
+  // Proposta pendente/desatualizada (e o pedido de refazer) sempre seguem: são poucos bytes e mudam o que o Claude deve fazer.
   const out: Record<string, unknown> = {
     revision: ctx.revision,
     fps: ctx.fps,
+    size: ctx.size,
     duration: ctx.duration,
     playhead: ctx.playhead,
+    ...(ctx.pendingProposal ? { pendingProposal: ctx.pendingProposal } : {}),
+    ...(ctx.selectedKeyframe ? { selectedKeyframe: ctx.selectedKeyframe } : {}),
     selection: (ctx.selection as unknown[]).slice(0, 3),
     truncated: { neededBytes, ceilingBytes: ceiling, why, hint: TRUNCATED_HINT[why] },
   };
@@ -147,6 +151,8 @@ function reducedContext(ctx: Record<string, unknown>, selected: Clip[], neededBy
   }
   if (!fits()) delete out.selectionIds;
   if (!fits()) out.truncated = { neededBytes, ceilingBytes: ceiling, why };
+  if (!fits()) delete out.selectedKeyframe;
+  if (!fits()) delete out.size;
   return out;
 }
 
@@ -185,7 +191,7 @@ export interface BridgeContext {
 }
 
 /** Ponto único de despacho das chamadas vindas do MCP. */
-export async function handleBridge(s: EditorSession, method: string, params: any = {}): Promise<unknown> {
+export async function handleBridge(s: EditorSession, method: string, params: any = {}, signal?: AbortSignal): Promise<unknown> {
   switch (method as BridgeMethod) {
     case 'status':
       return {
@@ -211,9 +217,13 @@ export async function handleBridge(s: EditorSession, method: string, params: any
       const wait = Math.min(Math.max(Number(params.waitSeconds) || 0, 0), MAX_WAIT_SECONDS);
       if (wait > 0 && !s.notes.some((n) => !n.delivered)) {
         const since = Number.isFinite(Number(params.sinceVersion)) ? Number(params.sinceVersion) : p.version;
-        await s.waitForProposal(id, since, wait * 1000);
+        const why = await s.waitForProposal(id, since, wait * 1000, signal);
+        // Ninguém vai ler esta resposta (o Claude cancelou ou chamou de novo): as notas ficam para a próxima.
+        if (why === 'cancelled') return { error: 'cancelled', message: 'A chamada foi cancelada.' };
+        if (why === 'superseded') return { error: 'superseded', message: 'Uma chamada mais nova de get_proposal assumiu a espera; use a resposta dela.' };
         p = s.proposals.find((x) => x.id === id)!;
       }
+      if (signal?.aborted) return { error: 'cancelled' };
       const out = compactProposal(p, s.project.revision);
       if (p.status === 'stale' && p.redoRequested) out.context = buildContext(s, {});
       else if (s.notes.some((n) => !n.delivered)) out.userNotes = s.takeNotes();

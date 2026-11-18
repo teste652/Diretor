@@ -15,7 +15,7 @@ export function frameCount(p: Project): number {
 export function buildFfmpegArgs(p: Project, outPath: string): string[] {
   const { width: W, height: H, fps } = p.settings;
   const total = frameCount(p) / fps;
-  const args = ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${W}x${H}`, '-r', String(fps), '-i', 'pipe:0'];
+  const args = ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${W}x${H}`, '-r', fpsArg(fps), '-i', 'pipe:0'];
   const videoTrack = p.tracks.find((t) => t.kind === 'video');
   const audible = p.clips.filter(
     (c): c is VideoClip =>
@@ -58,6 +58,26 @@ export interface ProbeResult {
   fps?: number;
 }
 
+/**
+ * O ffmpeg mostra o fps com 2 casas ("23.98" para 24000/1001). Usar o valor
+ * arredondado atrasaria a busca de quadro e repetiria um quadro a cada poucos
+ * segundos; então volta ao valor exato (NTSC) ou ao inteiro (média de celular).
+ */
+export function exactFps(shown: number): number {
+  const n = Math.round(shown * 1.001);
+  const ntsc = (n * 1000) / 1001;
+  if (Math.abs(shown - Math.round(shown)) > 0.006 && Math.abs(shown - ntsc) < 0.006) return ntsc;
+  if (Math.abs(shown - Math.round(shown)) < 0.05) return Math.round(shown);
+  return shown;
+}
+
+/** fps para a linha de comando do ffmpeg: fração exata quando é NTSC (24000/1001). */
+export function fpsArg(fps: number): string {
+  const n = Math.round(fps * 1.001);
+  if (Math.abs(fps - Math.round(fps)) > 1e-9 && Math.abs(fps - (n * 1000) / 1001) < 1e-9) return `${n * 1000}/1001`;
+  return String(fps);
+}
+
 /** Lê a saída de `ffmpeg -i arquivo` (stderr). */
 export function parseFfmpegProbe(stderr: string): ProbeResult | null {
   const d = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(stderr);
@@ -69,12 +89,15 @@ export function parseFfmpegProbe(stderr: string): ProbeResult | null {
   // Pixel não quadrado: "[SAR 4:3 DAR 16:9]".
   const sar = /\[SAR (\d+):(\d+)/.exec(line);
   if (sar && Number(sar[1]) > 0 && Number(sar[2]) > 0 && sar[1] !== sar[2]) width = Math.round((width * Number(sar[1])) / Number(sar[2]));
-  // Celular em pé: "displaymatrix: rotation of -90.00 degrees" (ou "rotate : 90" em versões antigas).
-  const after = stderr.slice(stderr.indexOf(line));
-  const rot = /displaymatrix: rotation of (-?\d+(?:\.\d+)?) degrees/.exec(after) ?? /rotate\s*:\s*(-?\d+)/.exec(after);
+  // Celular em pé: "displaymatrix: rotation of -90.00 degrees" (ffmpeg 6/7), "Display Matrix: rotation
+  // of -90.00 degrees" (8.1+) ou "rotate : 90" (antigas). Só no bloco deste vídeo, até o próximo stream.
+  const after = stderr.slice(stderr.indexOf(line) + line.length);
+  const next = after.search(/\n\s*Stream #/);
+  const block = next >= 0 ? after.slice(0, next) : after;
+  const rot = /rotation of (-?\d+(?:\.\d+)?) degrees/i.exec(block) ?? /rotate\s*:\s*(-?\d+)/.exec(block);
   if (rot && Math.abs(Math.round(Number(rot[1]))) % 180 === 90) [width, height] = [height, width];
   const f = /(\d+(?:\.\d+)?) fps/.exec(line);
-  const fps = f ? Number(f[1]) : undefined;
+  const fps = f ? exactFps(Number(f[1])) : undefined;
   return {
     duration: Number(d[1]) * 3600 + Number(d[2]) * 60 + Number(d[3]),
     width,

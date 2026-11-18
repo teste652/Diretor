@@ -31,10 +31,15 @@ export class VideoPool {
       el.addEventListener('loadeddata', this.onFrame);
       const path = media.path;
       el.addEventListener('error', () => {
-        const msg = mediaErrorText(el.error);
-        if (this.failed.get(path) === msg) return;
-        this.failed.set(path, msg);
-        this.onError?.(path, msg);
+        if (this.failed.has(path)) return;
+        const generic = mediaErrorText(el.error);
+        this.failed.set(path, generic);
+        // O Chromium diz "formato não suportado" até para arquivo que sumiu: confere antes de avisar.
+        void explainMediaError(path, el.error).then((msg) => {
+          if (!this.failed.has(path)) return;
+          this.failed.set(path, msg);
+          this.onError?.(path, msg);
+        });
       });
       el.addEventListener('loadedmetadata', () => this.failed.delete(path));
       entry = { el, path: media.path };
@@ -83,17 +88,32 @@ export function mediaErrorText(e: MediaError | null): string {
   return e.message || 'erro ao abrir';
 }
 
-/** Espera um dos eventos (ou o erro do vídeo, ou o tempo limite). */
-function once(el: HTMLVideoElement, evs: string[], timeoutMs: number): Promise<void> {
+export const MISSING_FILE_TEXT = 'arquivo não encontrado, foi movido ou apagado?';
+
+/** Motivo do erro para o usuário: arquivo que sumiu do disco não é problema de codec. */
+export async function explainMediaError(path: string, e: MediaError | null): Promise<string> {
+  try {
+    if ((await window.diretor?.mediaExists(path)) === false) return MISSING_FILE_TEXT;
+  } catch {
+    /* sem a ponte (navegador): fica o motivo do Chromium */
+  }
+  return mediaErrorText(e);
+}
+
+/** Espera um dos eventos (ou o erro do vídeo, o tempo limite ou o cancelamento). */
+function once(el: HTMLVideoElement, evs: string[], timeoutMs: number, abort?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     const all = [...evs, 'error'];
     const done = () => {
       clearTimeout(timer);
       for (const ev of all) el.removeEventListener(ev, done);
+      abort?.removeEventListener('abort', done);
       resolve();
     };
     const timer = setTimeout(done, timeoutMs);
     for (const ev of all) el.addEventListener(ev, done);
+    if (abort?.aborted) done();
+    else abort?.addEventListener('abort', done, { once: true });
   });
 }
 
@@ -117,16 +137,18 @@ export async function seekExact(el: HTMLVideoElement, time: number): Promise<voi
   if (!el.error && el.readyState < 2) await once(el, ['canplay', 'loadeddata'], 5_000);
 }
 
-/** Abre os arquivos do projeto antes de exportar; devolve os que falharam. */
-export async function preflight(pool: VideoPool, project: Project): Promise<string[]> {
+/** Abre os arquivos do projeto antes de exportar; devolve os que falharam. Para na hora se `abort` disparar. */
+export async function preflight(pool: VideoPool, project: Project, abort?: AbortSignal): Promise<string[]> {
   const bad: string[] = [];
   for (const c of project.clips) {
+    if (abort?.aborted) break;
     if (c.kind !== 'video') continue;
     const el = pool.element(c, project);
     const media = project.media.find((m) => m.id === c.mediaId);
     if (!el || !media) continue;
-    if (el.readyState < 1 && !el.error) await once(el, ['loadedmetadata'], 15_000);
-    if (el.error || el.readyState < 1) bad.push(`${media.name} (${el.error ? mediaErrorText(el.error) : 'não abriu a tempo'}): ${media.path}`);
+    if (el.readyState < 1 && !el.error) await once(el, ['loadedmetadata'], 15_000, abort);
+    if (abort?.aborted) break;
+    if (el.error || el.readyState < 1) bad.push(`${media.name} (${el.error ? await explainMediaError(media.path, el.error) : 'não abriu a tempo'}): ${media.path}`);
   }
   return [...new Set(bad)];
 }

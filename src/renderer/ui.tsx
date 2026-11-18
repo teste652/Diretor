@@ -4,15 +4,16 @@ import { session } from './store';
 
 /**
  * Campo numérico que só grava ao confirmar (Enter/sair do campo): uma entrada
- * de histórico por edição. O destino é o do momento em que você entrou no campo:
- * clicar em outro clipe enquanto digita não grava o número no clipe errado.
+ * de histórico por edição. O destino e os limites são os do momento em que você
+ * entrou no campo: clicar em outro clipe enquanto digita não grava o número no
+ * clipe errado nem o limita pelos valores do outro clipe.
  */
 export function NumberField(props: { value: number; onCommit: (v: number) => void; step?: number; min?: number; max?: number; digits?: number; disabled?: boolean; title?: string }) {
   const digits = props.digits ?? 2;
   const fmt = (v: number) => (Number.isFinite(v) ? String(Math.round(v * 10 ** digits) / 10 ** digits) : '');
   const [text, setText] = useState(fmt(props.value));
   const [focus, setFocus] = useState(false);
-  const edit = useRef<{ onCommit: (v: number) => void; value: number; edited: boolean; cancelled: boolean } | null>(null);
+  const edit = useRef<{ onCommit: (v: number) => void; value: number; min?: number; max?: number; edited: boolean; cancelled: boolean } | null>(null);
   useEffect(() => {
     if (!focus) setText(fmt(props.value));
   }, [props.value, focus]);
@@ -24,7 +25,7 @@ export function NumberField(props: { value: number; onCommit: (v: number) => voi
     const raw = text.trim().replace(',', '.');
     const v = Number(raw);
     if (!raw || !Number.isFinite(v)) return setText(fmt(e.value));
-    const clamped = Math.min(props.max ?? Infinity, Math.max(props.min ?? -Infinity, v));
+    const clamped = Math.min(e.max ?? Infinity, Math.max(e.min ?? -Infinity, v));
     if (Math.abs(clamped - e.value) > 1e-9) e.onCommit(clamped);
     else setText(fmt(e.value));
   };
@@ -39,7 +40,7 @@ export function NumberField(props: { value: number; onCommit: (v: number) => voi
       value={text}
       disabled={props.disabled}
       onFocus={() => {
-        edit.current = { onCommit: props.onCommit, value: props.value, edited: false, cancelled: false };
+        edit.current = { onCommit: props.onCommit, value: props.value, min: props.min, max: props.max, edited: false, cancelled: false };
         setFocus(true);
       }}
       onBlur={finish}

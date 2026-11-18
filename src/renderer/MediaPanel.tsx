@@ -28,7 +28,8 @@ export async function importPaths(paths: string[]): Promise<void> {
       // Vídeo em pé (celular) já chega com largura/altura de tela; o fps segue o do arquivo.
       const k = Math.min(1, 1920 / media.width, 1920 / media.height);
       const even = (n: number) => Math.max(16, Math.round((n * k) / 2) * 2);
-      const fps = info.fps && info.fps >= 1 && info.fps <= 120 ? Math.round(info.fps * 1000) / 1000 : undefined;
+      // Exato (23.976… e não 23.98): arredondar faria a prévia e a exportação pegarem o quadro anterior.
+      const fps = typeof info.fps === 'number' && info.fps >= 1 && info.fps <= 120 ? info.fps : undefined;
       ops.push({ op: 'setCanvas', width: even(media.width), height: even(media.height), ...(fps ? { fps } : {}) });
     }
     const videoEnd = Math.max(0, ...p.clips.filter((c) => c.kind === 'video').map((c) => c.start + c.duration));

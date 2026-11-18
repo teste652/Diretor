@@ -18,12 +18,17 @@ Decisões:
 - Keyframes ficam em segundos relativos ao início do clipe: mover o clipe leva a animação junto.
 - Presets (`animate`) viram keyframes comuns ao entrar no rascunho, então tudo o que o Claude faz é editável à mão.
 - Seleção: selecionar o próprio alvo do rascunho (ou nada) não o desatualiza; selecionar outro clipe, sim. Assim dá para ajustar o rascunho sem perdê-lo.
-- Uma proposta ativa por vez. Uma nova só entra se a anterior foi decidida ou com `replaces`.
+- Uma proposta aberta por vez (ativa ou desatualizada). Uma nova só entra se a anterior foi decidida ou com `replaces`, e `appendTo` não reabre uma proposta concluída enquanto outra espera o usuário.
+- O Claude nunca é orientado a refazer por conta própria: `get_proposal` e uma tentativa de `appendTo` numa proposta desatualizada dizem para esperar o pedido de “refazer”; numa descartada, para não propor de novo sem o usuário pedir.
+- Notas do usuário vão para a chamada que o Claude ainda está lendo: se ele cancela a espera (botão parar), o cancelamento atravessa servidor MCP → ponte → editor, e uma espera abandonada é substituída pela mais nova.
 - Mesmo `requestId` com o mesmo conteúdo devolve a proposta existente; com conteúdo diferente, é recusado (`request_id_conflict`), para nunca misturar dois pedidos.
 - Com rascunho aberto, Ctrl+Z/Ctrl+Y valem só para os ajustes manuais do rascunho; o histórico do projeto fica intacto até aceitar ou descartar.
-- Aparar: animações que tocam as duas bordas são reescaladas; as presas ao fim acompanham o fim; as demais acompanham o conteúdo. Pontos que saem do clipe viram um ponto na borda com o valor daquele instante. Aparar o início de um vídeo mantém o clipe no lugar e puxa os vídeos seguintes da faixa.
+- Aparar: animações que tocam as duas bordas são reescaladas; as presas ao fim acompanham o fim; as demais acompanham o conteúdo. Pontos que saem do clipe viram um ponto na borda com o valor que a própria animação tinha naquele instante (uma animação nunca herda o valor de outra). Aparar o início de um vídeo mantém o clipe no lugar e puxa os vídeos seguintes da faixa.
 - Presets nunca sobrescrevem o valor de repouso de uma propriedade, e cada um só substitui pontos do próprio grupo.
 - Ao abrir um projeto, a revisão só cresce, para uma proposta antiga nunca valer no projeto novo.
+- Importar mídia, faixas, nome e formato do projeto são sempre do usuário: mesmo com “Ajustar na linha do tempo” ligado, vão para o projeto, nunca para a etapa do Claude.
+- Exportação grava num temporário na mesma pasta e troca pelo destino só no fim; cancelar, fechar ou cair nunca apagam um arquivo que já existia. O ffmpeg é encerrado de verdade (entrada fechada e, se preciso, SIGKILL).
+- fps NTSC (23,976, 29,97, 59,94) é guardado exato (24000/1001…) e passado ao ffmpeg como fração, para a exportação não escorregar um quadro a cada ~42 s.
 
 Limitação conhecida: dois presets na mesma propriedade (ex.: `popOut` e depois `slowZoom`, ambos na escala) dividem a mesma lista de pontos; nada se perde e tudo é editável, mas o resultado pode precisar de ajuste à mão.
 

@@ -19,6 +19,14 @@ const session = new EditorSession();
 let close: () => void;
 let client: Client;
 
+const waitersOf = (s: EditorSession) => (s as unknown as { waiters: unknown[] }).waiters.length;
+async function until(cond: () => boolean, ms = 3000) {
+  for (const t0 = Date.now(); !cond(); ) {
+    if (Date.now() - t0 > ms) throw new Error('condição não aconteceu a tempo');
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
 async function tool(name: string, args: Record<string, unknown> = {}) {
   const r = (await client.callTool({ name, arguments: args })) as { content: { text: string }[] };
   return JSON.parse(r.content[0].text);
@@ -28,7 +36,7 @@ beforeAll(async () => {
   execSync('node scripts/build-main.mjs', { stdio: 'ignore' });
   session.dispatch([{ op: 'addClip', clip: { kind: 'title', id: 't1', text: 'EM MOVIMENTO', duration: 5 } }]);
   session.setSelection({ clipIds: ['t1'] });
-  const b = await startBridge(bridgeFile, (m, p) => handleBridge(session, m, p));
+  const b = await startBridge(bridgeFile, (m, p, signal) => handleBridge(session, m, p, signal));
   close = b.close;
   client = new Client({ name: 'teste', version: '1.0.0' });
   await client.connect(
@@ -109,6 +117,27 @@ describe('servidor MCP', () => {
     session.discardStep();
     const end = await tool('get_proposal', { proposalId: first.id });
     expect(end.status).toBe('done');
+  });
+
+  it('o Claude para de esperar (botão parar): o editor desiste na hora e a nota fica para a próxima chamada', async () => {
+    const ctx = await tool('get_context');
+    const p = await tool('propose_edit', {
+      requestId: 'parar-1',
+      baseRevision: ctx.revision,
+      title: 'Esperar decisão',
+      steps: [{ label: 'Entrada', ops: [{ op: 'animate', clipId: 't1', preset: 'fadeIn' }] }],
+    });
+    const ctrl = new AbortController();
+    const waiting = client.callTool({ name: 'get_proposal', arguments: { proposalId: p.id, waitSeconds: 30, sinceVersion: p.version } }, undefined, { signal: ctrl.signal });
+    await until(() => waitersOf(session) === 1);
+    ctrl.abort();
+    await expect(waiting).rejects.toThrow();
+    // O cancelamento atravessa servidor MCP → ponte → editor.
+    await until(() => waitersOf(session) === 0);
+    session.addNote('mais devagar, por favor');
+    const st = await tool('get_proposal', { proposalId: p.id });
+    expect(st.userNotes).toEqual(['mais devagar, por favor']);
+    session.discardStep();
   });
 
   it('erros de validação voltam curtos para o Claude', async () => {

@@ -252,7 +252,7 @@ export function Preview() {
         </span>
         <span style={{ flex: 1 }} />
         <span className="hint">
-          {W}×{H} · {fps} fps
+          {W}×{H} · {Math.round(fps * 1000) / 1000} fps
         </span>
         <span style={{ color: 'var(--muted)' }}>{volume > 0 ? Icon.volume : Icon.mute}</span>
         <input type="range" min={0} max={1} step={0.01} value={volume} onChange={(e) => setVolume(Number(e.target.value))} />

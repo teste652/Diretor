@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { type CaptionPreset, type Clip, EASINGS, type Easing, findClip } from '../core/model';
 import { ANIMATION_PRESETS, type AnimationPreset, CAPTION_PRESETS, type TrimEdge, clampTrimDelta } from '../core/operations';
-import { evalClipProp, keyframeGroups, propDef, propsForKind } from '../core/properties';
+import { evalClipProp, keyframeAt, keyframeGroups, propDef, propsForKind } from '../core/properties';
 import { playback, session, usePlayback, useSession } from './store';
 import { ColorField, NumberField, TextField, run } from './ui';
 
@@ -72,7 +72,8 @@ export function Inspector() {
         <h4>Animação · {local.toFixed(2)}s do clipe</h4>
         {propsForKind(c.kind).map((d) => {
           const ap = c.props[d.name];
-          const kfHere = ap?.keyframes.find((k) => Math.abs(k.t - local) < 1e-3);
+          // O ponto que a prévia mostra (com dois grupos no mesmo instante, o último).
+          const kfHere = keyframeAt(ap, local);
           const value = evalClipProp(c, d.name, pb.time);
           return (
             <div className="prop-row" key={d.name}>

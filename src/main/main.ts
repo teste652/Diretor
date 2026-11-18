@@ -126,15 +126,30 @@ function bridgeTimeoutMs(method: string, params: unknown): number {
   return Math.min(55_000, (wait + 8) * 1000);
 }
 
-function askRenderer(method: string, params: unknown): Promise<unknown> {
+function askRenderer(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
   if (!win || win.isDestroyed()) return Promise.resolve({ error: 'editor_closed', message: 'O editor não está aberto.' });
+  if (signal?.aborted) return Promise.resolve({ error: 'cancelled' });
   const id = ++reqSeq;
   return new Promise((resolve) => {
-    const timer = setTimeout(() => {
+    // Quem chamou desistiu (ou o tempo acabou): a interface para de esperar e guarda as notas para a próxima chamada.
+    const giveUp = (result: unknown) => {
+      if (!pending.has(id)) return;
+      clearTimeout(pending.get(id)!.timer);
       pending.delete(id);
-      resolve({ error: 'timeout', message: 'O editor não respondeu a tempo.' });
-    }, bridgeTimeoutMs(method, params));
-    pending.set(id, { resolve, timer });
+      signal?.removeEventListener('abort', onAbort);
+      if (win && !win.isDestroyed()) win.webContents.send('bridge:cancel', { id });
+      resolve(result);
+    };
+    const onAbort = () => giveUp({ error: 'cancelled' });
+    const timer = setTimeout(() => giveUp({ error: 'timeout', message: 'O editor não respondeu a tempo.' }), bridgeTimeoutMs(method, params));
+    pending.set(id, {
+      resolve: (v) => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve(v);
+      },
+      timer,
+    });
+    signal?.addEventListener('abort', onAbort, { once: true });
     win!.webContents.send('bridge:request', { id, method, params });
   });
 }
@@ -164,6 +179,15 @@ ipcMain.handle('media:openDialog', async () => {
     filters: [{ name: 'Vídeo MP4', extensions: ['mp4', 'm4v', 'mov', 'webm'] }],
   });
   return r.canceled ? [] : r.filePaths;
+});
+
+/** O arquivo ainda está lá? (para dizer "foi movido ou apagado" em vez de "formato não suportado"). */
+ipcMain.handle('media:exists', (_e, path: string) => {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
 });
 
 ipcMain.handle('media:probe', async (_e, path: string) => {
@@ -214,9 +238,59 @@ ipcMain.handle('project:save', async (_e, { path, project }: { path?: string; pr
 });
 
 // ---------- exportação ----------
-type ExportJob = { proc: ChildProcessWithoutNullStreams; outPath: string; stderr: string; exited: boolean; done: Promise<number>; cancelling?: Promise<void> };
+// O ffmpeg grava num temporário na mesma pasta; o arquivo escolhido só é trocado
+// quando o MP4 fica pronto. Cancelar, fechar ou recarregar nunca estraga nem apaga
+// um arquivo que já existia no destino.
+type ExportJob = {
+  proc: ChildProcessWithoutNullStreams;
+  outPath: string;
+  tmpPath: string;
+  stderr: string;
+  exited: boolean;
+  done: Promise<number>;
+  cancelling?: Promise<void>;
+};
 const jobs = new Map<number, ExportJob>();
 let jobSeq = 0;
+
+function removeQuietly(path: string): void {
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    /* pode estar em uso; fica para o usuário apagar */
+  }
+}
+
+const within = (p: Promise<unknown>, ms: number) => Promise.race([p.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), ms))]);
+
+/**
+ * Para o ffmpeg de verdade. Só o SIGTERM não basta no Linux/macOS: ele fica
+ * preso esperando o próximo quadro. Fechar a entrada solta essa espera; se ainda
+ * assim não sair, SIGKILL. (No Windows, kill() já encerra na hora.)
+ */
+async function stopFfmpeg(job: ExportJob): Promise<void> {
+  if (job.exited) return;
+  job.proc.stdin.destroy();
+  job.proc.kill();
+  if (await within(job.done, 2000)) return;
+  job.proc.kill('SIGKILL');
+  await within(job.done, 2000);
+}
+
+/** Para o ffmpeg e apaga o temporário. Chamar duas vezes espera o mesmo encerramento. */
+function abortExport(id: number, job: ExportJob): Promise<void> {
+  job.cancelling ??= (async () => {
+    await stopFfmpeg(job);
+    removeQuietly(job.tmpPath);
+    jobs.delete(id);
+  })();
+  return job.cancelling;
+}
+
+/** Janela fechada, recarregada ou que caiu: nenhuma exportação fica órfã. */
+function abortAllExports(): Promise<void> {
+  return Promise.all([...jobs].map(([id, job]) => abortExport(id, job))).then(() => undefined);
+}
 
 ipcMain.handle('export:start', async (_e, { project, outPath }: { project: Project; outPath?: string }) => {
   let file = outPath;
@@ -226,13 +300,15 @@ ipcMain.handle('export:start', async (_e, { project, outPath }: { project: Proje
     file = r.filePath;
   }
   if (project.media.some((m) => samePath(m.path, file!))) return { error: 'O arquivo de saída não pode substituir um original.' };
+  const id = ++jobSeq;
+  const tmpPath = join(dirname(file), `.${basename(file)}.diretor-${process.pid}-${id}.tmp.mp4`);
   let proc: ChildProcessWithoutNullStreams;
   try {
-    proc = spawn(ffmpegPath(), buildFfmpegArgs(project, file));
+    proc = spawn(ffmpegPath(), buildFfmpegArgs(project, tmpPath));
   } catch (e) {
     return { error: `Não consegui iniciar o ffmpeg: ${e instanceof Error ? e.message : String(e)}` };
   }
-  const job: ExportJob = { proc, outPath: file, stderr: '', exited: false, done: Promise.resolve(-1) };
+  const job: ExportJob = { proc, outPath: file, tmpPath, stderr: '', exited: false, done: Promise.resolve(-1) };
   job.done = new Promise<number>((res) => {
     proc.on('close', (code) => {
       job.exited = true;
@@ -249,7 +325,6 @@ ipcMain.handle('export:start', async (_e, { project, outPath }: { project: Proje
     job.stderr = (job.stderr + d).slice(-20_000);
   });
   proc.stdin.on('error', () => undefined);
-  const id = ++jobSeq;
   jobs.set(id, job);
   return { jobId: id, outPath: file };
 });
@@ -277,35 +352,45 @@ ipcMain.handle('export:frame', async (_e, jobId: number, frame: Uint8Array) => {
   return !job.exited && !stdin.destroyed && stdin.writable;
 });
 
-ipcMain.handle('export:finish', async (_e, jobId: number) => {
+/** Fim da exportação. `abandon`: a exportação falhou no meio; para o ffmpeg e não grava nada. */
+ipcMain.handle('export:finish', async (_e, jobId: number, abandon?: boolean) => {
   const job = jobs.get(jobId);
   if (!job) return { ok: false, error: 'Exportação não encontrada.' };
-  try {
-    job.proc.stdin.end();
-  } catch {
-    /* já fechado */
+  if (abandon) await stopFfmpeg(job);
+  else {
+    try {
+      job.proc.stdin.end();
+    } catch {
+      /* já fechado */
+    }
   }
   const code = await job.done;
+  // Cancelado enquanto o ffmpeg finalizava o arquivo: é cancelamento, não falha.
+  if (job.cancelling) {
+    await job.cancelling;
+    return { ok: false, cancelled: true };
+  }
   jobs.delete(jobId);
-  return code === 0 ? { ok: true, outPath: job.outPath } : { ok: false, error: job.stderr.trim().slice(-2000) || `ffmpeg saiu com código ${code}` };
+  const stderr = job.stderr.trim().slice(-2000);
+  if (abandon || code !== 0) {
+    removeQuietly(job.tmpPath);
+    return { ok: false, error: abandon ? stderr : stderr || `ffmpeg saiu com código ${code}` };
+  }
+  try {
+    renameSync(job.tmpPath, job.outPath);
+  } catch (e) {
+    removeQuietly(job.tmpPath);
+    return {
+      ok: false,
+      error: `Não consegui gravar ${basename(job.outPath)}: ${e instanceof Error ? e.message : String(e)}. Se ele estiver aberto em outro programa, feche-o e exporte de novo.`,
+    };
+  }
+  return { ok: true, outPath: job.outPath };
 });
 
 ipcMain.handle('export:cancel', async (_e, jobId: number) => {
   const job = jobs.get(jobId);
-  if (!job) return true;
-  // Cancelar duas vezes (botão + laço da exportação) espera o mesmo encerramento.
-  job.cancelling ??= (async () => {
-    job.proc.kill();
-    await Promise.race([job.done, new Promise((r) => setTimeout(r, 3000))]);
-    // O MP4 pela metade não abre em lugar nenhum: remove.
-    try {
-      rmSync(job.outPath, { force: true });
-    } catch {
-      /* pode estar em uso; fica para o usuário apagar */
-    }
-    jobs.delete(jobId);
-  })();
-  await job.cancelling;
+  if (job) await abortExport(jobId, job);
   return true;
 });
 
@@ -339,22 +424,43 @@ function createWindow(): void {
   else void win.loadFile(join(__dirname, '..', 'renderer', 'index.html'));
   // Fechar ou recarregar com mudanças não salvas: a interface segura (beforeunload) e aqui perguntamos.
   win.webContents.on('will-prevent-unload', (event) => {
-    const choice = dialog.showMessageBoxSync(win!, {
-      type: 'question',
-      buttons: ['Sair sem salvar', 'Cancelar'],
-      defaultId: 1,
-      cancelId: 1,
-      title: 'Mudanças não salvas',
-      message: 'O projeto tem mudanças que ainda não foram salvas.',
-      detail: 'Se sair agora, elas serão perdidas. Para guardar, cancele e use Salvar (Ctrl+S).',
-    });
+    const exporting = jobs.size > 0;
+    const choice = dialog.showMessageBoxSync(
+      win!,
+      exporting
+        ? {
+            type: 'question',
+            buttons: ['Sair e cancelar a exportação', 'Continuar'],
+            defaultId: 1,
+            cancelId: 1,
+            title: 'Exportação em andamento',
+            message: 'Uma exportação está em andamento.',
+            detail: 'Se sair agora, ela será cancelada e o arquivo de destino não será alterado. Mudanças não salvas no projeto, se houver, também serão perdidas.',
+          }
+        : {
+            type: 'question',
+            buttons: ['Sair sem salvar', 'Cancelar'],
+            defaultId: 1,
+            cancelId: 1,
+            title: 'Mudanças não salvas',
+            message: 'O projeto tem mudanças que ainda não foram salvas.',
+            detail: 'Se sair agora, elas serão perdidas. Para guardar, cancele e use Salvar (Ctrl+S).',
+          },
+    );
     if (choice === 0) event.preventDefault();
   });
-  win.webContents.on('did-start-loading', () => failPending('O editor recarregou. Chame a ferramenta de novo.'));
-  win.webContents.on('render-process-gone', () => failPending('A interface do editor fechou inesperadamente. Abra o editor e tente de novo.'));
+  win.webContents.on('did-start-loading', () => {
+    failPending('O editor recarregou. Chame a ferramenta de novo.');
+    void abortAllExports();
+  });
+  win.webContents.on('render-process-gone', () => {
+    failPending('A interface do editor fechou inesperadamente. Abra o editor e tente de novo.');
+    void abortAllExports();
+  });
   win.on('closed', () => {
     win = null;
     failPending('O editor foi fechado.');
+    void abortAllExports();
   });
 }
 
@@ -386,4 +492,11 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   closeBridge?.();
   app.quit();
+});
+
+// Sair no meio de uma exportação: espera o ffmpeg parar e o temporário sumir.
+app.on('will-quit', (event) => {
+  if (!jobs.size) return;
+  event.preventDefault();
+  void abortAllExports().finally(() => app.quit());
 });

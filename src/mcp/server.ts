@@ -18,7 +18,12 @@ export function callTimeoutMs(method: string, params: unknown): number {
   return Math.min(57_000, (wait + 10) * 1000);
 }
 
-export async function callEditor(method: string, params: unknown = {}): Promise<unknown> {
+/**
+ * Repassa a chamada ao editor. `signal` é o cancelamento do Claude Desktop (botão
+ * parar, ou o cliente desistiu): a espera do outro lado termina na hora e não
+ * consome as notas do usuário que a próxima chamada deve receber.
+ */
+export async function callEditor(method: string, params: unknown = {}, signal?: AbortSignal): Promise<unknown> {
   let info: { port: number; token: string };
   try {
     info = JSON.parse(readFileSync(bridgeFilePath(), 'utf8'));
@@ -30,11 +35,12 @@ export async function callEditor(method: string, params: unknown = {}): Promise<
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${info.token}` },
       body: JSON.stringify({ method, params }),
-      signal: AbortSignal.timeout(callTimeoutMs(method, params)),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(callTimeoutMs(method, params))]) : AbortSignal.timeout(callTimeoutMs(method, params)),
     });
     const body = (await res.json()) as { result?: unknown; error?: string };
     return body.error ? { error: 'editor_error', message: body.error } : body.result;
   } catch (e) {
+    if (signal?.aborted) return { error: 'cancelled', message: 'Chamada cancelada.' };
     if (e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError'))
       return { error: 'timeout', message: 'O editor demorou para responder. Tente de novo; se continuar, confira se ele não está ocupado exportando.' };
     return { error: 'editor_closed', message: 'O editor Diretor não está respondendo. Ele está aberto?' };
@@ -43,12 +49,12 @@ export async function callEditor(method: string, params: unknown = {}): Promise<
 
 const text = (v: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(v) }] });
 
-const OPS_HELP = `Cada op é um objeto JSON. Tempos em segundos. "t" de keyframe é relativo ao início do clipe: para o frame N da linha do tempo, t = N/fps − start do clipe.
+const OPS_HELP = `Cada op é um objeto JSON. Tempos em segundos. "t" de keyframe é relativo ao início do clipe: para o frame N da linha do tempo, t = N/fps − start do clipe. Só os campos listados são aceitos; qualquer outro é recusado (ex.: não existe "end": o fim é start + duration).
 - {"op":"animate","clipId","preset","start"?,"duration"?,"ease"?,"group"?} presets: fadeIn fadeOut slideUpIn slideDownIn slideLeftIn slideRightIn slideUpOut slideDownOut popIn popOut slowZoom. Vira keyframes editáveis.
 - {"op":"setKeyframe","clipId","prop","t","v","ease"?,"group"?,"keyframeId"?} props: x,y (px a partir do centro), scale, opacity(0-1). ease: linear easeIn easeOut easeInOut hold.
 - {"op":"removeKeyframe","clipId","prop","keyframeId"} | {"op":"clearKeyframes","clipId","prop"?,"group"?}
 - {"op":"retimeGroup","clipId","group","start","duration"} (muda início/duração de um grupo, ex.: "entrada")
-- {"op":"trimClip","clipId","edge":"start"|"end","delta"} apara uma borda (delta>0 = para a direita). Entrada fica no começo, saída no fim.
+- {"op":"trimClip","clipId","edge":"start"|"end","delta","ripple"?} apara uma borda (delta>0 = para a direita). Entrada fica no começo, saída no fim. Em vídeo, os vídeos seguintes da faixa acompanham a mudança (ripple:false para não mexer neles).
 - {"op":"setProperty","clipId","prop","value"} (só para propriedade sem pontos; com pontos use setKeyframe)
 - {"op":"addClip","clip":{"kind":"title"|"caption","text","start","duration","id"?,"style"?,"preset"?}} (caption preset: padrao caixa destaque)
 - {"op":"updateClip","clipId","set":{"start"?,"duration"?,"in"?,"text"?,"style"?,"preset"?,"volume"?(0-1),"muted"?}}
@@ -67,7 +73,7 @@ export function createServer(call: typeof callEditor = callEditor): McpServer {
       range: z.object({ start: z.number(), end: z.number() }).optional(),
       allowLarger: z.boolean().optional(),
     },
-    async (args) => text(await call('get_context', args)),
+    async (args, extra) => text(await call('get_context', args, extra.signal)),
   );
 
   server.tool(
@@ -84,7 +90,7 @@ export function createServer(call: typeof callEditor = callEditor): McpServer {
       replaces: z.string().optional(),
       appendTo: z.string().optional(),
     },
-    async (args) => text(await call('propose_edit', args)),
+    async (args, extra) => text(await call('propose_edit', args, extra.signal)),
   );
 
   server.tool(
@@ -95,15 +101,15 @@ export function createServer(call: typeof callEditor = callEditor): McpServer {
       waitSeconds: z.number().min(0).max(MAX_WAIT_SECONDS).optional(),
       sinceVersion: z.number().int().optional(),
     },
-    async (args) => text(await call('get_proposal', args)),
+    async (args, extra) => text(await call('get_proposal', args, extra.signal)),
   );
 
-  server.tool('cancel_proposal', 'Cancela uma proposta pendente (nada é gravado).', { proposalId: z.string() }, async (args) =>
-    text(await call('cancel_proposal', args)),
+  server.tool('cancel_proposal', 'Cancela uma proposta pendente (nada é gravado).', { proposalId: z.string() }, async (args, extra) =>
+    text(await call('cancel_proposal', args, extra.signal)),
   );
 
-  server.tool('editor_status', 'Confere se o editor está aberto; mostra revisão, presets e propriedades animáveis.', {}, async () =>
-    text(await call('status', {})),
+  server.tool('editor_status', 'Confere se o editor está aberto; mostra revisão, presets e propriedades animáveis.', {}, async (_args, extra) =>
+    text(await call('status', {}, extra.signal)),
   );
 
   return server;

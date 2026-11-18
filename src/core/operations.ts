@@ -153,6 +153,24 @@ const CAPTION_PRESET_NAMES: CaptionPreset[] = ['padrao', 'caixa', 'destaque'];
 const COLOR_RE = /^(#[0-9a-f]{3,4}|#[0-9a-f]{6}|#[0-9a-f]{8}|(rgb|rgba|hsl|hsla)\([\d\s.,%+-]+\)|[a-z]{3,24})$/i;
 const STYLE_KEYS = ['fontFamily', 'fontSize', 'fontWeight', 'color', 'background', 'align', 'shadow'];
 const CHANGE_KEYS = ['name', 'start', 'duration', 'in', 'text', 'style', 'preset', 'volume', 'muted'];
+const CLIP_SPEC_KEYS = ['kind', 'id', 'name', 'start', 'duration', 'text', 'mediaId', 'in', 'style', 'preset'];
+/** Campos aceitos em cada operação (além de "op"): um campo com nome errado é recusado, não ignorado. */
+const OP_KEYS: Record<Op['op'], string[]> = {
+  addMedia: ['media'],
+  addClip: ['clip'],
+  updateClip: ['clipId', 'set'],
+  removeClip: ['clipId'],
+  setProperty: ['clipId', 'prop', 'value'],
+  setKeyframe: ['clipId', 'prop', 't', 'v', 'ease', 'group', 'keyframeId'],
+  removeKeyframe: ['clipId', 'prop', 'keyframeId'],
+  clearKeyframes: ['clipId', 'prop', 'group'],
+  retimeGroup: ['clipId', 'group', 'start', 'duration'],
+  trimClip: ['clipId', 'edge', 'delta', 'ripple'],
+  updateTrack: ['trackId', 'set'],
+  renameProject: ['name'],
+  setCanvas: ['width', 'height', 'fps'],
+  animate: ['clipId', 'preset', 'start', 'duration', 'ease', 'group'],
+};
 
 function err(index: number, op: string, code: OpError['code'], message: string): OpError {
   return { index, op, code, message };
@@ -201,6 +219,12 @@ export function validateOp(p: Project, o: Op, index = 0): OpError[] {
     push('invalid_param', 'Cada operação deve ser um objeto com "op".');
     return e;
   }
+  const allowed = Object.prototype.hasOwnProperty.call(OP_KEYS, name) ? OP_KEYS[name as Op['op']] : undefined;
+  const extra = allowed ? Object.keys(o).filter((k) => k !== 'op' && !allowed.includes(k)) : [];
+  if (extra.length) {
+    push('invalid_param', `Campo desconhecido em ${name}: ${extra.join(', ')} (aceitos: ${allowed!.join(', ')}).`);
+    return e;
+  }
   const need = (clipId: unknown): Clip | undefined => {
     if (!isStr(clipId) || !clipId) {
       push('invalid_param', 'clipId é obrigatório.');
@@ -230,6 +254,11 @@ export function validateOp(p: Project, o: Op, index = 0): OpError[] {
       const c = o.clip as NewClipSpec | undefined;
       if (!isObj(c) || !['video', 'title', 'caption'].includes(c.kind as string)) {
         push('invalid_param', 'clip.kind deve ser video, title ou caption.');
+        break;
+      }
+      const extraC = Object.keys(c).filter((k) => !CLIP_SPEC_KEYS.includes(k));
+      if (extraC.length) {
+        push('invalid_param', `Campo desconhecido em clip: ${extraC.join(', ')} (aceitos: ${CLIP_SPEC_KEYS.join(', ')}; o fim é start + duration).`);
         break;
       }
       if (c.id !== undefined && (!isStr(c.id) || !c.id.trim())) push('invalid_param', 'clip.id deve ser um texto.');
@@ -311,6 +340,7 @@ export function validateOp(p: Project, o: Op, index = 0): OpError[] {
         push('invalid_param', 'delta deve ser um número (segundos).');
         break;
       }
+      if (o.ripple !== undefined && typeof o.ripple !== 'boolean') push('invalid_param', 'ripple deve ser true ou false.');
       const lim = trimLimits(p, c, o.edge);
       if (o.delta < lim.min - EPS || o.delta > lim.max + EPS)
         push('out_of_range', `Para aparar ${o.edge === 'start' ? 'o início' : 'o fim'}, delta vai de ${lim.min.toFixed(3)} a ${lim.max.toFixed(3)}s.`);
@@ -387,6 +417,7 @@ export function validateOp(p: Project, o: Op, index = 0): OpError[] {
     case 'updateTrack':
       if (!findTrack(p, o.trackId)) push('target_not_found', `Faixa "${String(o.trackId)}" não existe.`);
       else if (!isObj(o.set)) push('invalid_param', 'set deve ser um objeto.');
+      else if (Object.keys(o.set).some((k) => k !== 'hidden' && k !== 'locked')) push('invalid_param', 'set da faixa aceita só hidden e locked.');
       else if ((o.set.hidden !== undefined && typeof o.set.hidden !== 'boolean') || (o.set.locked !== undefined && typeof o.set.locked !== 'boolean'))
         push('invalid_param', 'hidden e locked devem ser true ou false.');
       break;
@@ -565,20 +596,20 @@ function remapKeyframes(c: Clip, newDur: number, contentShift: number): void {
 function clampKeyframes(kfs: Keyframe[], dur: number, value: number): Keyframe[] {
   const sorted = sortedKeyframes(kfs);
   const inside: Keyframe[] = [];
-  const below: Keyframe[] = [];
-  const above: Keyframe[] = [];
-  for (const k of sorted) {
-    if (k.t < -EPS) below.push(k);
-    else if (k.t > dur + EPS) above.push(k);
-    else inside.push({ ...k, t: Math.min(Math.max(k.t, 0), dur) });
+  for (const k of sorted) if (k.t >= -EPS && k.t <= dur + EPS) inside.push({ ...k, t: Math.min(Math.max(k.t, 0), dur) });
+  if (inside.length === sorted.length) return sortedKeyframes(inside);
+  // Cada animação (cada grupo, e os pontos feitos à mão) ganha o próprio ponto na
+  // borda, com o valor da PRÓPRIA curva ali: o valor de uma não vaza para a outra.
+  for (const layer of new Set(sorted.map((k) => k.group ?? ''))) {
+    const own = sorted.filter((k) => (k.group ?? '') === layer);
+    const curve = { value, keyframes: own };
+    const addEdge = (src: Keyframe | undefined, t: number) => {
+      if (!src || inside.some((k) => Math.abs(k.t - t) < SAME_T && sameGroup(k.group, src.group))) return;
+      inside.push({ ...src, t, v: evalProp(curve, t, value) });
+    };
+    addEdge(own.filter((k) => k.t < -EPS).at(-1), 0);
+    addEdge(own.find((k) => k.t > dur + EPS), dur);
   }
-  const curve = { value, keyframes: sorted };
-  const addEdge = (src: Keyframe, t: number) => {
-    if (inside.some((k) => Math.abs(k.t - t) < SAME_T && sameGroup(k.group, src.group))) return;
-    inside.push({ ...src, t, v: evalProp(curve, t, value) });
-  };
-  if (below.length) addEdge(below[below.length - 1], 0);
-  if (above.length) addEdge(above[0], dur);
   return sortedKeyframes(inside);
 }
 

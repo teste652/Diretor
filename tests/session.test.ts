@@ -409,6 +409,128 @@ describe('rascunho: desfazer, pedidos repetidos e desatualização', () => {
   });
 });
 
+describe('segunda revisão: orientação ao Claude, notas e contexto', () => {
+  it('edição vazia (botão de áudio sem vídeos) não cria histórico nem desatualiza o rascunho', () => {
+    const s = setup();
+    const rev = s.project.revision;
+    s.propose(entradaSaida(rev));
+    const past = s.past.length;
+    s.dirty = false;
+    expect(s.dispatch([]).ok).toBe(true);
+    expect(s.project.revision).toBe(rev);
+    expect(s.past).toHaveLength(past);
+    expect(s.openProposal?.status).toBe('active');
+    expect(s.dirty).toBe(false);
+  });
+
+  it('com "ajustar" ligado, renomear o projeto e importar mídia vão para o projeto, não para a etapa do Claude', () => {
+    const s = setup();
+    const r = s.propose(entradaSaida(s.project.revision));
+    if (!r.ok) throw new Error();
+    s.setAdjustMode(true);
+    expect(s.adjustMode).toBe(true);
+    expect(s.dispatch([{ op: 'renameProject', name: 'Meu vídeo' }])).toEqual({ ok: true, target: 'project' });
+    expect(s.project.name).toBe('Meu vídeo');
+    const media = { id: 'm2', path: 'C:/v/b.mp4', name: 'b.mp4', duration: 4, width: 1280, height: 720, hasAudio: false };
+    expect(s.dispatch([{ op: 'addMedia', media }, { op: 'addClip', clip: { kind: 'video', id: 'v2', mediaId: 'm2', start: 6 } }])).toEqual({ ok: true, target: 'project' });
+    expect(s.project.media.map((m) => m.id)).toContain('m2');
+    expect(findClip(s.project, 'v2')).toBeDefined();
+    // O projeto mudou fora do rascunho: ele fica desatualizado, e descartá-lo não leva o nome nem a mídia.
+    expect(r.proposal.status).toBe('stale');
+    s.discardStep(r.proposal.id);
+    expect(s.project.name).toBe('Meu vídeo');
+    expect(findClip(s.project, 'v2')).toBeDefined();
+  });
+
+  it('acrescentar a uma proposta desatualizada ou descartada orienta o Claude a esperar, não a refazer', () => {
+    const s = setup();
+    const rev = s.project.revision;
+    const first = s.propose({ requestId: 'g1', baseRevision: rev, title: 'x', steps: [{ label: 'E', ops: [{ op: 'animate', clipId: 't1', preset: 'fadeIn' }] }] });
+    if (!first.ok) throw new Error();
+    const add = (requestId: string) =>
+      s.propose({ requestId, baseRevision: rev, title: 'x', appendTo: first.proposal.id, steps: [{ label: 'S', ops: [{ op: 'animate', clipId: 't1', preset: 'fadeOut' }] }] });
+    s.setSelection({ clipIds: ['c1'] });
+    const stale = add('g2');
+    expect(stale.ok === false && stale.code).toBe('proposal_closed');
+    expect(stale.ok === false && stale.message).toMatch(/Não refaça/);
+    expect(stale.ok === false && stale.details).toMatchObject({ status: 'stale', redoRequested: false });
+    s.requestRedo();
+    const redo = add('g3');
+    expect(redo.ok === false && redo.message).toMatch(new RegExp(`replaces="${first.proposal.id}"`));
+    s.discardStep(first.proposal.id);
+    const gone = add('g4');
+    expect(gone.ok === false && gone.message).toMatch(/Não a proponha de novo/);
+    for (const r of [stale, redo, gone]) expect(r.ok === false && r.message).not.toMatch(/faça uma nova proposta/);
+  });
+
+  it('não reabre uma proposta concluída enquanto outra está desatualizada', () => {
+    const s = setup();
+    const a = s.propose({ requestId: 'A', baseRevision: s.project.revision, title: 'A', steps: [{ label: 'E', ops: [{ op: 'animate', clipId: 't1', preset: 'fadeIn' }] }] });
+    if (!a.ok) throw new Error();
+    s.acceptStep();
+    expect(a.proposal.status).toBe('done');
+    const b = s.propose({ requestId: 'B', baseRevision: s.project.revision, title: 'B', steps: [{ label: 'S', ops: [{ op: 'animate', clipId: 't1', preset: 'fadeOut' }] }] });
+    if (!b.ok) throw new Error(b.message);
+    s.setSelection({ clipIds: ['c1'] });
+    expect(b.proposal.status).toBe('stale');
+    const r = s.propose({ requestId: 'A2', baseRevision: s.project.revision, title: 'A', appendTo: a.proposal.id, steps: [{ label: 'Z', ops: [{ op: 'animate', clipId: 't1', preset: 'slowZoom' }] }] });
+    expect(r.ok === false && r.code).toBe('proposal_pending');
+    expect(a.proposal.status).toBe('done');
+    expect(s.openProposal?.id).toBe(b.proposal.id);
+  });
+
+  it('espera cancelada ou substituída não leva as notas do usuário', async () => {
+    const s = setup();
+    const r = s.propose(entradaSaida(s.project.revision));
+    if (!r.ok) throw new Error();
+    const args = { proposalId: r.proposal.id, waitSeconds: 30, sinceVersion: r.proposal.version };
+    // O Claude apertou "parar": a espera termina na hora.
+    const ctrl = new AbortController();
+    const abandoned = handleBridge(s, 'get_proposal', args, ctrl.signal);
+    ctrl.abort();
+    expect(await abandoned).toMatchObject({ error: 'cancelled' });
+    // Uma espera abandonada sem aviso é substituída pela chamada nova, que recebe a nota.
+    const old = handleBridge(s, 'get_proposal', args);
+    const live = handleBridge(s, 'get_proposal', args);
+    expect(await old).toMatchObject({ error: 'superseded' });
+    s.addNote('mais devagar');
+    expect(((await live) as { userNotes?: string[] }).userNotes).toEqual(['mais devagar']);
+  });
+
+  it('a nota vai para a espera mais nova quando há mais de uma proposta esperando', async () => {
+    const s = setup();
+    const a = s.propose({ requestId: 'n1', baseRevision: s.project.revision, title: 'A', steps: [{ label: 'E', ops: [{ op: 'animate', clipId: 't1', preset: 'fadeIn' }] }] });
+    if (!a.ok) throw new Error();
+    const older = handleBridge(s, 'get_proposal', { proposalId: a.proposal.id, waitSeconds: 30, sinceVersion: a.proposal.version });
+    const newer = handleBridge(s, 'get_proposal', { proposalId: 'outra', waitSeconds: 30 });
+    expect(await newer).toMatchObject({ error: 'not_found' });
+    const newest = handleBridge(s, 'get_proposal', { proposalId: a.proposal.id, waitSeconds: 30, sinceVersion: a.proposal.version });
+    s.addNote('azul');
+    expect(await older).toMatchObject({ error: 'superseded' });
+    expect(((await newest) as { userNotes?: string[] }).userNotes).toEqual(['azul']);
+  });
+
+  it('o contexto avisa o pedido de refazer e a resposta reduzida mantém a proposta pendente', async () => {
+    const s = setup();
+    const r = s.propose(entradaSaida(s.project.revision));
+    if (!r.ok) throw new Error();
+    s.setSelection({ clipIds: ['c1'] });
+    const a: any = await handleBridge(s, 'get_context', {});
+    expect(a.pendingProposal).toMatchObject({ status: 'stale', redoRequested: false });
+    s.requestRedo();
+    const b: any = await handleBridge(s, 'get_context', { knownRevision: a.revision });
+    expect(b.unchanged).toBeUndefined();
+    expect(b.pendingProposal).toMatchObject({ redoRequested: true });
+    for (const preset of ['fadeIn', 'popOut', 'slowZoom', 'slideUpIn'] as const) expect(s.dispatch([{ op: 'animate', clipId: 't1', preset }]).ok).toBe(true);
+    s.updateSettings({ contextCeilingBytes: 1024 });
+    const c: any = await handleBridge(s, 'get_context', { include: ['timeline', 'media'] });
+    expect(c.truncated).toBeDefined();
+    expect(c.pendingProposal).toMatchObject({ id: r.proposal.id, status: 'stale', redoRequested: true });
+    expect(c.size).toEqual(a.size);
+    expect(new TextEncoder().encode(JSON.stringify(c)).length).toBeLessThanOrEqual(1024);
+  });
+});
+
 describe('teto de contexto', () => {
   it('a resposta reduzida cabe no teto', async () => {
     const s = setup();

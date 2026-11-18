@@ -4,7 +4,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 
@@ -177,6 +177,31 @@ const p2r = await tool('get_proposal', { proposalId: p2.id });
 check('"Refazer" devolve contexto atual ao Claude', p2r.redoRequested === true && p2r.context?.revision > ctx2.revision);
 await ev(() => window.__diretor.session.discardStep());
 
+// O Claude desiste de esperar (botão parar no Claude Desktop): o editor para na hora e a nota do usuário fica para a próxima chamada.
+const ctx3 = await tool('get_context');
+const p3 = await tool('propose_edit', { requestId: 'e2e-3', baseRevision: ctx3.revision, title: 'Esperar decisão', steps: [{ label: 'Entrada', ops: [{ op: 'animate', clipId: 'ttl_e2e', preset: 'fadeIn' }] }] });
+const waiters = () => ev(() => window.__diretor.session.waiters.length);
+const until = async (cond) => {
+  for (let i = 0; i < 100; i++) {
+    if (await cond()) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
+};
+const stopper = new AbortController();
+const waiting = client.callTool({ name: 'get_proposal', arguments: { proposalId: p3.id, waitSeconds: 30, sinceVersion: p3.version } }, undefined, { signal: stopper.signal }).catch(() => 'cancelado');
+const started = await until(async () => (await waiters()) === 1);
+stopper.abort();
+const stoppedInEditor = await until(async () => (await waiters()) === 0);
+await ev(() => window.__diretor.session.addNote('mais devagar, por favor'));
+const p3s = await tool('get_proposal', { proposalId: p3.id });
+check(
+  'Claude para de esperar: o editor desiste na hora e a nota chega na próxima chamada',
+  started && stoppedInEditor && (await waiting) === 'cancelado' && JSON.stringify(p3s.userNotes) === '["mais devagar, por favor"]',
+  JSON.stringify({ started, stoppedInEditor, notes: p3s.userNotes }),
+);
+await tool('cancel_proposal', { proposalId: p3.id });
+
 // 3. Desfazer/refazer a etapa aprovada
 const undoOk = await ev(() => {
   const s = window.__diretor.session;
@@ -254,10 +279,28 @@ const bad = await ev((p) => {
   pr.media[0].path += '.sumiu.mp4';
   return d.exportProject(pr, { outPath: p });
 }, missingOut);
-check('vídeo ausente: exportação falha rápido e explica', !bad.ok && /Não consegui abrir/.test(bad.error ?? '') && !existsSync(missingOut), `${((Date.now() - t1) / 1000).toFixed(1)}s`);
+check(
+  'vídeo ausente: exportação falha rápido e diz que o arquivo sumiu',
+  !bad.ok && /Não consegui abrir/.test(bad.error ?? '') && /não encontrado/.test(bad.error ?? '') && !existsSync(missingOut),
+  `${((Date.now() - t1) / 1000).toFixed(1)}s`,
+);
 
-// Cancelar no meio: para logo e apaga o MP4 pela metade.
+// Temporários da exportação (o destino só é trocado quando o MP4 fica pronto).
+const leftovers = () => readdirSync(out).filter((f) => f.includes('.diretor-'));
+const contents = (f) => (existsSync(f) ? readFileSync(f, 'utf8') : null);
+// ffmpeg ainda rodando (preso esperando quadros depois de cancelar, por exemplo).
+const ffmpegRunning = () => {
+  if (process.platform === 'win32') {
+    const r = spawnSync('tasklist', ['/FI', 'IMAGENAME eq ffmpeg.exe', '/NH', '/FO', 'CSV'], { encoding: 'utf8' });
+    return (r.stdout || '').split('\n').filter((l) => /ffmpeg\.exe/i.test(l)).length;
+  }
+  const r = spawnSync('pgrep', ['-x', 'ffmpeg'], { encoding: 'utf8' });
+  return (r.stdout || '').split('\n').filter(Boolean).length;
+};
+
+// Cancelar no meio: para logo, não deixa MP4 pela metade e não mexe no arquivo que já existia no destino.
 const cancelOut = join(out, 'cancelado.mp4');
+writeFileSync(cancelOut, 'exportação anterior');
 const cancelled = await ev(
   (p) =>
     new Promise((done) => {
@@ -273,7 +316,112 @@ const cancelled = await ev(
     }),
   cancelOut,
 );
-check('cancelar a exportação para e apaga o arquivo pela metade', cancelled.cancelled === true && cancelled.frames <= 12 && !existsSync(cancelOut), JSON.stringify(cancelled));
+check(
+  'cancelar a exportação para na hora e mantém o arquivo que já existia',
+  cancelled.cancelled === true && cancelled.frames <= 12 && contents(cancelOut) === 'exportação anterior' && leftovers().length === 0,
+  JSON.stringify(cancelled),
+);
+
+// Cancelar enquanto os vídeos são conferidos: não abre a janela de salvar nem grava nada.
+const preOut = join(out, 'cancelado-antes.mp4');
+writeFileSync(preOut, 'não mexer');
+const pre = await ev((p) => {
+  const d = window.__diretor;
+  const r = d.exportProject(d.session.project, { outPath: p });
+  void d.cancelExport();
+  return r;
+}, preOut);
+check('cancelar durante a conferência dos vídeos não grava nada', pre.cancelled === true && contents(preOut) === 'não mexer' && leftovers().length === 0, JSON.stringify(pre));
+
+// Cancelar no último quadro, com o ffmpeg ainda finalizando: é cancelamento, não "falha".
+const lastOut = join(out, 'cancelado-no-fim.mp4');
+const last = await ev(
+  (p) =>
+    new Promise((done) => {
+      const d = window.__diretor;
+      d.exportProject(d.session.project, {
+        outPath: p,
+        onProgress: (x) => {
+          if (x.frame === x.total) void d.cancelExport();
+        },
+      }).then(done);
+    }),
+  lastOut,
+);
+check('cancelar no último quadro não vira "falha na exportação"', last.cancelled === true && !last.error && !existsSync(lastOut) && leftovers().length === 0, JSON.stringify(last));
+const stillRunning = ffmpegRunning();
+check('depois de cancelar, nenhum ffmpeg fica rodando', stillRunning === 0, `${stillRunning} processo(s)`);
+
+// 4. Interface: campo numérico, arrasto da borda do vídeo, lixeira e painel do modo econômico.
+// Digitar o fim de uma legenda e clicar em outra antes do Enter: o número vai para a legenda certa, sem os limites da outra.
+const capA = await ev(() => window.__diretor.session.project.clips.find((c) => c.kind === 'caption').id);
+await ev((id) => {
+  const s = window.__diretor.session;
+  s.dispatch([{ op: 'addClip', clip: { kind: 'caption', id: 'cap_b', text: 'Segunda legenda', start: 3.6, duration: 2 } }]);
+  s.setSelection({ clipIds: [id] });
+}, capA);
+const endField = page.locator('.field', { hasText: 'Fim (s)' }).locator('input');
+await endField.click();
+await endField.fill('2');
+await page.click('[data-clip="cap_b"]');
+await page.waitForTimeout(100);
+const capEnd = await ev((id) => {
+  const c = window.__diretor.session.project.clips.find((x) => x.id === id);
+  return Math.round((c.start + c.duration) * 1000) / 1000;
+}, capA);
+check('campo numérico: clicar em outro clipe grava o valor digitado no clipe certo', capEnd === 2, `fim da legenda: ${capEnd}`);
+
+// Arrastar a borda esquerda do vídeo: durante o arrasto ele já aparece como vai ficar (no lugar, mais curto).
+const block = page.locator(`[data-clip="${vid}"]`);
+const b0 = await block.boundingBox();
+const vidDur = await ev((id) => window.__diretor.session.project.clips.find((x) => x.id === id).duration, vid);
+const pxPerSec = b0.width / vidDur;
+const hb = await page.locator(`[data-clip="${vid}"] .handle.l`).boundingBox();
+await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+await page.mouse.down();
+await page.mouse.move(hb.x + hb.width / 2 + pxPerSec, hb.y + hb.height / 2, { steps: 6 });
+const bDrag = await block.boundingBox();
+await page.mouse.up();
+await page.waitForTimeout(100);
+const trimmed = await ev((id) => {
+  const c = window.__diretor.session.project.clips.find((x) => x.id === id);
+  return { start: c.start, in: c.in, duration: c.duration };
+}, vid);
+check(
+  'arrastar a borda esquerda do vídeo mostra o resultado certo durante o arrasto',
+  Math.abs(bDrag.x - b0.x) < 3 && Math.abs(bDrag.width - (b0.width - pxPerSec)) < 4 && trimmed.start === 0 && trimmed.in === 2 && trimmed.duration === vidDur - 1,
+  JSON.stringify({ antes: Math.round(b0.x), durante: Math.round(bDrag.x), ...trimmed }),
+);
+await ev(() => window.__diretor.session.undo());
+
+// Lixeira com um ponto de animação selecionado: remove o ponto, não o clipe.
+const kfBefore = await ev(() => {
+  const s = window.__diretor.session;
+  const c = s.project.clips.find((x) => x.id === 'ttl_e2e');
+  const [prop, ap] = Object.entries(c.props).find(([, p]) => p.keyframes.length);
+  const k = ap.keyframes[ap.keyframes.length - 1];
+  s.setSelection({ clipIds: [c.id], keyframe: { clipId: c.id, prop, keyframeId: k.id } });
+  return Object.values(c.props).reduce((n, p) => n + p.keyframes.length, 0);
+});
+await page.click('[data-testid=trash]');
+const kfAfter = await ev(() => {
+  const c = window.__diretor.session.project.clips.find((x) => x.id === 'ttl_e2e');
+  return c ? Object.values(c.props).reduce((n, p) => n + p.keyframes.length, 0) : -1;
+});
+check('lixeira com ponto selecionado remove só o ponto', kfAfter >= 0 && kfAfter < kfBefore, `pontos: ${kfBefore} → ${kfAfter}`);
+await ev(() => window.__diretor.session.undo());
+
+// Painel do modo econômico: abre à vista, fora da área que rola.
+await page.click('[data-testid=eco-toggle]');
+const eco = await ev(() => {
+  const el = document.querySelector('.eco-pop');
+  if (!el) return { exists: false };
+  const r = el.getBoundingClientRect();
+  return { exists: true, inScroll: !!el.closest('.assist-scroll'), visible: r.top >= 0 && r.bottom <= window.innerHeight && r.height > 40 };
+});
+await shot('5-modo-economico');
+check('painel do modo econômico abre à vista', eco.exists && !eco.inScroll && eco.visible, JSON.stringify(eco));
+await page.click('[data-testid=eco-toggle]');
 
 writeFileSync(join(out, 'resultado.json'), JSON.stringify(results, null, 2));
 await client.close();
@@ -281,6 +429,21 @@ await client.close();
 await ev(() => {
   window.__diretor.session.dirty = false;
 });
+
+// Por último: a interface cai no meio de uma exportação. O ffmpeg para e não sobra arquivo.
+const crashOut = join(out, 'interrompido.mp4');
+await ev((p) => {
+  const d = window.__diretor;
+  window.__expFrames = 0;
+  void d.exportProject(d.session.project, { outPath: p, onProgress: (x) => (window.__expFrames = x.frame) });
+}, crashOut);
+await page.waitForFunction(() => window.__expFrames >= 5);
+const tmpDuring = leftovers().length;
+await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer());
+const cleaned = await until(async () => leftovers().length === 0 && ffmpegRunning() === 0);
+check('a interface cai no meio da exportação: o ffmpeg para e não sobra arquivo', tmpDuring === 1 && cleaned && !existsSync(crashOut), `temporário durante a exportação: ${tmpDuring}`);
+writeFileSync(join(out, 'resultado.json'), JSON.stringify(results, null, 2));
+
 await app.close();
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} verificações passaram.`);
