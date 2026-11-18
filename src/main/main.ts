@@ -8,7 +8,7 @@ import { buildFfmpegArgs, parseFfmpegProbe } from '../core/export';
 import type { Project } from '../core/model';
 import { bridgeFilePath } from '../shared/paths';
 import { startBridge } from './bridge';
-import { moveIntoPlace } from './replace';
+import { type MoveResult, moveIntoPlace } from './replace';
 
 app.setName('Diretor');
 
@@ -251,8 +251,10 @@ type ExportJob = {
   exited: boolean;
   done: Promise<number>;
   cancelling?: Promise<void>;
-  /** O MP4 já está pronto e está indo para o destino: não se cancela mais, só se espera. */
-  moving?: Promise<unknown>;
+  /** O MP4 está pronto e indo para o destino (com novas tentativas se ele estiver preso). */
+  moving?: Promise<MoveResult>;
+  /** Cancelar durante essas tentativas: o destino não muda e o temporário é apagado. */
+  stopMove?: AbortController;
 };
 const jobs = new Map<number, ExportJob>();
 let jobSeq = 0;
@@ -282,13 +284,16 @@ async function stopFfmpeg(job: ExportJob): Promise<void> {
 }
 
 /**
- * Para o ffmpeg e apaga o temporário. Chamar duas vezes espera o mesmo encerramento.
- * Se o vídeo já está pronto e indo para o destino, só espera ele chegar (nunca o apaga).
+ * Para o ffmpeg (ou as tentativas de gravar no destino) e apaga o temporário. O
+ * destino nunca muda por causa de um cancelamento; se a troca já tinha acontecido
+ * (ela é atômica), fica feita. Chamar duas vezes espera o mesmo encerramento.
  */
 function abortExport(id: number, job: ExportJob): Promise<void> {
   job.cancelling ??= (async () => {
-    if (job.moving) await job.moving;
-    else {
+    if (job.moving) {
+      job.stopMove?.abort();
+      if ('cancelled' in (await job.moving)) removeQuietly(job.tmpPath);
+    } else {
       await stopFfmpeg(job);
       removeQuietly(job.tmpPath);
     }
@@ -395,11 +400,16 @@ ipcMain.handle('export:finish', async (_e, jobId: number, abandon?: boolean) => 
     removeQuietly(job.tmpPath);
     return { ok: false, error: abandon ? stderr : stderr || `ffmpeg saiu com código ${code}` };
   }
-  // Nunca apaga o vídeo pronto: destino preso vira "nome (1).mp4" ao lado. Fechar o
-  // editor agora espera essa troca terminar em vez de cancelar.
-  const moving = moveIntoPlace(job.tmpPath, job.outPath);
+  // Destino preso (player, antivírus): tenta de novo e, se continuar, grava como
+  // "nome (1).mp4" em vez de perder o vídeo. Cancelar ou fechar nessa hora cancela.
+  job.stopMove = new AbortController();
+  const moving = moveIntoPlace(job.tmpPath, job.outPath, { signal: job.stopMove.signal });
   job.moving = moving;
   const moved = await moving;
+  if ('cancelled' in moved) {
+    await job.cancelling;
+    return { ok: false, cancelled: true };
+  }
   jobs.delete(jobId);
   const name = basename(job.outPath);
   if ('error' in moved) {
@@ -452,8 +462,7 @@ function createWindow(): void {
   else void win.loadFile(join(__dirname, '..', 'renderer', 'index.html'));
   // Fechar ou recarregar com mudanças não salvas: a interface segura (beforeunload) e aqui perguntamos.
   win.webContents.on('will-prevent-unload', (event) => {
-    const exporting = [...jobs.values()].some((j) => !j.moving);
-    const finishing = !exporting && jobs.size > 0;
+    const exporting = jobs.size > 0;
     const choice = dialog.showMessageBoxSync(
       win!,
       exporting
@@ -466,17 +475,7 @@ function createWindow(): void {
             message: 'Uma exportação está em andamento.',
             detail: 'Se sair agora, ela será cancelada e o arquivo de destino não será alterado. Mudanças não salvas no projeto, se houver, também serão perdidas.',
           }
-        : finishing
-          ? {
-              type: 'question',
-              buttons: ['Sair', 'Continuar'],
-              defaultId: 1,
-              cancelId: 1,
-              title: 'Exportação terminando',
-              message: 'O vídeo está pronto e sendo gravado no destino.',
-              detail: 'Se sair agora, o editor termina de gravar o vídeo antes de fechar. Mudanças não salvas no projeto, se houver, serão perdidas.',
-            }
-          : {
+        : {
             type: 'question',
             buttons: ['Sair sem salvar', 'Cancelar'],
             defaultId: 1,

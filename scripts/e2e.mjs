@@ -31,12 +31,19 @@ setTimeout(() => {
 }, 10 * 60_000).unref();
 
 const out = resolve('.test-output');
+// Uma execução interrompida pode ter deixado um arquivo imutável (veja holdFile): solta antes de limpar.
+if (process.platform === 'linux' && existsSync(out)) spawnSync('chattr', ['-R', '-i', out], { stdio: 'ignore' });
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 const bridgeFile = join(out, 'bridge.json');
 // Nome com espaço e acentos, como os arquivos de verdade.
 const src = join(out, 'vídeo de teste ação.mp4');
 const results = [];
+const skipped = [];
+const skip = (name, why) => {
+  skipped.push(name);
+  console.log(`– ${name} — pulada: ${why}`);
+};
 const check = (name, ok, extra = '') => {
   results.push({ name, ok: !!ok, extra });
   console.log(`${ok ? '✓' : '✗'} ${name}${extra ? ' — ' + extra : ''}`);
@@ -352,9 +359,12 @@ check('cancelar no último quadro não vira "falha na exportação"', last.cance
 const stillRunning = ffmpegRunning();
 check('depois de cancelar, nenhum ffmpeg fica rodando', stillRunning === 0, `${stillRunning} processo(s)`);
 
-// Nome longo com acentos (o limite é de 255 bytes por nome): o temporário não pode repetir o nome escolhido.
+// Nome longo com acentos: o temporário não pode repetir o nome escolhido. O limite é de 255
+// bytes por nome no Linux e de 255 unidades UTF-16 no Windows; o nome fica perto do limite
+// do sistema, de modo que um temporário que o repetisse passaria dele.
+const nameSize = (n) => (process.platform === 'win32' ? n.length : Buffer.byteLength(n));
 let longName = '';
-while (Buffer.byteLength(`${longName}.mp4`) < 236) longName += 'ação ';
+while (nameSize(`${longName}ação.mp4`) <= 241) longName += 'ação ';
 longName = `${longName.trim()}.mp4`;
 const longOut = join(out, longName);
 const longExp = await ev((p) => window.__diretor.exportProject(window.__diretor.session.project, { outPath: p }), longOut);
@@ -363,45 +373,97 @@ check(
   longExp.ok && existsSync(longOut) && leftovers().length === 0,
   `${longName.length} caracteres, ${Buffer.byteLength(longName)} bytes${longExp.error ? `; ${longExp.error.slice(0, 200)}` : ''}`,
 );
+rmSync(longOut, { force: true }); // caminho longo demais para guardar no artefato do CI
 
-// Destino aberto em outro programa (um player prende o arquivo no Windows): o vídeo pronto
-// é salvo ao lado como "nome (1).mp4", com aviso, e nada se perde. No Windows o arquivo fica
-// preso de verdade (aberto sem permitir apagar, como um player); fora dele, o destino é uma pasta.
+/**
+ * Prende um arquivo como um player faz no Windows: trocá-lo é recusado (EPERM) até soltar.
+ * No Windows, outro processo o abre sem permitir apagar; no Linux como root, o arquivo fica
+ * imutável (chattr +i), que recusa a troca com o mesmo erro. Devolve a função que solta,
+ * ou null se este sistema não tem como prender um arquivo.
+ */
+async function holdFile(path) {
+  if (process.platform === 'win32') {
+    const ps = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', "$f = [System.IO.File]::Open($env:LOCK_PATH, 'Open', 'Read', 'Read'); [Console]::Out.WriteLine('preso'); [Console]::Out.Flush(); Start-Sleep -Seconds 300"],
+      { env: { ...process.env, LOCK_PATH: path }, stdio: ['ignore', 'pipe', 'inherit'] },
+    );
+    await new Promise((res, rej) => {
+      ps.stdout.on('data', (d) => /preso/.test(String(d)) && res());
+      ps.once('exit', (c) => rej(new Error(`o PowerShell que prende o arquivo saiu (${c})`)));
+      setTimeout(() => rej(new Error('o PowerShell não abriu o arquivo a tempo')), 60_000);
+    });
+    return async () => {
+      if (ps.exitCode !== null) return;
+      const gone = new Promise((r) => ps.once('exit', r));
+      ps.kill();
+      await gone;
+    };
+  }
+  if (process.platform === 'linux' && spawnSync('chattr', ['+i', path], { stdio: 'ignore' }).status === 0) {
+    return async () => void spawnSync('chattr', ['-i', path], { stdio: 'ignore' });
+  }
+  return null;
+}
+const waitFor = async (cond, ms) => {
+  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) if (await cond()) return true;
+  return false;
+};
+
+// Destino aberto em outro programa: o editor tenta de novo por alguns segundos e depois salva
+// o vídeo pronto ao lado como "nome (1).mp4", com aviso; nada se perde.
 const lockedOut = join(out, 'aberto no player.mp4');
-let locker = null;
-if (process.platform === 'win32') {
-  writeFileSync(lockedOut, 'vídeo aberto no player');
-  locker = spawn(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-Command', "$f = [System.IO.File]::Open($env:LOCK_PATH, 'Open', 'Read', 'Read'); [Console]::Out.WriteLine('preso'); [Console]::Out.Flush(); Start-Sleep -Seconds 300"],
-    { env: { ...process.env, LOCK_PATH: lockedOut }, stdio: ['ignore', 'pipe', 'inherit'] },
-  );
-  await new Promise((res, rej) => {
-    locker.stdout.on('data', (d) => /preso/.test(String(d)) && res());
-    locker.once('exit', (c) => rej(new Error(`o PowerShell que prende o arquivo saiu (${c})`)));
-    setTimeout(() => rej(new Error('o PowerShell não abriu o arquivo a tempo')), 60_000);
-  });
-} else {
+writeFileSync(lockedOut, 'vídeo aberto no player');
+let release = await holdFile(lockedOut);
+const asDir = !release;
+if (asDir) {
+  // Sem como prender um arquivo aqui: o destino vira uma pasta, que também não pode ser substituída.
+  rmSync(lockedOut);
   mkdirSync(lockedOut);
-  writeFileSync(join(lockedOut, 'dentro.txt'), 'não mexer');
+  writeFileSync(join(lockedOut, 'dentro.txt'), 'vídeo aberto no player');
+  release = async () => undefined;
 }
 const t2 = Date.now();
 const locked = await ev((p) => window.__diretor.exportProject(window.__diretor.session.project, { outPath: p }), lockedOut);
 const lockedSecs = ((Date.now() - t2) / 1000).toFixed(1);
-if (locker && locker.exitCode === null) {
-  const gone = new Promise((r) => locker.once('exit', r));
-  locker.kill();
-  await gone;
-}
+await release();
 const altOut = join(out, 'aberto no player (1).mp4');
 const altDur = /Duration: (\d+):(\d+):([\d.]+)/.exec(spawnSync(FFMPEG, ['-hide_banner', '-i', altOut], { encoding: 'utf8' }).stderr);
 const altSeconds = altDur ? Number(altDur[1]) * 3600 + Number(altDur[2]) * 60 + Number(altDur[3]) : 0;
-const untouched = process.platform === 'win32' ? contents(lockedOut) === 'vídeo aberto no player' : contents(join(lockedOut, 'dentro.txt')) === 'não mexer';
+const untouched = contents(asDir ? join(lockedOut, 'dentro.txt') : lockedOut) === 'vídeo aberto no player';
 check(
   'destino aberto em outro programa: o vídeo pronto é salvo ao lado, com aviso, e nada se perde',
   locked.ok && basename(locked.outPath ?? '') === basename(altOut) && /aberto em outro programa/.test(locked.warning ?? '') && Math.abs(altSeconds - seconds) < 0.1 && untouched && leftovers().length === 0,
-  `${lockedSecs}s; ${JSON.stringify({ outPath: locked.outPath && basename(locked.outPath), warning: locked.warning, error: locked.error, altSeconds })}`,
+  `${lockedSecs}s${asDir ? ' (destino como pasta)' : ''}; ${JSON.stringify({ outPath: locked.outPath && basename(locked.outPath), warning: locked.warning, error: locked.error, altSeconds })}`,
 );
+
+// Cancelar enquanto o editor espera o destino preso soltar (o ffmpeg já terminou): o arquivo
+// antigo fica intacto, nada é gravado ao lado e não sobra temporário.
+const heldOut = join(out, 'preso ao cancelar.mp4');
+writeFileSync(heldOut, 'não mexer');
+const releaseHeld = await holdFile(heldOut);
+if (!releaseHeld) {
+  skip('cancelar enquanto o destino está preso', 'sem como prender um arquivo neste sistema');
+} else {
+  await ev((p) => {
+    const d = window.__diretor;
+    window.__held = { frame: 0, total: 1, result: null };
+    void d.exportProject(d.session.project, { outPath: p, onProgress: (x) => Object.assign(window.__held, x) }).then((r) => (window.__held.result = r));
+  }, heldOut);
+  const allFrames = await waitFor(() => ev(() => window.__held.frame === window.__held.total), 180_000);
+  const ffmpegDone = allFrames && (await waitFor(() => ffmpegRunning() === 0, 30_000));
+  const t3 = Date.now();
+  await ev(() => window.__diretor.cancelExport());
+  await waitFor(() => ev(() => !!window.__held.result), 15_000);
+  const cancelSecs = (Date.now() - t3) / 1000;
+  const held = await ev(() => window.__held.result);
+  await releaseHeld();
+  check(
+    'cancelar enquanto o destino está preso não mexe no arquivo nem grava nada ao lado',
+    allFrames && ffmpegDone && held?.cancelled === true && contents(heldOut) === 'não mexer' && !existsSync(join(out, 'preso ao cancelar (1).mp4')) && leftovers().length === 0 && cancelSecs < 2.5,
+    `${cancelSecs.toFixed(1)}s depois de cancelar; ${JSON.stringify(held)}`,
+  );
+}
 
 // 4. Interface: campo numérico, arrasto da borda do vídeo, lixeira e painel do modo econômico.
 // Digitar o fim de uma legenda e clicar em outra antes do Enter: o número vai para a legenda certa, sem os limites da outra.
@@ -497,5 +559,5 @@ writeFileSync(join(out, 'resultado.json'), JSON.stringify(results, null, 2));
 
 await app.close();
 const failed = results.filter((r) => !r.ok);
-console.log(`\n${results.length - failed.length}/${results.length} verificações passaram.`);
+console.log(`\n${results.length - failed.length}/${results.length} verificações passaram.${skipped.length ? ` ${skipped.length} pulada(s) neste sistema: ${skipped.join('; ')}.` : ''}`);
 process.exit(failed.length ? 1 : 0);

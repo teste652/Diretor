@@ -160,7 +160,7 @@ export function App() {
                   <div style={{ width: `${(exp.frame / exp.total) * 100}%` }} />
                 </div>
                 <p className="hint">
-                  Quadro {exp.frame} de {exp.total}. Tudo é processado no seu computador.
+                  {exp.frame >= exp.total ? 'Finalizando e gravando o MP4…' : `Quadro ${exp.frame} de ${exp.total}.`} Tudo é processado no seu computador.
                 </p>
                 <button
                   className="btn"

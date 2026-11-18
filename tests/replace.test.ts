@@ -76,6 +76,25 @@ describe('gravar o MP4 pronto no destino', () => {
     expect(r).toEqual({ error: 'ENOENT: no such file or directory' });
   });
 
+  it('cancelar enquanto espera o destino soltar para na hora e não grava com outro nome', async () => {
+    const f = fakeFs([TMP, DEST], { locked: new Set([DEST]) });
+    const stop = new AbortController();
+    const moving = moveIntoPlace(TMP, DEST, { ...f, waitsMs: [5000, 5000], signal: stop.signal });
+    await new Promise((r) => setTimeout(r, 20));
+    const t0 = Date.now();
+    stop.abort();
+    expect(await moving).toEqual({ cancelled: true });
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(f.calls).toEqual([DEST]); // nenhuma nova tentativa e nada de "video (1).mp4"
+    expect([f.has(TMP), f.has(DEST)]).toEqual([true, true]); // quem cancelou apaga o temporário
+  });
+
+  it('já cancelado: não toca em nada', async () => {
+    const f = fakeFs([TMP, DEST]);
+    expect(await moveIntoPlace(TMP, DEST, { ...f, waitsMs: W, signal: AbortSignal.abort() })).toEqual({ cancelled: true });
+    expect(f.calls).toEqual([]);
+  });
+
   it('no disco de verdade: substitui o arquivo existente', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'diretor-move-'));
     const tmp = join(dir, '.diretor-1-1-abc.part');

@@ -13,13 +13,31 @@ export const RENAME_WAITS_MS = [50, 100, 200, 400, 800, 1200, 1600];
 /**
  * `fallback`: o destino continuou preso e o vídeo foi salvo ao lado, em `path`.
  * `kept`: onde o vídeo pronto ficou quando nem isso deu (ausente se ele sumiu).
+ * `cancelled`: cancelado antes de chegar a algum lugar; o vídeo continua em `tmp`.
  */
-export type MoveResult = { path: string; fallback: boolean } | { error: string; kept?: string };
+export type MoveResult = { path: string; fallback: boolean } | { error: string; kept?: string } | { cancelled: true };
 
 export interface MoveOptions {
   rename?: (from: string, to: string) => Promise<void>;
   exists?: (path: string) => boolean;
   waitsMs?: number[];
+  /** Cancelar: para de tentar (entre tentativas) e não grava com outro nome. */
+  signal?: AbortSignal;
+}
+
+/** Espera `ms`, ou menos se `signal` for abortado. Devolve false se foi abortado. */
+function pause(ms: number, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const done = (ok: boolean) => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', stop);
+      resolve(ok);
+    };
+    const stop = () => done(false);
+    const timer = setTimeout(() => done(true), ms);
+    signal?.addEventListener('abort', stop, { once: true });
+  });
 }
 
 /**
@@ -27,23 +45,27 @@ export interface MoveOptions {
  * fechado ou aberto em outro programa recusa a troca por instantes: tenta de novo.
  * Se o destino continuar preso (ex.: aberto num player), grava ao lado como
  * "nome (1).mp4" em vez de apagar o vídeo pronto. Se nem isso der, deixa o
- * temporário onde está e devolve o caminho dele.
+ * temporário onde está e devolve o caminho dele. Cancelado no meio, não mexe
+ * em mais nada (uma troca já feita é atômica e fica feita).
  */
 export async function moveIntoPlace(tmp: string, dest: string, opts: MoveOptions = {}): Promise<MoveResult> {
   const rename = opts.rename ?? fsRename;
   const exists = opts.exists ?? existsSync;
   const waits = opts.waitsMs ?? RENAME_WAITS_MS;
+  const { signal } = opts;
   let last: unknown;
   for (let i = 0; ; i++) {
+    if (signal?.aborted) return { cancelled: true };
     try {
       await rename(tmp, dest);
       return { path: dest, fallback: false };
     } catch (e) {
       last = e;
       if (!BUSY.has((e as NodeJS.ErrnoException)?.code ?? '') || i >= waits.length) break;
-      await new Promise((r) => setTimeout(r, waits[i]));
+      if (!(await pause(waits[i], signal))) return { cancelled: true };
     }
   }
+  if (signal?.aborted) return { cancelled: true };
   // Outro nome só ajuda se o problema é o destino (aberto, protegido, é uma pasta...).
   if (exists(dest) && exists(tmp)) {
     const ext = extname(dest) || '.mp4';
