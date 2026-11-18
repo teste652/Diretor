@@ -5,10 +5,9 @@ import { bridgeStats } from './bridgeClient';
 import { AI_APP, AI_LABEL, type AiKind, chat, type ChatImage, readImage, useChat } from './chat';
 import { useSession } from './store';
 import { COPIED, connectOutcome, type ClaudeStatus, keepOutcome, type Outcome, quitHint, setupMessage, setupView } from './claudeSetupText';
-import { Icon, NumberField, showToast } from './ui';
+import { Icon, showToast } from './ui';
 
 const STEP_LABEL: Record<string, string> = { waiting: 'na fila', draft: 'em rascunho', accepted: 'aceita', discarded: 'descartada', invalid: 'inválida' };
-const kb = (b: number) => `${(b / 1024).toFixed(1)} KB`;
 
 type FeedRow = { key: string; time: number; node: ReactNode };
 
@@ -18,7 +17,6 @@ export function ChatPanel() {
   const [tab, setTab] = useState<AiKind>('claude');
   const [text, setText] = useState('');
   const [images, setImages] = useState<ChatImage[]>([]);
-  const [showEco, setShowEco] = useState(false);
   const [showDesktop, setShowDesktop] = useState(false);
   const [dragging, setDragging] = useState(false);
   // Imagens ainda sendo lidas: Enviar espera, para a imagem não ficar para a próxima mensagem.
@@ -116,10 +114,7 @@ export function ChatPanel() {
       key: `a${a.id}`,
       time: a.time,
       node: (
-        <div className={`item ${a.kind === 'note' ? 'note' : ''}`}>
-          {a.bytesOut !== undefined && <span className="size">{kb(a.bytesOut)}</span>}
-          {a.text}
-        </div>
+        <div className={`item ${a.kind === 'note' ? 'note' : ''}`}>{a.text}</div>
       ),
     })),
     ...convo.entries.slice(-80).map((e) => ({
@@ -161,7 +156,6 @@ export function ChatPanel() {
           <button key={k} className={`tab ${tab === k ? 'active' : ''}`} onClick={() => setTab(k)} data-testid={`ai-tab-${k}`}>
             {k === 'claude' ? Icon.chat : Icon.code} {AI_LABEL[k]}
             {k === 'codex' && <span className="tab-sub"> · Reserva</span>}
-            <span className={`dot ${ch.convos[k].runId ? 'busy' : ch.cli[k] ? 'on' : ''}`} style={{ marginLeft: 6 }} />
           </button>
         ))}
       </div>
@@ -208,9 +202,9 @@ export function ChatPanel() {
 
         {req?.status === 'pending' && (
           <div className="card stale">
-            <span className="badge warn">Contexto maior</span>
-            <h3>A IA pediu {kb(req.bytes)} de contexto</h3>
-            <p>O teto atual é {kb(s.settings.contextCeilingBytes)}. Só dados do projeto (texto e números); nenhuma imagem ou trecho de vídeo é enviado.</p>
+            <span className="badge warn">Modo econômico</span>
+            <h3>A IA quer ver mais do projeto</h3>
+            <p>Para este pedido ela precisa de mais do que o modo econômico deixa. Só vão dados do projeto (texto e números); nenhuma imagem ou trecho de vídeo é enviado.</p>
             <div className="row">
               <button className="btn primary" onClick={() => s.answerContextRequest(true)}>
                 Autorizar uma vez
@@ -225,25 +219,6 @@ export function ChatPanel() {
         {p && <ProposalCard key={p.id} p={p} />}
 
       </div>
-
-      {/* Fora da área que rola: abre sempre à vista, logo acima da caixa de mensagem. */}
-      {showEco && (
-        <div className="eco-pop">
-          <div className="row" style={{ justifyContent: 'space-between' }}>
-            <strong>Modo econômico</strong>
-            <button className={`btn ${s.settings.economy ? 'on' : ''}`} onClick={() => s.updateSettings({ economy: !s.settings.economy })}>
-              {s.settings.economy ? 'Ligado' : 'Desligado'}
-            </button>
-          </div>
-          <div className="field">
-            <label>Teto por ação (KB)</label>
-            <NumberField value={s.settings.contextCeilingBytes / 1024} min={1} max={256} step={1} digits={1} onCommit={(v) => s.updateSettings({ contextCeilingBytes: Math.round(v * 1024) })} />
-          </div>
-          <p className="hint">
-            Métricas do editor: {bridgeStats.calls} chamadas, {kb(bridgeStats.totalBytesOut)} enviados (≈{Math.round(bridgeStats.totalBytesOut / 4)} tokens, estimativa do editor). O consumo real é do seu plano do Claude ou do ChatGPT.
-          </p>
-        </div>
-      )}
 
       <div className="composer chat-composer">
         {images.length > 0 && (
@@ -299,7 +274,22 @@ export function ChatPanel() {
           <button className="btn ghost icon" title="Falar (Ctrl+D): abre o ditado por voz do Windows" onClick={() => void dictate()} data-testid="ai-mic">
             {Icon.mic}
           </button>
-          <button className={`btn ${s.settings.economy ? 'on' : ''}`} onClick={() => setShowEco((v) => !v)} title="Modo econômico e teto de contexto" data-testid="eco-toggle">
+          {/* Um clique liga ou desliga. Ligado (azul), a IA vê só o essencial e pede licença para ver mais. */}
+          <button
+            className={`btn ${s.settings.economy ? 'on' : ''}`}
+            aria-pressed={s.settings.economy}
+            onClick={() => {
+              const on = !s.settings.economy;
+              s.updateSettings({ economy: on });
+              showToast(on ? 'Modo econômico ligado: a IA vê só o essencial e pede licença para ver mais.' : 'Modo econômico desligado: a IA vê o projeto todo sem pedir licença, gastando mais do seu plano.');
+            }}
+            title={
+              s.settings.economy
+                ? 'Ligado: a IA vê só o essencial e pede licença para ver mais. Clique para desligar.'
+                : 'Desligado: a IA vê o projeto todo sem pedir licença, gastando mais do seu plano. Clique para ligar.'
+            }
+            data-testid="eco-toggle"
+          >
             Modo econômico
           </button>
           <span style={{ flex: 1 }} />
@@ -313,9 +303,6 @@ export function ChatPanel() {
             </button>
           )}
         </div>
-      </div>
-      <div className="metrics">
-        Último contexto: {kb(bridgeStats.lastBytesOut)} · teto {kb(s.settings.contextCeilingBytes)} (métrica do editor)
       </div>
     </div>
   );

@@ -67,7 +67,7 @@ export function createServer(call: typeof callEditor = callEditor): McpServer {
 
   server.tool(
     'get_context',
-    'Lê o estado do editor Diretor: revisão, seleção atual (clipes compactos com keyframes) e playhead. Modo econômico: por padrão só a seleção. Passe knownRevision para reaproveitar o que já tem (responde {unchanged}). include:["timeline"] traz todos os clipes (use range para limitar). Se vier "truncated", reduza o pedido ou use allowLarger:true (o usuário autoriza no editor).',
+    'Lê o estado do editor Diretor: revisão, seleção atual (clipes compactos com keyframes) e playhead. Por padrão só a seleção. Passe knownRevision para reaproveitar o que já tem (responde {unchanged}). include:["timeline"] traz todos os clipes (use range para limitar). Com o modo econômico ligado há um teto de tamanho: se vier "truncated", reduza o pedido ou use allowLarger:true (o usuário autoriza no editor). Desligado, não há teto.',
     {
       knownRevision: z.number().int().optional(),
       include: z.array(z.enum(['timeline', 'media'])).optional(),

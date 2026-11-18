@@ -559,7 +559,7 @@ if (!releaseHeld) {
   );
 }
 
-// 4. Interface: campo numérico, arrasto da borda do vídeo, lixeira e painel do modo econômico.
+// 4. Interface: campo numérico, arrasto da borda do vídeo, lixeira e botão do modo econômico.
 // Digitar o fim de uma legenda e clicar em outra antes do Enter: o número vai para a legenda certa, sem os limites da outra.
 const capA = await ev(() => window.__diretor.session.project.clips.find((c) => c.kind === 'caption').id);
 await ev((id) => {
@@ -618,17 +618,20 @@ const kfAfter = await ev(() => {
 check('lixeira com ponto selecionado remove só o ponto', kfAfter >= 0 && kfAfter < kfBefore, `pontos: ${kfBefore} → ${kfAfter}`);
 await ev(() => window.__diretor.session.undo());
 
-// Painel do modo econômico: abre à vista, fora da área que rola.
+// Modo econômico: um clique desliga e outro liga de novo, sem painel e sem números em KB no chat.
+const ecoState = () => ev(() => ({ on: window.__diretor.session.settings.economy, pressed: document.querySelector('[data-testid=eco-toggle]').getAttribute('aria-pressed') }));
+const eco0 = await ecoState();
 await page.click('[data-testid=eco-toggle]');
-const eco = await ev(() => {
-  const el = document.querySelector('.eco-pop');
-  if (!el) return { exists: false };
-  const r = el.getBoundingClientRect();
-  return { exists: true, inScroll: !!el.closest('.assist-scroll'), visible: r.top >= 0 && r.bottom <= window.innerHeight && r.height > 40 };
-});
+const eco1 = await ecoState();
 await shot('5-modo-economico');
-check('painel do modo econômico abre à vista', eco.exists && !eco.inScroll && eco.visible, JSON.stringify(eco));
 await page.click('[data-testid=eco-toggle]');
+const eco2 = await ecoState();
+const kbNoChat = await ev(() => /\d\s*KB\b/i.test(document.querySelector('[data-testid=chat-panel]').innerText));
+check(
+  'modo econômico liga e desliga com um clique, sem números em KB no chat',
+  eco0.on === true && eco0.pressed === 'true' && eco1.on === false && eco1.pressed === 'false' && eco2.on === true && !kbNoChat,
+  JSON.stringify({ eco0, eco1, eco2, kbNoChat }),
+);
 
 // Chat dentro do Diretor: a mensagem vai para o Claude Code (aqui, o simulado), que usa o
 // servidor do Diretor e deixa a edição como rascunho. Com imagem, e retomando a mesma conversa.

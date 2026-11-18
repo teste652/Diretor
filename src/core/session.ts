@@ -77,9 +77,6 @@ export interface ActivityEntry {
   time: number;
   kind: 'tool' | 'proposal' | 'decision' | 'note' | 'info';
   text: string;
-  /** Tamanho do contexto enviado ao assistente (métrica do editor, bytes). */
-  bytesOut?: number;
-  bytesIn?: number;
 }
 
 export interface UserNote {
@@ -463,22 +460,23 @@ export class EditorSession {
   }
 
   updateSettings(s: Partial<Settings>): void {
-    const ceiling = this.settings.contextCeilingBytes;
+    const before = this.settings;
     this.settings = { ...this.settings, ...s };
-    // Teto novo: uma recusa anterior deixa de valer.
-    if (this.settings.contextCeilingBytes !== ceiling) this.contextRequest = null;
+    // Teto novo ou modo econômico trocado: um pedido ou uma recusa anterior deixa de valer
+    // (desligado, a IA vê tudo sem pedir licença, então o cartão pendente sai).
+    if (this.settings.contextCeilingBytes !== before.contextCeilingBytes || this.settings.economy !== before.economy) this.contextRequest = null;
     this.emit();
   }
 
   requestLargerContext(bytes: number, scope = '[]'): void {
     this.contextRequest = { bytes, revision: this.project.revision, scope, ceiling: this.settings.contextCeilingBytes, status: 'pending' };
-    this.log('info', `O Claude pediu um contexto de ${(bytes / 1024).toFixed(1)} KB (teto ${(this.settings.contextCeilingBytes / 1024).toFixed(1)} KB).`);
+    this.log('info', 'A IA pediu para ver mais do projeto do que o modo econômico deixa.');
   }
 
   answerContextRequest(grant: boolean): void {
     if (!this.contextRequest) return;
     this.contextRequest = { ...this.contextRequest, status: grant ? 'granted' : 'denied' };
-    this.log('decision', grant ? 'Contexto maior autorizado (uma vez).' : 'Contexto maior recusado.');
+    this.log('decision', grant ? 'Você deixou a IA ver mais do projeto (uma vez).' : 'Você não deixou a IA ver mais do projeto.');
   }
 
   addNote(text: string): void {
