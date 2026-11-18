@@ -1,10 +1,15 @@
-# Testes no Windows (o sistema alvo do editor): tipos, testes automáticos e o
-# roteiro de ponta a ponta no app Electron de verdade, com o Claude simulado
-# por um cliente MCP real. Roda em pull requests e sob demanda.
+# Testes no Windows (o sistema alvo do editor) e o instalador de teste.
+# - Em cada PR e na main: tipos, testes automáticos, o roteiro de ponta a ponta
+#   no app Electron de verdade (com o Claude simulado por um cliente MCP real),
+#   o instalador, e o mesmo roteiro no app instalado por ele.
+# - Na main: publica o instalador num link fixo, que sempre baixa a versão mais nova:
+#   https://github.com/<dono>/<repositório>/releases/download/teste/Diretor-Setup.exe
 name: CI
 
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -12,12 +17,15 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Na main, uma publicação em andamento termina antes da próxima começar.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    env:
+      VERSAO: 0.1.${{ github.run_number }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -28,8 +36,10 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run test:e2e
+      # Artefatos com prazo curto: o plano gratuito tem pouco espaço para eles em repositório privado.
       - name: Guardar capturas e o MP4 exportado
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
           name: e2e-windows
@@ -37,4 +47,97 @@ jobs:
           # a pasta começa com ponto: sem isto o upload a ignora
           include-hidden-files: true
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 2
+
+      - name: Gerar o instalador
+        run: npm run dist -- --win nsis --x64 "-c.extraMetadata.version=${{ env.VERSAO }}"
+
+      - name: Instalar como um usuário instalaria (sem perguntas, só para este usuário)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath release\Diretor-Setup.exe -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "O instalador terminou com o código $($p.ExitCode)." }
+          Stop-Process -Name Diretor -ErrorAction SilentlyContinue
+          $exe = Get-ChildItem -Path "$env:LOCALAPPDATA\Programs" -Recurse -Depth 2 -Filter Diretor.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw 'O Diretor.exe não apareceu em %LOCALAPPDATA%\Programs depois de instalar.' }
+          Write-Host "Instalado em $($exe.FullName)"
+          "DIRETOR_APP=$($exe.FullName)" >> $env:GITHUB_ENV
+
+      - name: Roteiro de ponta a ponta no app instalado
+        run: node scripts/e2e.mjs
+
+      - name: Guardar capturas do app instalado
+        if: always() && env.DIRETOR_APP != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-windows-instalado
+          path: .test-output/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 2
+
+      # Só para passar ao passo de publicar (o link fixo é a versão de teste, não o artefato).
+      - name: Guardar o instalador para publicar
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v6
+        with:
+          name: Diretor-Setup
+          path: release/Diretor-Setup.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  # Só depois de tudo passar no Windows, e só a partir da main.
+  publicar:
+    needs: windows
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # criar e atualizar a versão de teste
+      actions: write # baixar o instalador gerado no Windows e apagar o artefato depois
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSAO: 0.1.${{ github.run_number }}
+    steps:
+      - name: Baixar o instalador testado
+        run: gh run download "$GITHUB_RUN_ID" --name Diretor-Setup --dir instalador
+
+      - name: Publicar no link fixo
+        run: |
+          set -euo pipefail
+          TAG=teste
+          COMMIT=$(echo "$GITHUB_SHA" | cut -c1-7)
+          TITLE="Diretor $VERSAO (versão de teste)"
+          cat > notas.md <<EOF
+          Versão de teste gerada automaticamente da \`main\` (commit $COMMIT). Este link sempre baixa a versão mais nova:
+          https://github.com/$GH_REPO/releases/download/$TAG/Diretor-Setup.exe
+
+          **Instalar**
+          1. Baixe o **Diretor-Setup.exe** (em Assets, logo abaixo) e abra.
+          2. O instalador ainda não tem assinatura digital, então o Windows pode avisar "O Windows protegeu o computador": clique em **Mais informações** e depois em **Executar assim mesmo**. Se o navegador disser que o arquivo não é baixado com frequência, escolha **Manter**.
+          3. O Diretor instala sozinho, sem perguntas, e abre. Ele fica no menu Iniciar.
+
+          **Usar com o Claude**
+          No painel do Claude, dentro do Diretor, clique em **Conectar**. Depois feche o Claude Desktop por completo (botão direito no ícone dele, perto do relógio → Sair) e abra de novo.
+
+          **Atualizar**
+          Baixe de novo por este mesmo link e instale por cima. Seus projetos continuam onde você salvou.
+          EOF
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" instalador/Diretor-Setup.exe --clobber
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true > /dev/null
+            gh release edit "$TAG" --title "$TITLE" --notes-file notas.md --prerelease
+          else
+            gh release create "$TAG" instalador/Diretor-Setup.exe --target "$GITHUB_SHA" --title "$TITLE" --notes-file notas.md --prerelease
+          fi
+          echo "Publicado: https://github.com/$GH_REPO/releases/download/$TAG/Diretor-Setup.exe"
+
+      # Só depois de publicar: se a publicação falhar, "Re-run failed jobs" ainda acha o instalador.
+      - name: Apagar o artefato do instalador (já está na versão de teste)
+        continue-on-error: true
+        run: |
+          for id in $(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[] | select(.name == "Diretor-Setup") | .id'); do
+            gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$id"
+          done

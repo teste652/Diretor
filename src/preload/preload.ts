@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { ConfigState, ConnectResult, McpEntry } from '../main/claudeDesktop';
 
 const api = {
   openMediaDialog: (): Promise<string[]> => ipcRenderer.invoke('media:openDialog'),
@@ -11,7 +12,10 @@ const api = {
   exportFinish: (jobId: number, abandon?: boolean): Promise<{ ok: boolean; outPath?: string; error?: string; warning?: string; cancelled?: boolean }> =>
     ipcRenderer.invoke('export:finish', jobId, abandon),
   exportCancel: (jobId: number) => ipcRenderer.invoke('export:cancel', jobId),
-  appInfo: () => ipcRenderer.invoke('app:info'),
+  appInfo: (): Promise<{ version: string; packaged: boolean; ffmpeg: string; mcp: McpEntry; bridgeFile: string; platform: string }> => ipcRenderer.invoke('app:info'),
+  claudeStatus: (): Promise<{ configs: ConfigState[]; serverFound: boolean }> => ipcRenderer.invoke('claude:status'),
+  connectClaude: (): Promise<{ results?: ConnectResult[]; error?: string }> => ipcRenderer.invoke('claude:connect'),
+  copyClaudeConfig: (): Promise<boolean> => ipcRenderer.invoke('claude:copyConfig'),
   showItem: (p: string) => ipcRenderer.invoke('shell:showItem', p),
   onBridgeRequest: (fn: (req: { id: number; method: string; params: unknown }) => void) => {
     const h = (_e: unknown, req: { id: number; method: string; params: unknown }) => fn(req);

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { closeSync, createReadStream, existsSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -8,6 +8,7 @@ import { buildFfmpegArgs, parseFfmpegProbe } from '../core/export';
 import type { Project } from '../core/model';
 import { bridgeFilePath } from '../shared/paths';
 import { startBridge } from './bridge';
+import { claudeConfigDirs, connectClaude, type McpEntry, readClaudeConfigs, unpackedPath } from './claudeDesktop';
 import { type MoveResult, moveIntoPlace } from './replace';
 
 app.setName('Diretor');
@@ -30,8 +31,9 @@ function ffmpegPath(): string {
   return 'ffmpeg';
 }
 
-const FFMPEG_MISSING =
-  'Não encontrei o ffmpeg. Rode "npm install" de novo ou instale o ffmpeg e coloque no PATH (ou aponte a variável DIRETOR_FFMPEG para o ffmpeg.exe).';
+const FFMPEG_MISSING = app.isPackaged
+  ? 'Não encontrei o ffmpeg que vem com o Diretor. Instale o Diretor de novo (às vezes o antivírus apaga o ffmpeg.exe).'
+  : 'Não encontrei o ffmpeg. Rode "npm install" de novo ou instale o ffmpeg e coloque no PATH (ou aponte a variável DIRETOR_FFMPEG para o ffmpeg.exe).';
 
 function probe(path: string): Promise<ReturnType<typeof parseFfmpegProbe> | { error: string }> {
   return new Promise((resolve) => {
@@ -432,9 +434,39 @@ ipcMain.handle('export:cancel', async (_e, jobId: number) => {
   return true;
 });
 
+// ---------- Claude Desktop ----------
+/**
+ * Como o Claude Desktop inicia o servidor MCP: o próprio executável do Diretor
+ * rodando como Node (ELECTRON_RUN_AS_NODE), então não precisa instalar o Node.
+ * No instalador, o servidor fica fora do app.asar para poder ser executado.
+ */
+function mcpEntry(): McpEntry {
+  return { command: process.execPath, args: [unpackedPath(join(__dirname, '..', 'mcp', 'server.cjs'))], env: { ELECTRON_RUN_AS_NODE: '1' } };
+}
+
+ipcMain.handle('claude:status', () => {
+  const entry = mcpEntry();
+  return { configs: readClaudeConfigs(claudeConfigDirs(), entry), serverFound: existsSync(entry.args[0]) };
+});
+
+ipcMain.handle('claude:connect', async () => {
+  const entry = mcpEntry();
+  if (!existsSync(entry.args[0])) return { error: `Não encontrei o servidor do Claude em ${entry.args[0]}. Instale o Diretor de novo.` };
+  return { results: await connectClaude(claudeConfigDirs(), entry) };
+});
+
+/** O trecho para colar à mão no claude_desktop_config.json. */
+ipcMain.handle('claude:copyConfig', () => {
+  clipboard.writeText(JSON.stringify({ mcpServers: { diretor: mcpEntry() } }, null, 2));
+  return true;
+});
+
 ipcMain.handle('app:info', () => ({
+  version: app.getVersion(),
+  packaged: app.isPackaged,
+  ffmpeg: ffmpegPath(),
+  mcp: mcpEntry(),
   bridgeFile: bridgeFilePath(),
-  mcpServer: join(app.getAppPath(), 'dist', 'mcp', 'server.cjs'),
   platform: process.platform,
 }));
 

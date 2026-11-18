@@ -107,6 +107,12 @@ export function App() {
     if (s.hint) showToast(s.hint.text);
   }, [s.hint?.at]);
 
+  // Versão instalada, para dizer qual versão de teste está aberta.
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    window.diretor?.appInfo().then((i) => i.packaged && setVersion(i.version), () => undefined);
+  }, []);
+
   const doExport = async () => {
     if (s.openProposal?.status === 'active' && !confirm('Há um rascunho pendente. A exportação usa só o que já foi aceito. Continuar?')) return;
     cancel.current = { cancelled: false };
@@ -120,6 +126,7 @@ export function App() {
     <div className="app">
       <div className="titlebar">
         <span className="brand">Diretor</span>
+        {version && <span className="version" data-testid="app-version">{version}</span>}
         <span className="sep" />
         <span style={{ color: 'var(--muted)' }}>{Icon.folder}</span>
         <div className="nodrag" style={{ width: 240 }}>

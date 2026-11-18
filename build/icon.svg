@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Ícone do Diretor: uma máscara de cantos arredondados (o "quadro") com o play no meio. -->
+  <defs>
+    <linearGradient id="fundo" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2a3b4f"/>
+      <stop offset="1" stop-color="#11161c"/>
+    </linearGradient>
+    <linearGradient id="luz" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#d4ecff"/>
+      <stop offset="1" stop-color="#7cc4ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="40" y="40" width="944" height="944" rx="216" fill="url(#fundo)"/>
+  <rect x="222" y="222" width="580" height="580" rx="140" fill="none" stroke="url(#luz)" stroke-width="76"/>
+  <path d="M446 392 L446 632 L642 512 Z" fill="url(#luz)" stroke="url(#luz)" stroke-width="44" stroke-linejoin="round"/>
+</svg>
