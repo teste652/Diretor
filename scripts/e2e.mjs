@@ -559,7 +559,7 @@ if (!releaseHeld) {
   );
 }
 
-// 4. Interface: campo numérico, arrasto da borda do vídeo, lixeira e painel do modo econômico.
+// 4. Interface: campo numérico, arrasto da borda do vídeo, lixeira e botão do modo econômico.
 // Digitar o fim de uma legenda e clicar em outra antes do Enter: o número vai para a legenda certa, sem os limites da outra.
 const capA = await ev(() => window.__diretor.session.project.clips.find((c) => c.kind === 'caption').id);
 await ev((id) => {

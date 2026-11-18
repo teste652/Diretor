@@ -3,12 +3,12 @@ import { EditorSession } from '../core/session';
 
 export const session = new EditorSession();
 
-// Modo econômico e teto ficam salvos neste computador (valem na próxima vez que abrir).
+// O modo econômico fica salvo neste computador (vale na próxima vez que abrir). O teto não é mais
+// ajustável na tela: um teto salvo por uma versão antiga (ex.: 1 KB) é ignorado e vale o padrão.
 const SETTINGS_KEY = 'diretor.settings';
 try {
   const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? 'null');
-  if (saved && typeof saved.economy === 'boolean' && Number.isFinite(saved.contextCeilingBytes) && saved.contextCeilingBytes >= 1024)
-    session.updateSettings({ economy: saved.economy, contextCeilingBytes: Math.min(256 * 1024, saved.contextCeilingBytes) });
+  if (saved && typeof saved.economy === 'boolean') session.updateSettings({ economy: saved.economy });
 } catch {
   /* sem armazenamento: usa o padrão (econômico ligado) */
 }

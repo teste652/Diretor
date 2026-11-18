@@ -168,7 +168,7 @@ describe('propostas em rascunho', () => {
 });
 
 describe('modo econômico', () => {
-  it('contexto mínimo, cache por revisão e teto configurável', async () => {
+  it('contexto mínimo, cache por revisão e teto', async () => {
     const s = setup();
     const a: any = await handleBridge(s, 'get_context', {});
     expect(a.selection[0].id).toBe('t1');
@@ -595,7 +595,7 @@ describe('teto de contexto', () => {
     expect(s.contextRequest).toBeNull();
   });
 
-  it('recusa vale até o usuário mudar o teto', async () => {
+  it('recusa vale até o teto mudar', async () => {
     const s = setup();
     s.updateSettings({ contextCeilingBytes: 300 });
     await handleBridge(s, 'get_context', { include: ['timeline'], allowLarger: true });

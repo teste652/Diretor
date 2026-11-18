@@ -77,9 +77,6 @@ export interface ActivityEntry {
   time: number;
   kind: 'tool' | 'proposal' | 'decision' | 'note' | 'info';
   text: string;
-  /** Tamanho do contexto enviado ao assistente (métrica do editor, bytes). */
-  bytesOut?: number;
-  bytesIn?: number;
 }
 
 export interface UserNote {
@@ -479,7 +476,7 @@ export class EditorSession {
   answerContextRequest(grant: boolean): void {
     if (!this.contextRequest) return;
     this.contextRequest = { ...this.contextRequest, status: grant ? 'granted' : 'denied' };
-    this.log('decision', grant ? 'Contexto maior autorizado (uma vez).' : 'Contexto maior recusado.');
+    this.log('decision', grant ? 'Você deixou a IA ver mais do projeto (uma vez).' : 'Você não deixou a IA ver mais do projeto.');
   }
 
   addNote(text: string): void {
