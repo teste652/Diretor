@@ -20,7 +20,7 @@ Editor de vídeo para Windows com foco em motion graphics, feito para editar à 
 3. Ele instala sozinho, só para o seu usuário (em `%LOCALAPPDATA%\Programs`, sem pedir senha de administrador), cria o atalho no menu Iniciar e abre o Diretor. O ffmpeg e o servidor do Claude vêm dentro dele.
 4. Para atualizar: salve o projeto, feche o Diretor, baixe de novo pelo mesmo link e instale por cima (se o Diretor estiver aberto, o instalador pede para salvar e fechar; ele nunca fecha o editor à força). Se o Claude Desktop estava conectado, o instalador avisa no fim para fechá-lo por completo e abrir de novo. A versão instalada aparece ao lado do nome, no canto superior esquerdo.
 
-Para desinstalar: **Configurações do Windows → Aplicativos → Diretor → Desinstalar**. O Diretor sai também da configuração do Claude Desktop (só a entrada desta instalação). Se o Claude Desktop estiver aberto, o desinstalador pede antes para fechá-lo, porque aberto ele pode gravar a configuração antiga de volta.
+Para desinstalar: **Configurações do Windows → Aplicativos → Diretor → Desinstalar**. O Diretor sai também da configuração do Claude Desktop (só a entrada desta instalação). Se ele estava conectado e o Claude Desktop estiver aberto, o desinstalador pede antes para fechá-lo, porque aberto ele pode gravar a configuração antiga de volta.
 
 O GitHub Actions gera esse instalador a cada mudança na `main`, instala, roda nele o roteiro de ponta a ponta inteiro, testa instalar por cima e desinstalar, e só então troca o arquivo do link.
 
@@ -44,12 +44,12 @@ Para gerar o instalador no seu computador: `npm run dist` (no Windows; sai em `r
 ## Conectar ao Claude Desktop
 
 1. Abra o Claude Desktop pelo menos uma vez neste computador.
-2. Feche o Claude Desktop por completo (botão direito no ícone dele, perto do relógio → **Sair**; fechar a janela não basta). Aberto, ele pode regravar a configuração e desfazer a mudança.
+2. Feche o Claude Desktop por completo: botão direito no ícone dele, perto do relógio (ou dentro da setinha **^** ao lado, onde ficam os ícones escondidos), e **Sair**. Fechar a janela não basta. Aberto, ele pode regravar a configuração e desfazer a mudança.
 3. No Diretor, no painel do Claude (à direita), clique em **Conectar**.
 4. Abra o Claude Desktop de novo. O conector “diretor” aparece na lista de ferramentas.
 5. Deixe o editor aberto. O painel mostra “Claude conectado” quando o Claude usa as ferramentas.
 
-O botão grava o servidor “diretor” no `claude_desktop_config.json` do Claude Desktop e mantém o resto do arquivo (outros servidores e preferências). Na primeira vez, guarda uma cópia do arquivo como estava em `claude_desktop_config.antes-do-diretor.json`, na mesma pasta (as vezes seguintes não substituem essa cópia). Arquivo com erro de formato não é tocado: o editor avisa e mostra onde ele está. O servidor roda com o próprio `Diretor.exe` (`ELECTRON_RUN_AS_NODE=1`), então não precisa do Node.
+O botão grava o servidor “diretor” no `claude_desktop_config.json` do Claude Desktop e mantém o resto do arquivo (outros servidores e preferências). Na primeira vez, guarda uma cópia do arquivo como estava em `claude_desktop_config.antes-do-diretor.json`, na mesma pasta (as vezes seguintes não substituem essa cópia). Arquivo com erro de formato não é tocado: o editor avisa e mostra onde ele está, para corrigir o erro; depois disso o botão volta. O servidor roda com o próprio `Diretor.exe` (`ELECTRON_RUN_AS_NODE=1`), então não precisa do Node.
 
 Onde o Claude Desktop guarda a configuração no Windows, e onde o botão grava (para cada Claude Desktop instalado, a mesma escolha que ele faz):
 
@@ -103,7 +103,7 @@ As operações são as mesmas que a interface usa (`src/core/operations.ts`): `a
 ## Testes
 
 ```bash
-npm test            # 126 testes: unitários + MCP real (cliente MCP → servidor stdio → ponte → editor) + exportação com ffmpeg
+npm test            # 139 testes: unitários + MCP real (cliente MCP → servidor stdio → ponte → editor) + exportação com ffmpeg
 npm run typecheck
 npm run test:e2e    # abre o app Electron e roda o roteiro da especificação (no Linux sem tela: xvfb-run -a node scripts/e2e.mjs)
 ```

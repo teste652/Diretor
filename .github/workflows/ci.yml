@@ -137,7 +137,7 @@ jobs:
           Se o Windows bloquear o arquivo sem mostrar "Executar assim mesmo", é o Controle Inteligente de Aplicativos, que barra programas sem assinatura digital. Nesse caso o instalador ainda não funciona nesse computador.
 
           **Usar com o Claude**
-          1. Feche o Claude Desktop por completo (botão direito no ícone dele, perto do relógio → Sair).
+          1. Feche o Claude Desktop por completo (botão direito no ícone dele, perto do relógio ou dentro da setinha ^, e Sair).
           2. No painel do Claude, dentro do Diretor, clique em **Conectar**.
           3. Abra o Claude Desktop de novo. O conector "diretor" aparece nele.
 
@@ -156,6 +156,8 @@ jobs:
             cp "instalador/$NOME" instalador/Diretor-Setup-novo.exe
             gh release upload "$TAG" instalador/Diretor-Setup-novo.exe
             NOVO=$(asset_ids Diretor-Setup-novo.exe)
+            # Sem o arquivo novo na lista, o antigo fica: o link nunca fica sem arquivo.
+            [ -n "$NOVO" ] || { echo "::error::O upload terminou, mas o arquivo novo não aparece na versão de teste. O link continua com a versão anterior."; exit 1; }
             for id in $(asset_ids "$NOME"); do gh api -X DELETE "repos/$GH_REPO/releases/assets/$id"; done
             gh api -X PATCH "repos/$GH_REPO/releases/assets/$NOVO" -f name="$NOME" > /dev/null
             gh release edit "$TAG" --title "$TITLE" --notes-file notas.md --prerelease

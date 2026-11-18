@@ -1,14 +1,17 @@
 // Botão "Conectar ao Claude Desktop": grava o servidor "diretor" na configuração
 // do Claude Desktop sem estragar o resto dela (outros servidores, preferências).
-import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
+import { copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   BACKUP_NAME,
+  CLAUDE_RUNNING_PS,
   CONFIG_NAME,
   claudeConfigCandidates,
   claudeConfigDirs,
+  claudeDesktopRunning,
   connectClaude,
   disconnectClaude,
   readClaudeConfigs,
@@ -50,6 +53,11 @@ function winProfile() {
     classic: join(roaming, 'Claude'),
     /** Onde o instalador clássico põe o Claude Desktop. */
     classicApp: join(local, 'AnthropicClaude'),
+    /** Instala o Claude Desktop clássico (como o instalador deixa a pasta dele). */
+    installClassic: () => {
+      make(join(local, 'AnthropicClaude'), { 'claude.exe': '', 'Update.exe': '' });
+      make(join(local, 'AnthropicClaude', 'app-0.14.10'));
+    },
     dirs: (extra: Record<string, string> = {}) => claudeConfigDirs({ env: { ...env, ...extra }, platform: 'win32', home }),
     candidates: () => claudeConfigCandidates({ env, platform: 'win32', home }),
   };
@@ -130,7 +138,7 @@ describe('onde fica a configuração do Claude Desktop', () => {
     const w = winProfile();
     make(w.moved(), { [CONFIG_NAME]: '{}' });
     make(w.pkg(), { [LEFT]: '' });
-    make(w.classicApp);
+    w.installClassic();
     make(w.classic, { Preferences: '{}' });
     expect(w.dirs()).toEqual([w.moved(), w.classic]);
   });
@@ -146,10 +154,38 @@ describe('onde fica a configuração do Claude Desktop', () => {
   it('Windows: a outra família do pacote (AnthropicPBC.Claude_…) também vale; pastas de outros apps não', () => {
     const w = winProfile();
     make(w.moved('anthropicpbc.claude_fnn82j28hfe8t'));
+    make(w.pkg('AnthropicPBC.Claude_fnn82j28hfe8t'), { '.user-data-left.anthropicpbc.claude_fnn82j28hfe8t': '' });
     make(join(w.local, 'Claude-Data', 'outra-coisa'));
     make(join(w.local, 'Packages', 'OutroApp_123', 'LocalCache', 'Roaming', 'Claude'));
     make(join(w.local, 'Packages', 'Claude_nuncaabriu', 'LocalCache'));
     expect(w.dirs()).toEqual([w.moved('anthropicpbc.claude_fnn82j28hfe8t')]);
+  });
+
+  it('Windows: um Claude instalado que nunca abriu ainda não tem pasta; a Claude-Data de um pacote desinstalado não conta', () => {
+    const w = winProfile();
+    make(w.moved(), { [CONFIG_NAME]: '{}' }); // Claude_pzs8sxrjxfjjc foi desinstalado
+    make(join(w.local, 'Packages', 'AnthropicPBC.Claude_fnn82j28hfe8t', 'LocalCache'));
+    expect(w.dirs()).toEqual([]); // o cartão pede para abrir o Claude uma vez
+  });
+
+  it('Windows, instalação clássica: lê %APPDATA%\\Claude mesmo com a marca deixada por um pacote; a Claude-Data que sobrou não conta', () => {
+    const w = winProfile();
+    w.installClassic();
+    make(w.classic, { [LEFT]: '', [CONFIG_NAME]: '{"mcpServers":{"outro":{"command":"x"}}}' });
+    expect(w.dirs()).toEqual([w.classic]);
+    make(w.moved(), { [CONFIG_NAME]: '{ "mcpServers": { "a": 1, } }' }); // de um pacote desinstalado, com erro
+    expect(w.dirs()).toEqual([w.classic]);
+    make(w.pkg(), { [LEFT]: '' }); // o pacote instalado de novo, junto com a clássica
+    expect(w.dirs()).toEqual([w.moved(), w.classic]);
+  });
+
+  it('Windows: o que sobrou de um Claude clássico desinstalado não conta como instalação', () => {
+    const w = winProfile();
+    make(w.classicApp, { '.dead': '', 'Update.exe': '' });
+    make(w.moved(), { [CONFIG_NAME]: '{}' });
+    make(w.pkg(), { [LEFT]: '' });
+    make(w.classic, { [CONFIG_NAME]: '{}' });
+    expect(w.dirs()).toEqual([w.moved()]);
   });
 
   it('Windows sem o Claude Desktop: nenhuma pasta (e não cria nada)', () => {
@@ -340,6 +376,65 @@ describe('desconectar (ao desinstalar)', () => {
     expect(readFileSync(join(dirs[0], CONFIG_NAME), 'utf8')).toBe('{"mcpServers":{"outro":{"command":"x"}}}');
     expect(existsSync(join(dirs[1], CONFIG_NAME))).toBe(false);
   });
+
+  it('só verificar (o desinstalador, antes de pedir para fechar o Claude): diz o que tiraria e não grava nada', async () => {
+    const mine = JSON.stringify({ mcpServers: { outro: { command: 'x' }, diretor: ENTRY } });
+    const other = JSON.stringify({ mcpServers: { diretor: { command: 'node', args: ['C:\\dev\\server.cjs'] } } });
+    const dirs = [dirWith(mine), dirWith(other), dirWith()];
+    const rs = await disconnectClaude(dirs, ENTRY.command, { platform: 'win32', dryRun: true });
+    expect(rs.map((r) => r.state)).toEqual(['removed', 'kept', 'absent']);
+    expect(readFileSync(join(dirs[0], CONFIG_NAME), 'utf8')).toBe(mine);
+    expect(readdirSync(dirs[0])).toEqual([CONFIG_NAME]);
+  });
+});
+
+// O app e o desinstalador só contam o Claude Desktop (não o Claude Code, que também se chama
+// claude.exe) e só o processo principal (não os auxiliares, que podem ficar depois de sair).
+describe('Claude Desktop aberto', () => {
+  /** O processo principal e o desinstalador fazem a mesma conta. */
+  const nsisPs = () => {
+    const m = /^!define DIRETOR_PS_CLAUDE "(.*)"$/m.exec(readFileSync(join(__dirname, '..', 'build', 'installer.nsh'), 'utf8'));
+    return (m?.[1] ?? '').replace(/\$\$/g, '$');
+  };
+
+  it('o app e o desinstalador olham a mesma pasta e deixam os auxiliares de fora', () => {
+    for (const ps of [CLAUDE_RUNNING_PS, nsisPs()]) {
+      expect(ps).toContain("$_.ExecutablePath -match 'WindowsApps|AnthropicClaude'");
+      expect(ps).toContain("$_.CommandLine -notmatch '--type='");
+    }
+  });
+
+  // Processos de mentira com o nome claude.exe (o próprio Node, copiado), cada um numa pasta.
+  it.runIf(process.platform === 'win32')(
+    'no Windows: o do instalador clássico conta; um auxiliar dele e o Claude Code não',
+    async () => {
+      const home = scratch();
+      const fake = (dir: string, extra: string[] = []) => {
+        mkdirSync(dir, { recursive: true });
+        const exe = join(dir, 'claude.exe');
+        if (!existsSync(exe)) copyFileSync(process.execPath, exe);
+        return spawn(exe, ['-e', 'setTimeout(() => {}, 120000)', ...(extra.length ? ['--', ...extra] : [])], { stdio: 'ignore' });
+      };
+      const started: ChildProcess[] = [];
+      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toLowerCase() !== 'psmodulepath'));
+      const uninstallerSays = () => spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', nsisPs()], { env, timeout: 60_000 }).status;
+      const settle = () => new Promise((r) => setTimeout(r, 1000));
+      try {
+        started.push(fake(join(home, '.local', 'bin')));
+        started.push(fake(join(home, 'AnthropicClaude', 'app-0.14.10'), ['--type=renderer']));
+        await settle();
+        expect(await claudeDesktopRunning()).toBe(false);
+        expect(uninstallerSays()).toBe(0);
+        started.push(fake(join(home, 'AnthropicClaude', 'app-0.14.10')));
+        await settle();
+        expect(await claudeDesktopRunning()).toBe(true);
+        expect(uninstallerSays()).toBe(10);
+      } finally {
+        for (const p of started) p.kill();
+      }
+    },
+    60_000,
+  );
 });
 
 describe('situação da conexão', () => {

@@ -1,5 +1,5 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell } from 'electron';
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { closeSync, createReadStream, existsSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve } from 'node:path';
@@ -8,7 +8,7 @@ import { buildFfmpegArgs, parseFfmpegProbe } from '../core/export';
 import type { Project } from '../core/model';
 import { bridgeFilePath } from '../shared/paths';
 import { startBridge } from './bridge';
-import { claudeConfigDirs, connectClaude, type McpEntry, readClaudeConfigs, unpackedPath } from './claudeDesktop';
+import { claudeConfigDirs, claudeDesktopRunning, connectClaude, type McpEntry, readClaudeConfigs, unpackedPath } from './claudeDesktop';
 import { type MoveResult, moveIntoPlace } from './replace';
 
 app.setName('Diretor');
@@ -445,35 +445,38 @@ function mcpEntry(): McpEntry {
 }
 
 /**
- * O Claude Desktop está aberto? Aberto, ele pode regravar a configuração e desfazer o
- * Conectar, e só lê a configuração ao abrir. null quando não dá para saber.
+ * O Claude Desktop está aberto? No Windows, a resposta vem do PowerShell, que custa caro
+ * para rodar a cada 5 s com o cartão na tela: uma consulta por vez (quem chega durante uma
+ * espera por ela), e a resposta vale por `maxAgeMs` depois de chegar (curto quando a pessoa
+ * acabou de voltar para a janela ou clicou em Conectar). O tempo é o do performance.now(),
+ * que não volta quando alguém acerta o relógio do computador.
  */
-function claudeDesktopRunning(): Promise<boolean | null> {
-  return new Promise((done) => {
-    if (process.platform === 'win32') {
-      // Só o app (pacote da Microsoft Store ou instalação clássica), não o Claude Code, que também se chama claude.exe.
-      const ps = "@(Get-Process -Name claude -ErrorAction SilentlyContinue | Where-Object { $_.Path -match 'WindowsApps|AnthropicClaude' }).Count";
-      // Aberto de um terminal do PowerShell 7, o Diretor herda uma lista de módulos que o Windows PowerShell não carrega.
-      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toLowerCase() !== 'psmodulepath'));
-      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { env, timeout: 8000, windowsHide: true }, (err, out) => {
-        const n = Number(String(out).trim());
-        done(err || !Number.isFinite(n) ? null : n > 0);
-      });
-    } else if (process.platform === 'darwin') {
-      execFile('pgrep', ['-x', 'Claude'], { timeout: 4000 }, (err) => done(!err ? true : err.code === 1 ? false : null));
-    } else done(null);
+let runningCheck: { at: number; pending: boolean; result: Promise<boolean | null> } | null = null;
+function claudeRunning(maxAgeMs: number): Promise<boolean | null> {
+  if (runningCheck && (runningCheck.pending || performance.now() - runningCheck.at <= maxAgeMs)) return runningCheck.result;
+  const check = { at: performance.now(), pending: true, result: claudeDesktopRunning() };
+  void check.result.then(() => {
+    check.pending = false;
+    check.at = performance.now();
   });
+  runningCheck = check;
+  return check.result;
 }
 
-ipcMain.handle('claude:status', async () => {
+ipcMain.handle('claude:status', async (_e, fresh?: unknown) => {
   const entry = mcpEntry();
-  return { configs: readClaudeConfigs(claudeConfigDirs(), entry), serverFound: existsSync(entry.args[0]), claudeRunning: await claudeDesktopRunning() };
+  const configs = readClaudeConfigs(claudeConfigDirs(), entry);
+  // Só o cartão com os passos usa (sem o Claude, já conectado ou com o arquivo com erro, não precisa).
+  const steps = configs.length > 0 && !configs.every((c) => c.state === 'connected') && !configs.every((c) => c.state === 'invalid');
+  return { configs, serverFound: existsSync(entry.args[0]), claudeRunning: steps ? await claudeRunning(fresh === true ? 1000 : 15_000) : null };
 });
 
 ipcMain.handle('claude:connect', async () => {
   const entry = mcpEntry();
   if (!existsSync(entry.args[0])) return { error: `Não encontrei o servidor do Claude em ${entry.args[0]}. Instale o Diretor de novo.` };
-  return { results: await connectClaude(claudeConfigDirs(), entry) };
+  // Aberto ou não na hora do clique: muda o que o cartão diz para fazer depois.
+  const [results, running] = await Promise.all([connectClaude(claudeConfigDirs(), entry), claudeRunning(1000)]);
+  return { results, claudeRunning: running };
 });
 
 /** O trecho para colar à mão no claude_desktop_config.json. */
