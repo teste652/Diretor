@@ -1,12 +1,13 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { closeSync, createReadStream, existsSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { buildFfmpegArgs, parseFfmpegProbe } from '../core/export';
 import type { Project } from '../core/model';
 import { bridgeFilePath } from '../shared/paths';
+import { type AiImage, type AiKind, claudeArgs, claudeInput, codexArgs, findCli, runAssistant, terminalScript } from './assistant';
 import { startBridge } from './bridge';
 import { claudeConfigDirs, claudeDesktopRunning, connectClaude, type McpEntry, readClaudeConfigs, unpackedPath } from './claudeDesktop';
 import { type MoveResult, moveIntoPlace } from './replace';
@@ -131,7 +132,7 @@ function bridgeTimeoutMs(method: string, params: unknown): number {
   return Math.min(55_000, (wait + 8) * 1000);
 }
 
-function askRenderer(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
+function askRenderer(method: string, params: unknown, signal?: AbortSignal, client?: string): Promise<unknown> {
   if (!win || win.isDestroyed()) return Promise.resolve({ error: 'editor_closed', message: 'O editor não está aberto.' });
   if (signal?.aborted) return Promise.resolve({ error: 'cancelled' });
   const id = ++reqSeq;
@@ -155,7 +156,7 @@ function askRenderer(method: string, params: unknown, signal?: AbortSignal): Pro
       timer,
     });
     signal?.addEventListener('abort', onAbort, { once: true });
-    win!.webContents.send('bridge:request', { id, method, params });
+    win!.webContents.send('bridge:request', { id, method, params, client });
   });
 }
 
@@ -445,6 +446,12 @@ function mcpEntry(): McpEntry {
   return { command: process.execPath, args: [unpackedPath(join(__dirname, '..', 'mcp', 'server.cjs'))], env: { ELECTRON_RUN_AS_NODE: '1' } };
 }
 
+/** O mesmo servidor, marcado com quem o usa no chat do painel (o editor mostra o nome certo e sabe quem fez cada proposta). */
+function chatMcpEntry(kind: AiKind): McpEntry {
+  const e = mcpEntry();
+  return { ...e, env: { ...e.env, DIRETOR_CLIENT: kind } };
+}
+
 /**
  * O Claude Desktop está aberto? No Windows, a resposta vem do PowerShell, que custa caro
  * para rodar a cada 5 s com o cartão na tela: uma consulta por vez (quem chega durante uma
@@ -497,6 +504,132 @@ ipcMain.handle('app:info', () => ({
 
 ipcMain.handle('shell:showItem', (_e, p: string) => shell.showItemInFolder(p));
 
+// ---------- chat com a IA (Claude Code e Codex instalados no computador) ----------
+/** Pasta de trabalho da IA: vazia de propósito (nenhum projeto ou CLAUDE.md de outro lugar entra na conversa). */
+function aiDir(): string {
+  const d = join(app.getPath('userData'), 'ia');
+  mkdirSync(d, { recursive: true });
+  return d;
+}
+
+const aiRuns = new Map<string, { stop: () => void }>();
+const IMAGE_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
+
+ipcMain.handle('ai:status', () => ({ claude: findCli('claude')?.path ?? null, codex: findCli('codex')?.path ?? null, platform: process.platform }));
+
+ipcMain.handle(
+  'ai:send',
+  (e, { id, kind, text, sessionId, images = [] }: { id: string; kind: AiKind; text: string; sessionId?: string; images?: AiImage[] }) => {
+    if (kind !== 'claude' && kind !== 'codex') return { error: 'Assistente desconhecido.' };
+    if (aiRuns.has(id)) return { error: 'Esta mensagem já está sendo respondida.' };
+    const launch = findCli(kind);
+    if (!launch) return { error: 'not_found' };
+    const dir = aiDir();
+    const imgs = images.filter((i) => IMAGE_EXT[i.mime] && typeof i.data === 'string').slice(0, 8);
+    const temp: string[] = [];
+    let args: string[];
+    let input: string;
+    if (kind === 'claude') {
+      const cfg = join(dir, 'mcp.json');
+      writeFileSync(cfg, JSON.stringify({ mcpServers: { diretor: chatMcpEntry('claude') } }, null, 2));
+      args = claudeArgs({ mcpConfigFile: cfg, sessionId });
+      input = claudeInput(text, imgs);
+    } else {
+      // O Codex recebe imagens como arquivos: ficam numa pasta temporária até a resposta terminar.
+      const imgDir = join(dir, 'imagens');
+      if (imgs.length) mkdirSync(imgDir, { recursive: true });
+      imgs.forEach((img, n) => {
+        const f = join(imgDir, `${randomBytes(6).toString('hex')}-${n}.${IMAGE_EXT[img.mime]}`);
+        writeFileSync(f, Buffer.from(img.data, 'base64'));
+        temp.push(f);
+      });
+      args = codexArgs({ mcp: chatMcpEntry('codex'), cwd: dir, sessionId, imageFiles: temp });
+      input = text || 'Veja a imagem.';
+    }
+    const sender = e.sender;
+    const run = runAssistant({
+      kind,
+      launch,
+      args,
+      input,
+      cwd: dir,
+      onEvent: (ev) => {
+        if (!sender.isDestroyed()) sender.send('ai:event', { id, ev });
+        if (ev.type !== 'done') return;
+        aiRuns.delete(id);
+        for (const f of temp) removeQuietly(f);
+      },
+    });
+    aiRuns.set(id, run);
+    return { ok: true, path: launch.path };
+  },
+);
+
+ipcMain.handle('ai:stop', (_e, id: string) => {
+  aiRuns.get(id)?.stop();
+});
+
+function stopAllAi(): void {
+  for (const r of aiRuns.values()) r.stop();
+}
+
+/** Imagens que foram para o Codex: não ficam no disco depois (nem se o Diretor fechou no meio de uma resposta). */
+function clearAiImages(): void {
+  try {
+    rmSync(join(app.getPath('userData'), 'ia', 'imagens'), { recursive: true, force: true });
+  } catch {
+    /* em uso: fica para a próxima vez */
+  }
+}
+
+/** Abre uma janela do PowerShell (que a pessoa vê) para instalar ou entrar na conta. */
+ipcMain.handle('ai:terminal', (_e, { kind, action }: { kind: AiKind; action: 'install' | 'login' }) => {
+  if (process.platform !== 'win32') return { error: 'Abra um terminal e rode o programa para entrar na conta.' };
+  if ((kind !== 'claude' && kind !== 'codex') || (action !== 'install' && action !== 'login')) return { error: 'Pedido inválido.' };
+  const cli = findCli(kind);
+  // O script vai codificado (sem problema de aspas) e o caminho do programa vai por variável, nunca no texto.
+  const encoded = Buffer.from(terminalScript(kind, action), 'utf16le').toString('base64');
+  // "start" do cmd abre uma janela de console de verdade, com teclado, que fica aberta (-NoExit)
+  // até a pessoa fechar, mesmo se o Diretor fechar antes. (Com detached, o PowerShell não ganha janela.)
+  const p = spawn('cmd.exe', ['/d', '/c', `start "Diretor" powershell.exe -NoProfile -NoExit -ExecutionPolicy Bypass -EncodedCommand ${encoded}`], {
+    windowsVerbatimArguments: true,
+    windowsHide: true,
+    stdio: 'ignore',
+    env: { ...process.env, DIRETOR_CLI: cli?.path ?? '' },
+  });
+  p.on('error', () => undefined);
+  return { ok: true };
+});
+
+/**
+ * Ditado por voz: aperta Windows+H, que abre a digitação por voz do próprio Windows no campo
+ * com o cursor (a caixa do chat). Gratuito e em português; nada passa pelo Diretor.
+ * Um PowerShell fica aberto em segundo plano depois do primeiro uso, para a tecla sair na hora.
+ */
+let voiceShell: ChildProcessWithoutNullStreams | null = null;
+let lastDictate = 0;
+ipcMain.handle('voice:dictate', () => {
+  if (process.platform !== 'win32') return { error: 'O ditado por voz usa o Windows+H do Windows.' };
+  // Dois pedidos seguidos abririam e fechariam o painel do ditado.
+  if (performance.now() - lastDictate < 800) return { ok: true };
+  lastDictate = performance.now();
+  if (!voiceShell || voiceShell.exitCode !== null) {
+    voiceShell = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '-'], { windowsHide: true });
+    voiceShell.on('error', () => (voiceShell = null));
+    voiceShell.stdout.resume();
+    voiceShell.stderr.resume();
+    voiceShell.stdin.on('error', () => undefined);
+    voiceShell.stdin.write(
+      "Add-Type -Namespace DiretorVoz -Name Teclas -MemberDefinition '[DllImport(\"user32.dll\")] public static extern void keybd_event(byte b, byte s, uint f, System.UIntPtr e);'\n",
+    );
+  }
+  voiceShell.stdin.write(
+    // Solta o Ctrl antes (Ctrl+Windows+H não abre o ditado), depois Windows+H.
+    '$z=[System.UIntPtr]::Zero; foreach ($k in 0x11,0xA2,0xA3) { [DiretorVoz.Teclas]::keybd_event($k,0,2,$z) }; [DiretorVoz.Teclas]::keybd_event(0x5B,0,0,$z); [DiretorVoz.Teclas]::keybd_event(0x48,0,0,$z); [DiretorVoz.Teclas]::keybd_event(0x48,0,2,$z); [DiretorVoz.Teclas]::keybd_event(0x5B,0,2,$z)\n',
+  );
+  return { ok: true };
+});
+
 // ---------- janela ----------
 function createWindow(): void {
   win = new BrowserWindow({
@@ -546,15 +679,18 @@ function createWindow(): void {
   });
   win.webContents.on('did-start-loading', () => {
     failPending('O editor recarregou. Chame a ferramenta de novo.');
+    stopAllAi();
     void abortAllExports();
   });
   win.webContents.on('render-process-gone', () => {
     failPending('A interface do editor fechou inesperadamente. Abra o editor e tente de novo.');
+    stopAllAi();
     void abortAllExports();
   });
   win.on('closed', () => {
     win = null;
     failPending('O editor foi fechado.');
+    stopAllAi();
     void abortAllExports();
   });
 }
@@ -579,6 +715,7 @@ app.whenReady().then(async () => {
   if (!app.hasSingleInstanceLock()) return;
   protocol.handle('media', serveMedia);
   createWindow();
+  clearAiImages();
   iniciarAtualizacao(() => win);
   try {
     const b = await startBridge(bridgeFilePath(), askRenderer);
@@ -590,11 +727,14 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   closeBridge?.();
+  stopAllAi();
+  voiceShell?.kill();
   app.quit();
 });
 
 // Sair no meio de uma exportação: espera o ffmpeg parar e o temporário sumir.
 app.on('will-quit', (event) => {
+  clearAiImages();
   if (!jobs.size) return;
   event.preventDefault();
   void abortAllExports().finally(() => app.quit());

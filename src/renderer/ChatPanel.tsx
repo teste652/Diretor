@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, type ReactNode, useEffect, useRef, useState } from 'react';
 import { describeOp } from '../core/operations';
 import type { Proposal } from '../core/session';
 import { bridgeStats } from './bridgeClient';
+import { AI_APP, AI_LABEL, type AiKind, chat, type ChatImage, readImage, useChat } from './chat';
 import { useSession } from './store';
 import { COPIED, connectOutcome, type ClaudeStatus, keepOutcome, type Outcome, quitHint, setupMessage, setupView } from './claudeSetupText';
 import { Icon, NumberField, showToast } from './ui';
@@ -9,78 +10,223 @@ import { Icon, NumberField, showToast } from './ui';
 const STEP_LABEL: Record<string, string> = { waiting: 'na fila', draft: 'em rascunho', accepted: 'aceita', discarded: 'descartada', invalid: 'inválida' };
 const kb = (b: number) => `${(b / 1024).toFixed(1)} KB`;
 
+type FeedRow = { key: string; time: number; node: ReactNode };
+
 export function ChatPanel() {
   const s = useSession();
-  const [note, setNote] = useState('');
+  const ch = useChat();
+  const [tab, setTab] = useState<AiKind>('claude');
+  const [text, setText] = useState('');
+  const [images, setImages] = useState<ChatImage[]>([]);
   const [showEco, setShowEco] = useState(false);
+  const [showDesktop, setShowDesktop] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  // Imagens ainda sendo lidas: Enviar espera, para a imagem não ficar para a próxima mensagem.
+  const [loadingImages, setLoadingImages] = useState(0);
   const [, force] = useState(0);
   const feedRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const t = setInterval(() => force((n) => n + 1), 15_000);
-    return () => clearInterval(t);
-  }, []);
-  const lastActivity = s.activity[s.activity.length - 1]?.id ?? 0;
-  const p0 = s.openProposal;
-  useEffect(() => {
-    feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
-  }, [lastActivity, p0?.id, p0?.current, p0?.status, s.contextRequest?.status]);
+  const boxRef = useRef<HTMLTextAreaElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
-  const connected = Date.now() - bridgeStats.lastCallAt < 180_000;
+  // Procura o Claude Code e o Codex ao abrir e quando a pessoa volta para o Diretor (pode ter acabado de instalar).
+  useEffect(() => {
+    void chat.refresh();
+    const back = () => {
+      if (document.visibilityState === 'visible') void chat.refresh();
+    };
+    window.addEventListener('focus', back);
+    const t = setInterval(() => force((n) => n + 1), 15_000);
+    return () => {
+      window.removeEventListener('focus', back);
+      clearInterval(t);
+    };
+  }, []);
+
+  // Ctrl+D (em qualquer lugar) ou o botão do microfone: cursor na caixa e ditado do Windows.
+  const dictate = async () => {
+    boxRef.current?.focus();
+    const r = await window.diretor?.voiceDictate();
+    if (!r || r.error) showToast(r?.error ?? 'O ditado por voz só funciona no aplicativo.', true);
+  };
+  useEffect(() => {
+    const on = () => void dictate();
+    window.addEventListener('diretor:dictate', on);
+    return () => window.removeEventListener('diretor:dictate', on);
+  }, []);
+
+  const convo = ch.convos[tab];
+  const cli = ch.cli[tab];
+  const running = !!convo.runId;
+  const lastActivity = s.activity[s.activity.length - 1]?.id ?? 0;
+  const lastEntry = convo.entries[convo.entries.length - 1]?.id ?? 0;
   const p = s.openProposal;
   const req = s.contextRequest;
+  useEffect(() => {
+    feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
+  }, [lastActivity, lastEntry, running, tab, p?.id, p?.current, p?.status, req?.status]);
+
+  const connected = Date.now() - bridgeStats.lastDesktopCallAt < 180_000;
+
+  const addFiles = async (list: Iterable<Blob>) => {
+    // Copia a lista antes de esperar: o seletor de arquivos é limpo logo depois e a esvaziaria.
+    const files = [...list];
+    if (!files.length) return;
+    setLoadingImages((n) => n + 1);
+    const got: ChatImage[] = [];
+    let skipped = 0;
+    try {
+      for (const f of files) {
+        const img = await readImage(f).catch(() => null);
+        if (img) got.push(img);
+        else skipped++;
+      }
+    } finally {
+      setLoadingImages((n) => n - 1);
+    }
+    if (skipped) showToast('Só dá para mandar imagens (PNG, JPG, WEBP ou GIF) que abram normalmente.', true);
+    if (got.length) setImages((cur) => [...cur, ...got].slice(0, 8));
+  };
+
+  const send = async () => {
+    const t = text.trim();
+    if (running) {
+      // Enquanto a IA trabalha, o que a pessoa escreve vira nota: ela lê na próxima consulta ao editor.
+      if (!t) return;
+      s.addNote(t);
+      setText('');
+      return;
+    }
+    if (!t && !images.length) return;
+    if (loadingImages > 0) {
+      showToast('Espere a imagem carregar.');
+      return;
+    }
+    if (!cli) {
+      showToast(`Instale o ${AI_APP[tab]} primeiro (botão acima).`, true);
+      return;
+    }
+    setText('');
+    setImages([]);
+    await chat.send(tab, t, images);
+  };
+
+  // Uma linha do tempo só: a conversa e o que acontece no editor (propostas, decisões), na ordem.
+  const rows: FeedRow[] = [
+    ...s.activity.slice(-40).map((a) => ({
+      key: `a${a.id}`,
+      time: a.time,
+      node: (
+        <div className={`item ${a.kind === 'note' ? 'note' : ''}`}>
+          {a.bytesOut !== undefined && <span className="size">{kb(a.bytesOut)}</span>}
+          {a.text}
+        </div>
+      ),
+    })),
+    ...convo.entries.slice(-80).map((e) => ({
+      key: `c${e.id}`,
+      time: e.time,
+      node: <ChatBubble kind={tab} e={e} />,
+    })),
+  ].sort((a, b) => a.time - b.time);
+
+  const statusText = running
+    ? `${AI_LABEL[tab]} está trabalhando…`
+    : cli
+      ? `${AI_LABEL[tab]} pronto`
+      : cli === null
+        ? `${AI_APP[tab]} não encontrado`
+        : 'Procurando…';
 
   return (
-    <div className="panel">
+    <div
+      className={`panel chat-panel ${dragging ? 'dragging' : ''}`}
+      data-testid="chat-panel"
+      onDragOver={(e) => {
+        if (![...e.dataTransfer.types].includes('Files')) return;
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragging(false);
+      }}
+      onDrop={(e) => {
+        if (!e.dataTransfer.files.length) return;
+        e.preventDefault();
+        setDragging(false);
+        void addFiles(e.dataTransfer.files);
+      }}
+    >
       <div className="assist-tabs">
-        <button className="tab active">
-          {Icon.chat} Claude <span className={`dot ${connected ? 'on' : ''}`} style={{ marginLeft: 6 }} />
-        </button>
-        <button className="tab" disabled title="Fase 2">
-          {Icon.code} Codex · Reserva
-        </button>
-      </div>
-      <div className="status">
-        {Icon.chat} {connected ? 'Claude conectado' : 'Aguardando o Claude Desktop'}
-      </div>
-      {!connected && (
-        <p className="hint" style={{ padding: '0 14px' }}>
-          Converse no Claude Desktop com o conector “diretor” ativo. As propostas aparecem aqui como rascunho. O editor funciona normalmente sem a IA.
-        </p>
-      )}
-
-      {/* Uma área só rola: atividade, pedido de contexto e a proposta. Os botões de decisão ficam sempre à vista. */}
-      <div className="assist-scroll" ref={feedRef}>
-      {!connected && <ClaudeSetup />}
-      <div className="feed">
-        {s.activity.slice(-40).map((a) => (
-          <div key={a.id} className={`item ${a.kind === 'note' ? 'note' : ''}`}>
-            {a.bytesOut !== undefined && <span className="size">{kb(a.bytesOut)}</span>}
-            {a.text}
-          </div>
+        {(['claude', 'codex'] as AiKind[]).map((k) => (
+          <button key={k} className={`tab ${tab === k ? 'active' : ''}`} onClick={() => setTab(k)} data-testid={`ai-tab-${k}`}>
+            {k === 'claude' ? Icon.chat : Icon.code} {AI_LABEL[k]}
+            {k === 'codex' && <span className="tab-sub"> · Reserva</span>}
+            <span className={`dot ${ch.convos[k].runId ? 'busy' : ch.cli[k] ? 'on' : ''}`} style={{ marginLeft: 6 }} />
+          </button>
         ))}
       </div>
+      <div className="status">
+        <span data-testid="ai-status">{statusText}</span>
+        {convo.entries.length > 0 && (
+          <button className="btn ghost small" style={{ marginLeft: 'auto' }} onClick={() => chat.reset(tab)} title="Começa uma conversa nova (a IA esquece o que foi dito; o projeto continua igual)" data-testid="ai-new">
+            {Icon.newChat} Nova conversa
+          </button>
+        )}
+      </div>
 
-      {req?.status === 'pending' && (
-        <div className="card stale">
-          <span className="badge warn">Contexto maior</span>
-          <h3>O Claude pediu {kb(req.bytes)} de contexto</h3>
-          <p>O teto atual é {kb(s.settings.contextCeilingBytes)}. Só dados do projeto (texto e números); nenhuma imagem ou trecho de vídeo é enviado.</p>
-          <div className="row">
-            <button className="btn primary" onClick={() => s.answerContextRequest(true)}>
-              Autorizar uma vez
+      <div className="assist-scroll" ref={feedRef}>
+        {/* O Claude Desktop continua funcionando: fica como alternativa, no alto, sem atrapalhar a conversa. */}
+        {tab === 'claude' && (
+          <div className="desktop-alt">
+            <button className="btn ghost small" onClick={() => setShowDesktop((v) => !v)} data-testid="desktop-toggle">
+              {showDesktop ? 'Fechar' : 'Usar pelo Claude Desktop'}
             </button>
-            <button className="btn" onClick={() => s.answerContextRequest(false)}>
-              Recusar
-            </button>
+            {connected && <span className="hint"> · Claude Desktop conectado</span>}
+            {showDesktop && <ClaudeSetup />}
           </div>
+        )}
+        {cli === null && <InstallCard kind={tab} platform={ch.platform} />}
+        {cli && convo.entries.length === 0 && (
+          <p className="hint" style={{ padding: '0 14px' }}>
+            Escreva o que quer no vídeo, do seu jeito: “anima o título entrando de baixo”, “legenda do segundo 2 ao 5 dizendo…”. As mudanças aparecem como rascunho para você aceitar ou descartar. Ctrl+D para falar; cole ou arraste imagens.
+          </p>
+        )}
+        <div className="feed">
+          {rows.map((r) => (
+            <Fragment key={r.key}>{r.node}</Fragment>
+          ))}
+          {running && (
+            <div className="bubble assistant thinking" data-testid="ai-thinking">
+              <span className="dots">
+                <i />
+                <i />
+                <i />
+              </span>
+            </div>
+          )}
         </div>
-      )}
 
-      {p && <ProposalCard p={p} />}
+        {req?.status === 'pending' && (
+          <div className="card stale">
+            <span className="badge warn">Contexto maior</span>
+            <h3>A IA pediu {kb(req.bytes)} de contexto</h3>
+            <p>O teto atual é {kb(s.settings.contextCeilingBytes)}. Só dados do projeto (texto e números); nenhuma imagem ou trecho de vídeo é enviado.</p>
+            <div className="row">
+              <button className="btn primary" onClick={() => s.answerContextRequest(true)}>
+                Autorizar uma vez
+              </button>
+              <button className="btn" onClick={() => s.answerContextRequest(false)}>
+                Recusar
+              </button>
+            </div>
+          </div>
+        )}
+
+        {p && <ProposalCard key={p.id} p={p} />}
 
       </div>
 
-      {/* Fora da área que rola: abre sempre à vista, logo acima da caixa de nota. */}
+      {/* Fora da área que rola: abre sempre à vista, logo acima da caixa de mensagem. */}
       {showEco && (
         <div className="eco-pop">
           <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -94,41 +240,210 @@ export function ChatPanel() {
             <NumberField value={s.settings.contextCeilingBytes / 1024} min={1} max={256} step={1} digits={1} onCommit={(v) => s.updateSettings({ contextCeilingBytes: Math.round(v * 1024) })} />
           </div>
           <p className="hint">
-            Métricas do editor: {bridgeStats.calls} chamadas, {kb(bridgeStats.totalBytesOut)} enviados (≈{Math.round(bridgeStats.totalBytesOut / 4)} tokens, estimativa do editor). Cota e consumo reais de tokens são do Claude Desktop.
+            Métricas do editor: {bridgeStats.calls} chamadas, {kb(bridgeStats.totalBytesOut)} enviados (≈{Math.round(bridgeStats.totalBytesOut / 4)} tokens, estimativa do editor). O consumo real é do seu plano do Claude ou do ChatGPT.
           </p>
         </div>
       )}
 
-      <div className="composer">
-        <input
-          placeholder="Nota para o Claude…"
-          title="O Claude lê a nota no próximo get_context"
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
+      <div className="composer chat-composer">
+        {images.length > 0 && (
+          <div className="attachments" data-testid="ai-attachments">
+            {images.map((img, i) => (
+              <div key={i} className="thumb">
+                <img src={img.url} alt="" />
+                <button title="Tirar" onClick={() => setImages((cur) => cur.filter((_, j) => j !== i))}>
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <textarea
+          ref={boxRef}
+          rows={2}
+          data-testid="ai-input"
+          placeholder={running ? `Nota para o ${AI_LABEL[tab]} (ele lê enquanto trabalha)…` : `Peça ao ${AI_LABEL[tab]}…  (Ctrl+D para falar)`}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onPaste={(e) => {
+            // Excel e Word copiam texto junto com uma imagem dele: nesse caso vale o texto.
+            if (e.clipboardData.getData('text/plain')) return;
+            const files = [...e.clipboardData.items].filter((it) => it.kind === 'file').map((it) => it.getAsFile()).filter((f): f is File => !!f);
+            if (!files.length) return;
+            e.preventDefault();
+            void addFiles(files);
+          }}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              s.addNote(note);
-              setNote('');
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              void send();
             }
           }}
         />
-        <button className={`btn ${s.settings.economy ? 'on' : ''}`} onClick={() => setShowEco((v) => !v)} title="Modo econômico e teto de contexto" data-testid="eco-toggle">
-          Modo econômico
-        </button>
-        <button
-          className="btn ghost icon"
-          title="Enviar nota"
-          onClick={() => {
-            s.addNote(note);
-            setNote('');
-          }}
-        >
-          {Icon.send}
-        </button>
+        <div className="composer-row">
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            multiple
+            hidden
+            onChange={(e) => {
+              const files = e.target.files ? [...e.target.files] : [];
+              e.target.value = '';
+              void addFiles(files);
+            }}
+          />
+          <button className="btn ghost icon" title="Mandar imagem (ou cole com Ctrl+V, ou arraste para cá)" onClick={() => fileRef.current?.click()} disabled={running} data-testid="ai-attach">
+            {Icon.clip}
+          </button>
+          <button className="btn ghost icon" title="Falar (Ctrl+D): abre o ditado por voz do Windows" onClick={() => void dictate()} data-testid="ai-mic">
+            {Icon.mic}
+          </button>
+          <button className={`btn ${s.settings.economy ? 'on' : ''}`} onClick={() => setShowEco((v) => !v)} title="Modo econômico e teto de contexto" data-testid="eco-toggle">
+            Modo econômico
+          </button>
+          <span style={{ flex: 1 }} />
+          {running ? (
+            <button className="btn icon stop" title="Parar" onClick={() => chat.stop(tab)} data-testid="ai-stop">
+              {Icon.stop}
+            </button>
+          ) : (
+            <button className="btn primary icon" title="Enviar (Enter)" onClick={() => void send()} disabled={loadingImages > 0} data-testid="ai-send">
+              {Icon.send}
+            </button>
+          )}
+        </div>
       </div>
       <div className="metrics">
         Último contexto: {kb(bridgeStats.lastBytesOut)} · teto {kb(s.settings.contextCeilingBytes)} (métrica do editor)
       </div>
+    </div>
+  );
+}
+
+function ChatBubble({ kind, e }: { kind: AiKind; e: import('./chat').ChatEntry }) {
+  const [busy, setBusy] = useState(false);
+  if (e.role === 'user')
+    return (
+      <div className="bubble user" data-testid="ai-msg-user">
+        {e.images && e.images.length > 0 && (
+          <div className="bubble-images">
+            {e.images.map((u, i) => (
+              <img key={i} src={u} alt="" />
+            ))}
+          </div>
+        )}
+        {e.text && <Markdown text={e.text} />}
+      </div>
+    );
+  if (e.role === 'assistant')
+    return (
+      <div className="bubble assistant" data-testid="ai-msg-assistant">
+        <Markdown text={e.text} />
+      </div>
+    );
+  return (
+    <div className={`bubble ${e.role}`} data-testid={`ai-msg-${e.role}`}>
+      {e.text}
+      {e.login && (
+        <div className="row" style={{ marginTop: 6 }}>
+          <button
+            className="btn small"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              const r = await window.diretor?.aiTerminal(kind, 'login');
+              setBusy(false);
+              if (r?.error) showToast(r.error, true);
+            }}
+          >
+            Entrar na conta
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** O básico de Markdown que as respostas usam: parágrafos, listas, **negrito** e `código`. */
+function Markdown({ text }: { text: string }) {
+  const item = /^\s*(?:[-*•]|\d+[.)])\s+/;
+  return (
+    <>
+      {text.split(/\n{2,}/).map((block, i) => {
+        const lines = block.split('\n').filter((l) => l.trim());
+        if (lines.length && lines.every((l) => item.test(l)))
+          return (
+            <ul key={i}>
+              {lines.map((l, j) => (
+                <li key={j}>{inline(l.replace(item, ''))}</li>
+              ))}
+            </ul>
+          );
+        return (
+          <p key={i}>
+            {lines.map((l, j) => (
+              <Fragment key={j}>
+                {j > 0 && <br />}
+                {inline(l.replace(/^#{1,6}\s+/, ''))}
+              </Fragment>
+            ))}
+          </p>
+        );
+      })}
+    </>
+  );
+}
+
+function inline(s: string): ReactNode[] {
+  return s.split(/(\*\*[^*]+\*\*|`[^`]+`)/).map((part, i) =>
+    part.startsWith('**') && part.endsWith('**') && part.length > 4 ? (
+      <strong key={i}>{part.slice(2, -2)}</strong>
+    ) : part.startsWith('`') && part.endsWith('`') && part.length > 2 ? (
+      <code key={i}>{part.slice(1, -1)}</code>
+    ) : (
+      part
+    ),
+  );
+}
+
+/** Sem o Claude Code (ou o Codex): um botão instala e já abre o login, numa janela do PowerShell. */
+function InstallCard({ kind, platform }: { kind: AiKind; platform: string }) {
+  const [opened, setOpened] = useState(false);
+  const plan = kind === 'claude' ? 'Pro ou Max' : 'ChatGPT Plus ou maior';
+  const open = async (action: 'install' | 'login') => {
+    const r = await window.diretor?.aiTerminal(kind, action);
+    if (r?.error) showToast(r.error, true);
+    else setOpened(true);
+  };
+  return (
+    <div className="card" data-testid="ai-install">
+      <h3 style={{ marginTop: 0 }}>Instalar o {AI_APP[kind]}</h3>
+      <p>
+        O chat usa o {AI_APP[kind]} instalado neste computador, com a sua assinatura ({plan}). Não precisa de chave nem de pagar à parte.
+      </p>
+      {platform === 'win32' ? (
+        <>
+          <ol className="setup-steps">
+            <li>Clique em Instalar. Abre uma janela azul que instala e depois pede para entrar na sua conta.</li>
+            <li>Entre na conta e feche a janela.</li>
+            <li>Volte para o Diretor: o chat aparece sozinho.</li>
+          </ol>
+          <div className="row" style={{ flexWrap: 'wrap' }}>
+            <button className="btn primary" onClick={() => void open('install')} data-testid="ai-install-btn">
+              Instalar
+            </button>
+            <button className="btn" onClick={() => void chat.refresh()}>
+              Já instalei
+            </button>
+          </div>
+          {opened && <p className="hint">Quando terminar na janela azul, volte aqui. Se não aparecer, clique em “Já instalei”.</p>}
+        </>
+      ) : (
+        <p className="hint">
+          Instale pelo terminal ({kind === 'claude' ? 'curl -fsSL https://claude.ai/install.sh | bash' : 'npm install -g @openai/codex'}), entre na conta e abra o Diretor de novo.
+        </p>
+      )}
     </div>
   );
 }
@@ -139,6 +454,14 @@ function ProposalCard({ p }: { p: Proposal }) {
   const stale = p.status === 'stale';
   // Trava curta quando a etapa muda: um clique duplo em Aceitar não decide a próxima etapa sem você vê-la.
   const [locked, setLocked] = useState(false);
+  const [sentToChat, setSentToChat] = useState(false);
+  // Proposta feita no chat do Diretor: "Refazer" já pede ao mesmo assistente (se ele não estiver ocupado).
+  // Feita pelo Claude Desktop: só registra o pedido, e ele recebe na próxima consulta.
+  const redo = async () => {
+    s.requestRedo(p.id);
+    const k = chat.ownerOf(p.id);
+    if (k && chat.get().cli[k] && !chat.running(k)) setSentToChat(await chat.send(k, 'Refaça a proposta desatualizada com o contexto atual.'));
+  };
   useEffect(() => {
     setLocked(true);
     const t = setTimeout(() => setLocked(false), 500);
@@ -169,13 +492,13 @@ function ProposalCard({ p }: { p: Proposal }) {
       </div>
       {stale ? (
         <div className="row">
-          <button className="btn primary" disabled={p.redoRequested || locked} onClick={() => s.requestRedo(p.id)}>
+          <button className="btn primary" disabled={p.redoRequested || locked} onClick={() => void redo()}>
             {p.redoRequested ? 'Pedido registrado' : 'Refazer com contexto atual'}
           </button>
           <button className="btn" disabled={locked} onClick={() => s.discardStep(p.id)}>
             Descartar
           </button>
-          {p.redoRequested && <p className="hint" style={{ width: '100%', margin: '4px 0 0' }}>Se o Claude estiver esperando, ele refaz sozinho. Se não, escreva “refaz” na conversa do Claude Desktop.</p>}
+          {p.redoRequested && !sentToChat && <p className="hint" style={{ width: '100%', margin: '4px 0 0' }}>Se a IA estiver esperando, ela refaz sozinha. Se não, escreva “refaz” no chat.</p>}
         </div>
       ) : (
         step?.status === 'draft' && (

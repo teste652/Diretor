@@ -101,7 +101,10 @@ for (const d of claudeLeft) {
 // Perfil próprio do Electron: não esbarra num Diretor de verdade aberto na mesma máquina.
 // Sem CLAUDE_USER_DATA_DIR: ele mandaria o Conectar gravar na pasta de um Claude Desktop de verdade.
 const appEnv = Object.fromEntries(Object.entries({ ...process.env, ...profileEnv }).filter(([k]) => k.toUpperCase() !== 'CLAUDE_USER_DATA_DIR'));
-Object.assign(appEnv, { DIRETOR_BRIDGE_FILE: bridgeFile, DIRETOR_USER_DATA: join(out, 'perfil-electron') });
+// O chat do painel usa um Claude Code e um Codex de mentira (scripts/ia-simulada.mjs), sem conta nem internet.
+const iaLog = join(out, 'ia-simulada.jsonl');
+const iaFake = resolve('scripts', 'ia-simulada.mjs');
+Object.assign(appEnv, { DIRETOR_BRIDGE_FILE: bridgeFile, DIRETOR_USER_DATA: join(out, 'perfil-electron'), DIRETOR_CLAUDE_CLI: iaFake, DIRETOR_CODEX_CLI: iaFake, DIRETOR_IA_LOG: iaLog });
 if (installed) delete appEnv.DIRETOR_FFMPEG; // o app instalado tem de usar o ffmpeg que vem com ele
 const app = await _electron.launch({
   executablePath: installed ?? electronPath,
@@ -134,6 +137,8 @@ if (installed) {
 // Conectar ao Claude Desktop pelo botão do painel do Claude.
 let claudeEntry = { command: process.execPath, args: ['dist/mcp/server.cjs'] };
 if (claudeDirs.length) {
+  // O Claude Desktop agora é a alternativa: o cartão abre pelo botão no fim do painel.
+  await page.click('[data-testid=desktop-toggle]');
   await page.waitForSelector('[data-testid=claude-connect]');
   const steps = (await page.textContent('[data-testid=claude-setup]')) ?? '';
   await shot('0-claude-passos');
@@ -158,6 +163,7 @@ if (claudeDirs.length) {
     `${claudeDirs.length} pasta(s) do Claude Desktop, ${claudeLeft.length} abandonada(s) intacta(s): ${JSON.stringify(entry)}`,
   );
   claudeEntry = entry;
+  await page.click('[data-testid=desktop-toggle]');
 } else skip('botão Conectar grava a configuração do Claude Desktop', 'sem pasta do Claude Desktop simulada neste sistema');
 
 // 1. Importar e aparar (as mesmas operações de arrastar as bordas do clipe)
@@ -623,6 +629,98 @@ const eco = await ev(() => {
 await shot('5-modo-economico');
 check('painel do modo econômico abre à vista', eco.exists && !eco.inScroll && eco.visible, JSON.stringify(eco));
 await page.click('[data-testid=eco-toggle]');
+
+// Chat dentro do Diretor: a mensagem vai para o Claude Code (aqui, o simulado), que usa o
+// servidor do Diretor e deixa a edição como rascunho. Com imagem, e retomando a mesma conversa.
+const iaCalls = () => (existsSync(iaLog) ? readFileSync(iaLog, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+const discardOpen = async () => {
+  if (await ev(() => !!window.__diretor.session.openProposal)) {
+    await page.click('[data-testid=discard]');
+    await page.waitForFunction(() => !window.__diretor.session.openProposal, null, { timeout: 10_000 });
+  }
+};
+await discardOpen();
+await ev(() => window.__diretor.session.setSelection({ clipIds: ['ttl_e2e'] }));
+await page.waitForFunction(() => /pronto/.test(document.querySelector('[data-testid=ai-status]')?.textContent ?? ''), null, { timeout: 15_000 });
+const png = join(out, 'referencia.png');
+frameOf(src, 10, png);
+await page.setInputFiles('.chat-composer input[type=file]', png);
+await page.waitForSelector('[data-testid=ai-attachments] img');
+await page.fill('[data-testid=ai-input]', 'anima o título entrando suave, igual à imagem');
+await page.press('[data-testid=ai-input]', 'Enter');
+await page.waitForSelector('[data-testid=ai-msg-assistant]', { timeout: 60_000 });
+await page.waitForFunction(() => !document.querySelector('[data-testid=ai-thinking]'), null, { timeout: 30_000 });
+await shot('6-chat-claude');
+const c1 = iaCalls()[0];
+const prop1 = await ev(() => window.__diretor.session.openProposal?.title ?? null);
+const reply1 = await page.textContent('[data-testid=ai-msg-assistant]');
+check(
+  'chat: a mensagem (com imagem) vai ao Claude Code, que deixa a edição como rascunho e responde no painel',
+  c1 && !c1.codex && c1.images === 1 && /entrando suave/.test(c1.text) && !c1.resume && prop1 === 'Claude: entrada suave' && /entrada suave/.test(reply1 ?? '') &&
+    c1.args.includes('--strict-mcp-config') && c1.args[c1.args.indexOf('--tools') + 1] === '' && samePath(c1.server.command, info.mcp.command),
+  JSON.stringify({ texto: c1?.text, imagens: c1?.images, proposta: prop1, resposta: reply1 }),
+);
+await discardOpen();
+
+await page.fill('[data-testid=ai-input]', 'agora mais devagar');
+await page.press('[data-testid=ai-input]', 'Enter');
+await page.waitForFunction(() => document.querySelectorAll('[data-testid=ai-msg-assistant]').length === 2, null, { timeout: 60_000 });
+const c2 = iaCalls()[1];
+check('chat: a segunda mensagem continua a mesma conversa', c2 && /^sim-/.test(c2.resume ?? '') && c2.args.includes('--resume'), String(c2?.resume));
+await discardOpen();
+
+// Parar no meio: o programa fecha e o painel volta a aceitar mensagens.
+await page.fill('[data-testid=ai-input]', 'pode demorar');
+await page.press('[data-testid=ai-input]', 'Enter');
+await page.waitForSelector('[data-testid=ai-stop]', { timeout: 10_000 });
+await page.waitForFunction(() => /Trabalhando nisso/.test(document.querySelector('[data-testid=chat-panel]')?.textContent ?? ''), null, { timeout: 30_000 });
+await page.click('[data-testid=ai-stop]');
+const stopped = await page
+  .waitForSelector('[data-testid=ai-send]', { timeout: 15_000 })
+  .then(() => true)
+  .catch(() => false);
+check('chat: o botão Parar encerra a resposta', stopped);
+
+// Sem login: o erro aparece com o botão para entrar na conta.
+await page.fill('[data-testid=ai-input]', 'erro-login');
+await page.press('[data-testid=ai-input]', 'Enter');
+await page.waitForSelector('[data-testid=ai-msg-error] button', { timeout: 30_000 });
+const loginBubbles = await ev(() => ({
+  errors: document.querySelectorAll('[data-testid=ai-msg-error]').length,
+  asReply: [...document.querySelectorAll('[data-testid=ai-msg-assistant]')].some((el) => /Not logged in/.test(el.textContent ?? '')),
+}));
+check(
+  'chat: sem login, um aviso só, com "Entrar na conta" (não aparece como resposta)',
+  /Entrar na conta/.test((await page.textContent('[data-testid=ai-msg-error]')) ?? '') && loginBubbles.errors === 1 && !loginBubbles.asReply,
+  JSON.stringify(loginBubbles),
+);
+
+// Aba do Codex: a mesma coisa pelo `codex exec`, com o conector aprovado e sem mexer em arquivos.
+await page.click('[data-testid=ai-tab-codex]');
+await page.waitForFunction(() => /pronto/.test(document.querySelector('[data-testid=ai-status]')?.textContent ?? ''), null, { timeout: 15_000 });
+await page.fill('[data-testid=ai-input]', 'faz uma entrada suave no título');
+await page.press('[data-testid=ai-input]', 'Enter');
+await page.waitForSelector('[data-testid=ai-msg-assistant]', { timeout: 60_000 });
+await page.waitForFunction(() => !document.querySelector('[data-testid=ai-thinking]'), null, { timeout: 30_000 });
+await shot('7-chat-codex');
+const cx = iaCalls().find((c) => c.codex);
+const propCx = await ev(() => window.__diretor.session.openProposal?.title ?? null);
+const cfgOf = (key) => cx?.args.find((a, i) => cx.args[i - 1] === '-c' && a.startsWith(`${key}=`));
+const disabled = cx?.args.filter((_, i) => cx.args[i - 1] === '--disable') ?? [];
+const codexLog = await ev(() => window.__diretor.session.activity.map((a) => a.text).filter((t) => /^Codex /.test(t)));
+check(
+  'chat: o Codex recebe o conector do Diretor aprovado, sem terminal, e deixa a edição como rascunho',
+  cx &&
+    propCx === 'Codex: entrada suave' &&
+    cx.args[cx.args.indexOf('--sandbox') + 1] === 'read-only' &&
+    disabled.includes('shell_tool') &&
+    cfgOf('approval_policy') === 'approval_policy="never"' &&
+    samePath(cx.server.command, info.mcp.command) &&
+    codexLog.includes('Codex enviou uma proposta'),
+  JSON.stringify({ proposta: propCx, sandbox: cx?.args[cx.args.indexOf('--sandbox') + 1], desligado: disabled, atividade: codexLog }),
+);
+await discardOpen();
+await page.click('[data-testid=ai-tab-claude]');
 
 writeFileSync(join(out, 'resultado.json'), JSON.stringify(results, null, 2));
 await client.close();

@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { AiEvent, AiImage, AiKind } from '../main/assistant';
 import type { ConfigState, ConnectResult, McpEntry } from '../main/claudeDesktop';
 
 const api = {
@@ -19,8 +20,8 @@ const api = {
   connectClaude: (): Promise<{ results?: ConnectResult[]; error?: string; claudeRunning?: boolean | null }> => ipcRenderer.invoke('claude:connect'),
   copyClaudeConfig: (): Promise<boolean> => ipcRenderer.invoke('claude:copyConfig'),
   showItem: (p: string) => ipcRenderer.invoke('shell:showItem', p),
-  onBridgeRequest: (fn: (req: { id: number; method: string; params: unknown }) => void) => {
-    const h = (_e: unknown, req: { id: number; method: string; params: unknown }) => fn(req);
+  onBridgeRequest: (fn: (req: { id: number; method: string; params: unknown; client?: 'claude' | 'codex' }) => void) => {
+    const h = (_e: unknown, req: { id: number; method: string; params: unknown; client?: 'claude' | 'codex' }) => fn(req);
     ipcRenderer.on('bridge:request', h);
     return () => ipcRenderer.removeListener('bridge:request', h);
   },
@@ -29,6 +30,18 @@ const api = {
     ipcRenderer.on('bridge:cancel', h);
     return () => ipcRenderer.removeListener('bridge:cancel', h);
   },
+  /** Onde estão o Claude Code e o Codex neste computador (null = não instalado). */
+  aiStatus: (): Promise<{ claude: string | null; codex: string | null; platform: string }> => ipcRenderer.invoke('ai:status'),
+  aiSend: (msg: { id: string; kind: AiKind; text: string; sessionId?: string; images?: AiImage[] }): Promise<{ ok?: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('ai:send', msg),
+  aiStop: (id: string): Promise<void> => ipcRenderer.invoke('ai:stop', id),
+  aiTerminal: (kind: AiKind, action: 'install' | 'login'): Promise<{ ok?: boolean; error?: string }> => ipcRenderer.invoke('ai:terminal', { kind, action }),
+  onAiEvent: (fn: (msg: { id: string; ev: AiEvent }) => void) => {
+    const h = (_e: unknown, msg: { id: string; ev: AiEvent }) => fn(msg);
+    ipcRenderer.on('ai:event', h);
+    return () => ipcRenderer.removeListener('ai:event', h);
+  },
+  voiceDictate: (): Promise<{ ok?: boolean; error?: string }> => ipcRenderer.invoke('voice:dictate'),
   bridgeRespond: (id: number, result: unknown) => ipcRenderer.send('bridge:response', { id, result }),
 };
 
