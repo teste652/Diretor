@@ -79,6 +79,12 @@ export function App() {
         setTimeout(() => void (key === 's' ? saveProject(e.shiftKey) : openProject()), 0);
         return;
       }
+      // Ctrl+D: falar com a IA (vale em qualquer lugar, até com o cursor num campo).
+      if (mod && key === 'd' && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        window.dispatchEvent(new Event('diretor:dictate'));
+        return;
+      }
       if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return;
       if (e.code === 'Space') (e.preventDefault(), togglePlay());
       else if (mod && key === 'z' && !e.shiftKey) (e.preventDefault(), session.undo());

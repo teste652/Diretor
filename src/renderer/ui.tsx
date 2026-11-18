@@ -172,4 +172,8 @@ export const Icon = {
   text: I(<path d="M5 6V4h14v2M12 4v16M9 20h6" />),
   caption: I(<><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M7 13h4M13 13h4M7 16h10" /></>),
   image: I(<><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="9" cy="10" r="2" /><path d="m21 16-5-5-9 9" /></>),
+  mic: I(<><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></>),
+  clip: I(<path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L14 7" />),
+  stop: I(<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" />),
+  newChat: I(<><path d="M4 5h16v11H9l-5 4z" /><path d="M12 8v5M9.5 10.5h5" /></>),
 };

@@ -136,9 +136,14 @@ jobs:
 
           Se o Windows bloquear o arquivo sem mostrar "Executar assim mesmo", é o Controle Inteligente de Aplicativos, que barra programas sem assinatura digital. Nesse caso o instalador ainda não funciona nesse computador.
 
-          **Usar com o Claude**
+          **Conversar com a IA (dentro do Diretor)**
+          1. O painel da direita é um chat: escreva o pedido e aperte Enter. Ctrl+D para falar; cole ou arraste imagens.
+          2. Ele usa o Claude Code (plano Pro ou Max) ou o Codex (plano do ChatGPT) instalados no computador. Se não estiverem, clique em **Instalar** no painel e entre na sua conta na janela que abrir.
+          3. As edições aparecem como rascunho para você aceitar ou descartar.
+
+          **Usar pelo Claude Desktop (opcional)**
           1. Feche o Claude Desktop por completo (botão direito no ícone dele, perto do relógio ou dentro da setinha ^, e Sair).
-          2. No painel do Claude, dentro do Diretor, clique em **Conectar**.
+          2. No alto do chat do Diretor, clique em **Usar pelo Claude Desktop** e depois em **Conectar**.
           3. Abra o Claude Desktop de novo. O conector "diretor" aparece nele.
 
           **Atualizar**

@@ -1,12 +1,13 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { closeSync, createReadStream, existsSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { buildFfmpegArgs, parseFfmpegProbe } from '../core/export';
 import type { Project } from '../core/model';
 import { bridgeFilePath } from '../shared/paths';
+import { type AiImage, type AiKind, claudeArgs, claudeInput, codexArgs, findCli, runAssistant, terminalScript } from './assistant';
 import { startBridge } from './bridge';
 import { claudeConfigDirs, claudeDesktopRunning, connectClaude, type McpEntry, readClaudeConfigs, unpackedPath } from './claudeDesktop';
 import { type MoveResult, moveIntoPlace } from './replace';
@@ -496,6 +497,110 @@ ipcMain.handle('app:info', () => ({
 
 ipcMain.handle('shell:showItem', (_e, p: string) => shell.showItemInFolder(p));
 
+// ---------- chat com a IA (Claude Code e Codex instalados no computador) ----------
+/** Pasta de trabalho da IA: vazia de propósito (nenhum projeto ou CLAUDE.md de outro lugar entra na conversa). */
+function aiDir(): string {
+  const d = join(app.getPath('userData'), 'ia');
+  mkdirSync(d, { recursive: true });
+  return d;
+}
+
+const aiRuns = new Map<string, { stop: () => void }>();
+const IMAGE_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
+
+ipcMain.handle('ai:status', () => ({ claude: findCli('claude')?.path ?? null, codex: findCli('codex')?.path ?? null, platform: process.platform }));
+
+ipcMain.handle(
+  'ai:send',
+  (e, { id, kind, text, sessionId, images = [] }: { id: string; kind: AiKind; text: string; sessionId?: string; images?: AiImage[] }) => {
+    if (kind !== 'claude' && kind !== 'codex') return { error: 'Assistente desconhecido.' };
+    if (aiRuns.has(id)) return { error: 'Esta mensagem já está sendo respondida.' };
+    const launch = findCli(kind);
+    if (!launch) return { error: 'not_found' };
+    const dir = aiDir();
+    const imgs = images.filter((i) => IMAGE_EXT[i.mime] && typeof i.data === 'string').slice(0, 8);
+    const temp: string[] = [];
+    let args: string[];
+    let input: string;
+    if (kind === 'claude') {
+      const cfg = join(dir, 'mcp.json');
+      writeFileSync(cfg, JSON.stringify({ mcpServers: { diretor: mcpEntry() } }, null, 2));
+      args = claudeArgs({ mcpConfigFile: cfg, sessionId });
+      input = claudeInput(text, imgs);
+    } else {
+      // O Codex recebe imagens como arquivos: ficam numa pasta temporária até a resposta terminar.
+      const imgDir = join(dir, 'imagens');
+      if (imgs.length) mkdirSync(imgDir, { recursive: true });
+      imgs.forEach((img, n) => {
+        const f = join(imgDir, `${randomBytes(6).toString('hex')}-${n}.${IMAGE_EXT[img.mime]}`);
+        writeFileSync(f, Buffer.from(img.data, 'base64'));
+        temp.push(f);
+      });
+      args = codexArgs({ mcp: mcpEntry(), cwd: dir, sessionId, imageFiles: temp });
+      input = text || 'Veja a imagem.';
+    }
+    const sender = e.sender;
+    const run = runAssistant({
+      kind,
+      launch,
+      args,
+      input,
+      cwd: dir,
+      onEvent: (ev) => {
+        if (!sender.isDestroyed()) sender.send('ai:event', { id, ev });
+        if (ev.type !== 'done') return;
+        aiRuns.delete(id);
+        for (const f of temp) removeQuietly(f);
+      },
+    });
+    aiRuns.set(id, run);
+    return { ok: true, path: launch.path };
+  },
+);
+
+ipcMain.handle('ai:stop', (_e, id: string) => {
+  aiRuns.get(id)?.stop();
+});
+
+function stopAllAi(): void {
+  for (const r of aiRuns.values()) r.stop();
+}
+
+/** Abre uma janela do PowerShell (que a pessoa vê) para instalar ou entrar na conta. */
+ipcMain.handle('ai:terminal', (_e, { kind, action }: { kind: AiKind; action: 'install' | 'login' }) => {
+  if (process.platform !== 'win32') return { error: 'Abra um terminal e rode o programa para entrar na conta.' };
+  const script = terminalScript(kind, action, findCli(kind));
+  // detached: ganha a própria janela de console, que fica aberta (-NoExit) até a pessoa fechar.
+  const p = spawn('powershell.exe', ['-NoProfile', '-NoExit', '-ExecutionPolicy', 'Bypass', '-Command', script], { detached: true, stdio: 'ignore', windowsHide: false });
+  p.on('error', () => undefined);
+  p.unref();
+  return { ok: true };
+});
+
+/**
+ * Ditado por voz: aperta Windows+H, que abre a digitação por voz do próprio Windows no campo
+ * com o cursor (a caixa do chat). Gratuito e em português; nada passa pelo Diretor.
+ * Um PowerShell fica aberto em segundo plano depois do primeiro uso, para a tecla sair na hora.
+ */
+let voiceShell: ChildProcessWithoutNullStreams | null = null;
+ipcMain.handle('voice:dictate', () => {
+  if (process.platform !== 'win32') return { error: 'O ditado por voz usa o Windows+H do Windows.' };
+  if (!voiceShell || voiceShell.exitCode !== null) {
+    voiceShell = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '-'], { windowsHide: true });
+    voiceShell.on('error', () => (voiceShell = null));
+    voiceShell.stdout.resume();
+    voiceShell.stderr.resume();
+    voiceShell.stdin.on('error', () => undefined);
+    voiceShell.stdin.write(
+      "Add-Type -Namespace DiretorVoz -Name Teclas -MemberDefinition '[DllImport(\"user32.dll\")] public static extern void keybd_event(byte b, byte s, uint f, System.UIntPtr e);'\n",
+    );
+  }
+  voiceShell.stdin.write(
+    '$z=[System.UIntPtr]::Zero; [DiretorVoz.Teclas]::keybd_event(0x5B,0,0,$z); [DiretorVoz.Teclas]::keybd_event(0x48,0,0,$z); [DiretorVoz.Teclas]::keybd_event(0x48,0,2,$z); [DiretorVoz.Teclas]::keybd_event(0x5B,0,2,$z)\n',
+  );
+  return { ok: true };
+});
+
 // ---------- janela ----------
 function createWindow(): void {
   win = new BrowserWindow({
@@ -545,15 +650,18 @@ function createWindow(): void {
   });
   win.webContents.on('did-start-loading', () => {
     failPending('O editor recarregou. Chame a ferramenta de novo.');
+    stopAllAi();
     void abortAllExports();
   });
   win.webContents.on('render-process-gone', () => {
     failPending('A interface do editor fechou inesperadamente. Abra o editor e tente de novo.');
+    stopAllAi();
     void abortAllExports();
   });
   win.on('closed', () => {
     win = null;
     failPending('O editor foi fechado.');
+    stopAllAi();
     void abortAllExports();
   });
 }
@@ -588,6 +696,8 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   closeBridge?.();
+  stopAllAi();
+  voiceShell?.kill();
   app.quit();
 });
 

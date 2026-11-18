@@ -1,14 +1,15 @@
 import { byteSize, handleBridge } from '../core/api';
+import { chat } from './chat';
 import { session } from './store';
 
 export const bridgeStats = { lastCallAt: 0, lastBytesOut: 0, totalBytesOut: 0, calls: 0 };
 
 const LABEL: Record<string, string> = {
-  status: 'Claude conferiu o editor',
-  get_context: 'Claude leu o contexto',
-  propose_edit: 'Claude enviou uma proposta',
-  get_proposal: 'Claude consultou a proposta',
-  cancel_proposal: 'Claude cancelou a proposta',
+  status: 'conferiu o editor',
+  get_context: 'leu o projeto',
+  propose_edit: 'enviou uma proposta',
+  get_proposal: 'conferiu a proposta',
+  cancel_proposal: 'cancelou a proposta',
 };
 
 /** Atende as chamadas do servidor MCP usando a mesma sessão da interface. */
@@ -36,7 +37,7 @@ export function connectBridge(): () => void {
     bridgeStats.lastBytesOut = out;
     bridgeStats.totalBytesOut += out;
     bridgeStats.calls++;
-    session.log('tool', LABEL[method] ?? method, { bytesOut: out, bytesIn: byteSize(params) });
+    session.log('tool', `${chat.activeName()} ${LABEL[method] ?? method}`, { bytesOut: out, bytesIn: byteSize(params) });
     api.bridgeRespond(id, result);
   });
   return () => {
