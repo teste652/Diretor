@@ -11,6 +11,10 @@ export async function importPaths(paths: string[]): Promise<void> {
   if (!api) return;
   for (const path of paths) {
     const info = await api.probeMedia(path);
+    if (info && 'error' in info) {
+      showToast(String(info.error), true);
+      return;
+    }
     if (!info) {
       showToast(`Não consegui ler ${path}`, true);
       continue;
@@ -21,9 +25,11 @@ export async function importPaths(paths: string[]): Promise<void> {
     const hasVideo = p.clips.some((c) => c.kind === 'video');
     if (!hasVideo) {
       // Primeiro vídeo: o formato do projeto segue o vídeo (até 1920 de largura).
+      // Vídeo em pé (celular) já chega com largura/altura de tela; o fps segue o do arquivo.
       const k = Math.min(1, 1920 / media.width, 1920 / media.height);
       const even = (n: number) => Math.max(16, Math.round((n * k) / 2) * 2);
-      ops.push({ op: 'setCanvas', width: even(media.width), height: even(media.height) });
+      const fps = info.fps && info.fps >= 1 && info.fps <= 120 ? Math.round(info.fps * 1000) / 1000 : undefined;
+      ops.push({ op: 'setCanvas', width: even(media.width), height: even(media.height), ...(fps ? { fps } : {}) });
     }
     const videoEnd = Math.max(0, ...p.clips.filter((c) => c.kind === 'video').map((c) => c.start + c.duration));
     ops.push({ op: 'addClip', clip: { kind: 'video', mediaId: media.id, start: hasVideo ? videoEnd : 0 } });

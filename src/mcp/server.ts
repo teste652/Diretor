@@ -8,6 +8,16 @@ import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { bridgeFilePath } from '../shared/paths';
 
+/** Espera máxima de get_proposal (o editor também limita). */
+const MAX_WAIT_SECONDS = 45;
+
+/** Tempo limite de cada chamada ao editor: sempre abaixo dos ~60 s que o Claude Desktop espera por uma ferramenta. */
+export function callTimeoutMs(method: string, params: unknown): number {
+  if (method !== 'get_proposal') return 20_000;
+  const wait = Math.min(Math.max(Number((params as { waitSeconds?: unknown })?.waitSeconds) || 0, 0), MAX_WAIT_SECONDS);
+  return Math.min(57_000, (wait + 10) * 1000);
+}
+
 export async function callEditor(method: string, params: unknown = {}): Promise<unknown> {
   let info: { port: number; token: string };
   try {
@@ -20,24 +30,29 @@ export async function callEditor(method: string, params: unknown = {}): Promise<
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${info.token}` },
       body: JSON.stringify({ method, params }),
+      signal: AbortSignal.timeout(callTimeoutMs(method, params)),
     });
     const body = (await res.json()) as { result?: unknown; error?: string };
     return body.error ? { error: 'editor_error', message: body.error } : body.result;
-  } catch {
+  } catch (e) {
+    if (e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError'))
+      return { error: 'timeout', message: 'O editor demorou para responder. Tente de novo; se continuar, confira se ele não está ocupado exportando.' };
     return { error: 'editor_closed', message: 'O editor Diretor não está respondendo. Ele está aberto?' };
   }
 }
 
 const text = (v: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(v) }] });
 
-const OPS_HELP = `Cada op é um objeto JSON. Tempos em segundos. "t" de keyframe é relativo ao início do clipe (frame N = N/fps).
+const OPS_HELP = `Cada op é um objeto JSON. Tempos em segundos. "t" de keyframe é relativo ao início do clipe: para o frame N da linha do tempo, t = N/fps − start do clipe.
 - {"op":"animate","clipId","preset","start"?,"duration"?,"ease"?,"group"?} presets: fadeIn fadeOut slideUpIn slideDownIn slideLeftIn slideRightIn slideUpOut slideDownOut popIn popOut slowZoom. Vira keyframes editáveis.
 - {"op":"setKeyframe","clipId","prop","t","v","ease"?,"group"?,"keyframeId"?} props: x,y (px a partir do centro), scale, opacity(0-1). ease: linear easeIn easeOut easeInOut hold.
 - {"op":"removeKeyframe","clipId","prop","keyframeId"} | {"op":"clearKeyframes","clipId","prop"?,"group"?}
-- {"op":"retimeGroup","clipId","group","start","duration"}
-- {"op":"setProperty","clipId","prop","value"}
+- {"op":"retimeGroup","clipId","group","start","duration"} (muda início/duração de um grupo, ex.: "entrada")
+- {"op":"trimClip","clipId","edge":"start"|"end","delta"} apara uma borda (delta>0 = para a direita). Entrada fica no começo, saída no fim.
+- {"op":"setProperty","clipId","prop","value"} (só para propriedade sem pontos; com pontos use setKeyframe)
 - {"op":"addClip","clip":{"kind":"title"|"caption","text","start","duration","id"?,"style"?,"preset"?}} (caption preset: padrao caixa destaque)
-- {"op":"updateClip","clipId","set":{"start"?,"duration"?,"in"?,"text"?,"style"?,"preset"?,"volume"?,"muted"?}}
+- {"op":"updateClip","clipId","set":{"start"?,"duration"?,"in"?,"text"?,"style"?,"preset"?,"volume"?(0-1),"muted"?}}
+style: {"fontFamily"?,"fontSize"?(6-400),"fontWeight"?(100-1000),"color"?,"background"?("" = sem caixa),"align"?,"shadow"?}. Importar mídia e travar/esconder faixas são só do usuário.
 - {"op":"removeClip","clipId"}`;
 
 export function createServer(call: typeof callEditor = callEditor): McpServer {
@@ -57,7 +72,7 @@ export function createServer(call: typeof callEditor = callEditor): McpServer {
 
   server.tool(
     'propose_edit',
-    `Propõe uma edição como RASCUNHO no editor. O usuário vê cada etapa na prévia e na linha do tempo, pode ajustar à mão, aceitar ou descartar; só então ela é gravada. Divida em etapas pequenas e com nome (ex.: "Entrada", "Saída"); uma etapa é mostrada por vez. Use baseRevision do get_context e um requestId único por pedido (repetir o mesmo requestId devolve a proposta existente, sem duplicar). Para pedidos vagos, escolha presets e valores sensatos; para pedidos precisos, use setKeyframe.\n${OPS_HELP}`,
+    `Propõe uma edição como RASCUNHO no editor. O usuário vê cada etapa na prévia e na linha do tempo, pode ajustar à mão, aceitar ou descartar; só então ela é gravada. Divida em etapas pequenas e com nome (ex.: "Entrada", "Saída"); uma etapa é mostrada por vez, na ordem. Para o usuário ver o trabalho assim que cada parte fica pronta, envie a primeira etapa logo e acrescente as seguintes com appendTo=<id da proposta>. Use baseRevision do get_context e um requestId novo para cada pedido (reenviar exatamente a mesma chamada com o mesmo requestId devolve o estado existente, sem duplicar; o mesmo requestId com outro conteúdo é recusado com request_id_conflict). Para pedidos vagos, escolha presets e valores sensatos; para pedidos precisos, use setKeyframe.\n${OPS_HELP}`,
     {
       requestId: z.string().min(1),
       baseRevision: z.number().int(),
@@ -67,16 +82,17 @@ export function createServer(call: typeof callEditor = callEditor): McpServer {
         .array(z.object({ label: z.string(), summary: z.string().optional(), ops: z.array(z.record(z.any())).min(1) }))
         .min(1),
       replaces: z.string().optional(),
+      appendTo: z.string().optional(),
     },
     async (args) => text(await call('propose_edit', args)),
   );
 
   server.tool(
     'get_proposal',
-    'Estado de uma proposta: etapas aceitas/descartadas/ajustadas pelo usuário. waitSeconds (até 50) espera uma mudança a partir de sinceVersion. Se status="stale", leia o contexto (vem junto quando o usuário pede refazer) e proponha de novo com replaces.',
+    'Estado de uma proposta: etapas aceitas/descartadas/ajustadas pelo usuário, e notas que ele escreveu no editor (userNotes). waitSeconds (até 45) espera uma mudança a partir de sinceVersion. Se status="stale", só refaça quando redoRequested=true (o contexto atual vem junto) ou quando o usuário pedir no chat; nesse caso use replaces e um requestId novo. Siga o campo "next".',
     {
       proposalId: z.string(),
-      waitSeconds: z.number().min(0).max(50).optional(),
+      waitSeconds: z.number().min(0).max(MAX_WAIT_SECONDS).optional(),
       sinceVersion: z.number().int().optional(),
     },
     async (args) => text(await call('get_proposal', args)),

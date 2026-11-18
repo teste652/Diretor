@@ -18,9 +18,11 @@ export function ChatPanel() {
     const t = setInterval(() => force((n) => n + 1), 15_000);
     return () => clearInterval(t);
   }, []);
+  const lastActivity = s.activity[s.activity.length - 1]?.id ?? 0;
+  const p0 = s.openProposal;
   useEffect(() => {
     feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
-  }, [s.activity.length]);
+  }, [lastActivity, p0?.id, p0?.current, p0?.status, s.contextRequest?.status]);
 
   const connected = Date.now() - bridgeStats.lastCallAt < 180_000;
   const p = s.openProposal;
@@ -45,7 +47,9 @@ export function ChatPanel() {
         </p>
       )}
 
-      <div className="feed" ref={feedRef}>
+      {/* Uma área só rola: atividade, pedido de contexto e a proposta. Os botões de decisão ficam sempre à vista. */}
+      <div className="assist-scroll" ref={feedRef}>
+      <div className="feed">
         {s.activity.slice(-40).map((a) => (
           <div key={a.id} className={`item ${a.kind === 'note' ? 'note' : ''}`}>
             {a.bytesOut !== undefined && <span className="size">{kb(a.bytesOut)}</span>}
@@ -89,6 +93,7 @@ export function ChatPanel() {
           </p>
         </div>
       )}
+      </div>
 
       <div className="composer">
         <input
@@ -128,6 +133,13 @@ function ProposalCard({ p }: { p: Proposal }) {
   const s = useSession();
   const step = p.steps[p.current];
   const stale = p.status === 'stale';
+  // Trava curta quando a etapa muda: um clique duplo em Aceitar não decide a próxima etapa sem você vê-la.
+  const [locked, setLocked] = useState(false);
+  useEffect(() => {
+    setLocked(true);
+    const t = setTimeout(() => setLocked(false), 500);
+    return () => clearTimeout(t);
+  }, [p.id, step?.id, p.status]);
   return (
     <div className={`card ${stale ? 'stale' : 'draft'}`} data-testid="proposal-card">
       <div className="row">
@@ -153,20 +165,21 @@ function ProposalCard({ p }: { p: Proposal }) {
       </div>
       {stale ? (
         <div className="row">
-          <button className="btn primary" disabled={p.redoRequested} onClick={() => s.requestRedo(p.id)}>
-            {p.redoRequested ? 'Pedido enviado ao Claude' : 'Refazer com contexto atual'}
+          <button className="btn primary" disabled={p.redoRequested || locked} onClick={() => s.requestRedo(p.id)}>
+            {p.redoRequested ? 'Pedido registrado' : 'Refazer com contexto atual'}
           </button>
-          <button className="btn" onClick={() => s.discardStep(p.id)}>
+          <button className="btn" disabled={locked} onClick={() => s.discardStep(p.id)}>
             Descartar
           </button>
+          {p.redoRequested && <p className="hint" style={{ width: '100%', margin: '4px 0 0' }}>Se o Claude estiver esperando, ele refaz sozinho. Se não, escreva “refaz” na conversa do Claude Desktop.</p>}
         </div>
       ) : (
         step?.status === 'draft' && (
           <div className="decision">
-            <button className="btn primary lg" onClick={() => s.acceptStep(p.id)} data-testid="accept">
+            <button className="btn primary lg" disabled={locked} onClick={() => s.acceptStep(p.id)} data-testid="accept">
               Aceitar
             </button>
-            <button className="btn lg" onClick={() => s.discardStep(p.id)} data-testid="discard">
+            <button className="btn lg" disabled={locked} onClick={() => s.discardStep(p.id)} data-testid="discard">
               Descartar
             </button>
             <button className={`btn lg ${s.adjustMode ? 'on' : 'outline-accent'}`} onClick={() => s.setAdjustMode(!s.adjustMode)} title="Edições à mão vão para o rascunho">

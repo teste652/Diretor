@@ -50,32 +50,76 @@ export function ease(kind: Easing, u: number): number {
       return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
     case 'hold':
       return 0;
+    default:
+      return x;
   }
 }
 
+/** Tempo quantizado (µs) para decidir empates sem depender de arredondamento de ponto flutuante. */
+const tick = (t: number) => Math.round(t * 1e6);
+
+/**
+ * Ordem canônica dos pontos de uma propriedade: por tempo. Pontos de grupos
+ * diferentes podem coincidir no mesmo instante (ex.: o fim da "entrada" e o
+ * começo da "saida", ou o começo de um "popIn" sobre um "slowZoom"). No empate,
+ * vêm primeiro os pontos que FECHAM um grupo (o grupo mais curto antes: é ele
+ * que vale chegando nesse instante) e por último os que ABREM um grupo (o mais
+ * curto por último: é ele que vale a partir desse instante).
+ */
 export function sortedKeyframes(kfs: Keyframe[]): Keyframe[] {
-  return [...kfs].sort((a, b) => a.t - b.t);
+  if (kfs.length < 2) return [...kfs];
+  const ext = new Map<string, { s: number; e: number }>();
+  for (const k of kfs) {
+    const g = k.group ?? '';
+    const x = ext.get(g);
+    if (!x) ext.set(g, { s: k.t, e: k.t });
+    else {
+      x.s = Math.min(x.s, k.t);
+      x.e = Math.max(x.e, k.t);
+    }
+  }
+  const rank = (k: Keyframe): [number, number] => {
+    const x = ext.get(k.group ?? '')!;
+    const w = x.e - x.s;
+    const opens = k.t === x.s;
+    const closes = k.t === x.e;
+    if (closes && !opens) return [0, w];
+    if (opens && !closes) return [2, -w];
+    return [1, 0];
+  };
+  return kfs
+    .map((k, i) => ({ k, i, q: tick(k.t), r: rank(k) }))
+    .sort((a, b) => a.q - b.q || a.r[0] - b.r[0] || a.r[1] - b.r[1] || a.i - b.i)
+    .map((x) => x.k);
 }
 
-/** Valor da propriedade no tempo `t` (segundos relativos ao início do clipe). */
+function isTimeSorted(kfs: Keyframe[]): boolean {
+  for (let i = 1; i < kfs.length; i++) if (kfs[i].t < kfs[i - 1].t) return false;
+  return true;
+}
+
+/**
+ * Valor da propriedade no tempo `t` (segundos relativos ao início do clipe).
+ * Num instante com mais de um ponto, vale o último da ordem canônica a partir
+ * desse instante; antes dele, a curva vai até o primeiro.
+ */
 export function evalProp(p: AnimProp | undefined, t: number, fallback: number): number {
   if (!p) return fallback;
   const kfs = p.keyframes;
-  if (kfs.length === 0) return p.value;
-  const s = kfs.length > 1 ? sortedKeyframes(kfs) : kfs;
-  if (t <= s[0].t) return s[0].v;
-  const last = s[s.length - 1];
-  if (t >= last.t) return last.v;
-  for (let i = 0; i < s.length - 1; i++) {
-    const a = s[i];
-    const b = s[i + 1];
-    if (t >= a.t && t < b.t) {
-      const span = b.t - a.t;
-      const u = span <= 0 ? 1 : (t - a.t) / span;
-      return a.v + (b.v - a.v) * ease(a.ease, u);
-    }
+  if (!kfs || kfs.length === 0) return p.value;
+  const s = isTimeSorted(kfs) ? kfs : sortedKeyframes(kfs);
+  let j = -1;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i].t <= t) j = i;
+    else break;
   }
-  return last.v;
+  if (j < 0) return s[0].v;
+  if (j === s.length - 1) return s[j].v;
+  const a = s[j];
+  const b = s[j + 1];
+  const span = b.t - a.t;
+  const u = span <= 0 ? 1 : (t - a.t) / span;
+  return a.v + (b.v - a.v) * ease(a.ease, u);
 }
 
 export function evalClipProp(clip: Clip, name: string, timelineT: number): number {

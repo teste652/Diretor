@@ -87,6 +87,30 @@ describe('servidor MCP', () => {
     expect(c3.unchanged).toBe(true);
   });
 
+  it('acrescenta etapas com appendTo pelo MCP (o usuário vê cada etapa assim que fica pronta)', async () => {
+    const ctx = await tool('get_context');
+    const first = await tool('propose_edit', {
+      requestId: 'inc-1',
+      baseRevision: ctx.revision,
+      title: 'Animação em partes',
+      steps: [{ label: 'Pop', ops: [{ op: 'animate', clipId: 't1', preset: 'popIn', duration: 0.5 }] }],
+    });
+    expect(first.status).toBe('active');
+    const more = await tool('propose_edit', {
+      requestId: 'inc-2',
+      baseRevision: ctx.revision,
+      title: 'Animação em partes',
+      appendTo: first.id,
+      steps: [{ label: 'Some', ops: [{ op: 'animate', clipId: 't1', preset: 'popOut', duration: 0.5 }] }],
+    });
+    expect(more.id).toBe(first.id);
+    expect(more.steps.map((s: { label: string }) => s.label)).toEqual(['Pop', 'Some']);
+    session.discardStep();
+    session.discardStep();
+    const end = await tool('get_proposal', { proposalId: first.id });
+    expect(end.status).toBe('done');
+  });
+
   it('erros de validação voltam curtos para o Claude', async () => {
     const ctx = await tool('get_context');
     const bad = await tool('propose_edit', {

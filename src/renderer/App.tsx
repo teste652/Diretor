@@ -2,27 +2,36 @@ import { useEffect, useRef, useState } from 'react';
 import { createProject, parseProject } from '../core/model';
 import { connectBridge } from './bridgeClient';
 import { ChatPanel } from './ChatPanel';
-import { exportProject } from './exporter';
+import { cancelExport, exportProject } from './exporter';
 import { LeftPanel, importPaths } from './MediaPanel';
-import { Preview, togglePlay } from './Preview';
+import { Preview, previewSettled, togglePlay } from './Preview';
 import { playback, session, useSession } from './store';
 import { addCaptionAtPlayhead, deleteSelection, Timeline } from './Timeline';
+import type { Op } from '../core/operations';
 import { Icon, TextField, ToastHost, run, showToast } from './ui';
 
 export async function saveProject(saveAs = false, path?: string): Promise<string | null> {
   const api = window.diretor;
   if (!api) return null;
-  const file = await api.saveProject(session.project, path ?? (saveAs ? undefined : (session.filePath ?? undefined)));
-  if (file) {
-    session.markSaved(file);
-    showToast('Projeto salvo.');
+  const r = await api.saveProject(session.project, path ?? (saveAs ? undefined : (session.filePath ?? undefined)));
+  if (!r) return null;
+  if ('error' in r) {
+    showToast(r.error, true);
+    return null;
   }
-  return file;
+  session.markSaved(r.path);
+  showToast('Projeto salvo.');
+  return r.path;
 }
 
 export async function openProject(path?: string): Promise<boolean> {
+  if (session.dirty && !confirm('O projeto atual tem mudanças não salvas. Abrir outro e descartar essas mudanças?')) return false;
   const r = await window.diretor?.openProject(path);
   if (!r) return false;
+  if ('error' in r) {
+    showToast(r.error, true);
+    return false;
+  }
   try {
     session.load(parseProject(r.json), r.path);
     playback.set({ playing: false });
@@ -62,20 +71,42 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement;
-      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return;
       const mod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+      // Salvar e abrir valem até dentro de um campo: o campo é confirmado antes (blur).
+      if (mod && (key === 's' || key === 'o')) {
+        e.preventDefault();
+        if (el instanceof HTMLElement && el !== document.body) el.blur();
+        setTimeout(() => void (key === 's' ? saveProject(e.shiftKey) : openProject()), 0);
+        return;
+      }
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return;
       if (e.code === 'Space') (e.preventDefault(), togglePlay());
-      else if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) (e.preventDefault(), session.undo());
-      else if (mod && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) (e.preventDefault(), session.redo());
-      else if (mod && e.key.toLowerCase() === 's') (e.preventDefault(), void saveProject(e.shiftKey));
-      else if (mod && e.key.toLowerCase() === 'o') (e.preventDefault(), void openProject());
-      else if (e.key === 'Delete' || e.key === 'Backspace') deleteSelection();
+      else if (mod && key === 'z' && !e.shiftKey) (e.preventDefault(), session.undo());
+      else if (mod && (key === 'y' || (e.shiftKey && key === 'z'))) (e.preventDefault(), session.redo());
+      else if (e.key === 'Delete' || e.key === 'Backspace') deleteSelectedKeyframeOrClip();
       else if (e.key === 'ArrowRight') playback.seek(playback.get().time + 1 / session.view.settings.fps);
       else if (e.key === 'ArrowLeft') playback.seek(playback.get().time - 1 / session.view.settings.fps);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
+
+  // Fechar/recarregar com mudanças não salvas: o processo principal pergunta antes.
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!session.dirty) return;
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, []);
+
+  // Avisos curtos da sessão (ex.: Ctrl+Z com rascunho aberto).
+  useEffect(() => {
+    if (s.hint) showToast(s.hint.text);
+  }, [s.hint?.at]);
 
   const doExport = async () => {
     if (s.openProposal?.status === 'active' && !confirm('Há um rascunho pendente. A exportação usa só o que já foi aceito. Continuar?')) return;
@@ -136,6 +167,7 @@ export function App() {
                   className="btn"
                   onClick={() => {
                     cancel.current.cancelled = true;
+                    void cancelExport();
                   }}
                 >
                   Cancelar
@@ -170,5 +202,22 @@ export function App() {
   );
 }
 
+/** Delete: com um ponto de animação selecionado, apaga os pontos daquele instante; senão, o clipe. */
+function deleteSelectedKeyframeOrClip() {
+  const sel = session.selection.keyframe;
+  if (sel) {
+    const c = session.view.clips.find((x) => x.id === sel.clipId);
+    const k = c?.props[sel.prop]?.keyframes.find((x) => x.id === sel.keyframeId);
+    if (c && k) {
+      const ops: Op[] = [];
+      for (const [prop, ap] of Object.entries(c.props))
+        for (const x of ap.keyframes) if (Math.abs(x.t - k.t) < 1e-3) ops.push({ op: 'removeKeyframe', clipId: c.id, prop, keyframeId: x.id });
+      if (run(ops, 'Remover ponto')) session.setSelection({ clipIds: [c.id] });
+      return;
+    }
+  }
+  deleteSelection();
+}
+
 // Ganchos para o teste de ponta a ponta (scripts/e2e.mjs).
-window.__diretor = { session, playback, importPaths, exportProject, saveProject, openProject, addCaptionAtPlayhead };
+window.__diretor = { session, playback, importPaths, exportProject, cancelExport, saveProject, openProject, addCaptionAtPlayhead, previewSettled };

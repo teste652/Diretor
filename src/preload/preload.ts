@@ -3,8 +3,8 @@ import { contextBridge, ipcRenderer } from 'electron';
 const api = {
   openMediaDialog: (): Promise<string[]> => ipcRenderer.invoke('media:openDialog'),
   probeMedia: (path: string) => ipcRenderer.invoke('media:probe', path),
-  openProject: (path?: string) => ipcRenderer.invoke('project:open', path),
-  saveProject: (project: unknown, path?: string): Promise<string | null> => ipcRenderer.invoke('project:save', { project, path }),
+  openProject: (path?: string): Promise<{ path: string; json: unknown } | { error: string } | null> => ipcRenderer.invoke('project:open', path),
+  saveProject: (project: unknown, path?: string): Promise<{ path: string } | { error: string } | null> => ipcRenderer.invoke('project:save', { project, path }),
   exportStart: (project: unknown, outPath?: string) => ipcRenderer.invoke('export:start', { project, outPath }),
   exportFrame: (jobId: number, frame: Uint8Array): Promise<boolean> => ipcRenderer.invoke('export:frame', jobId, frame),
   exportFinish: (jobId: number) => ipcRenderer.invoke('export:finish', jobId),

@@ -19,6 +19,13 @@ Decisões:
 - Presets (`animate`) viram keyframes comuns ao entrar no rascunho, então tudo o que o Claude faz é editável à mão.
 - Seleção: selecionar o próprio alvo do rascunho (ou nada) não o desatualiza; selecionar outro clipe, sim. Assim dá para ajustar o rascunho sem perdê-lo.
 - Uma proposta ativa por vez. Uma nova só entra se a anterior foi decidida ou com `replaces`.
+- Mesmo `requestId` com o mesmo conteúdo devolve a proposta existente; com conteúdo diferente, é recusado (`request_id_conflict`), para nunca misturar dois pedidos.
+- Com rascunho aberto, Ctrl+Z/Ctrl+Y valem só para os ajustes manuais do rascunho; o histórico do projeto fica intacto até aceitar ou descartar.
+- Aparar: animações que tocam as duas bordas são reescaladas; as presas ao fim acompanham o fim; as demais acompanham o conteúdo. Pontos que saem do clipe viram um ponto na borda com o valor daquele instante. Aparar o início de um vídeo mantém o clipe no lugar e puxa os vídeos seguintes da faixa.
+- Presets nunca sobrescrevem o valor de repouso de uma propriedade, e cada um só substitui pontos do próprio grupo.
+- Ao abrir um projeto, a revisão só cresce, para uma proposta antiga nunca valer no projeto novo.
+
+Limitação conhecida: dois presets na mesma propriedade (ex.: `popOut` e depois `slowZoom`, ambos na escala) dividem a mesma lista de pontos; nada se perde e tudo é editável, mas o resultado pode precisar de ajuste à mão.
 
 ## Pensado para o que vem depois
 
@@ -37,6 +44,6 @@ Decisões:
 
 ## Estado e como retomar
 
-- Fase 1 implementada e testada automaticamente no Linux (unitários, MCP real, exportação, e2e no Electron com xvfb).
-- Falta verificar no Windows e no Claude Desktop real (ver `docs/ROTEIRO-DE-TESTE.md`).
+- Fase 1 implementada, revisada a fundo e testada automaticamente no Linux (unitários, MCP real, exportação, e2e no Electron com xvfb) e no Windows pelo GitHub Actions.
+- Falta verificar à mão no Windows e com o Claude Desktop real (ver `docs/ROTEIRO-DE-TESTE.md`).
 - Próximo passo: rodar o roteiro no Windows, corrigir o que aparecer, empacotar um instalador (electron-builder) e começar as máscaras/imagens.

@@ -8,6 +8,9 @@ import type { EditorSession, Proposal, ProposeInput } from './session';
 
 export type BridgeMethod = 'status' | 'get_context' | 'propose_edit' | 'get_proposal' | 'cancel_proposal';
 
+/** Espera máxima de get_proposal: abaixo do tempo limite de uma ferramenta no Claude Desktop (~60 s). */
+export const MAX_WAIT_SECONDS = 45;
+
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
 
 export function byteSize(v: unknown): number {
@@ -46,16 +49,28 @@ export interface ContextParams {
   allowLarger?: boolean;
 }
 
-let lastContextKey = '';
+/** Última resposta completa por sessão, para responder {unchanged} sem reenviar. */
+const lastContextKey = new WeakMap<EditorSession, string>();
 
 export function buildContext(s: EditorSession, params: ContextParams = {}): Record<string, unknown> {
   const p: Project = s.project;
   const economy = s.settings.economy;
-  const selKey = `${p.revision}|${s.selection.clipIds.join(',')}|${JSON.stringify(params.include ?? [])}|${JSON.stringify(params.range ?? null)}`;
-  const notes = s.notes.some((n) => !n.delivered) ? s.takeNotes() : undefined;
-  if (params.knownRevision === p.revision && lastContextKey === selKey && !notes) {
+  const open = s.openProposal;
+  const key = JSON.stringify([
+    p.revision,
+    s.selection.clipIds,
+    s.selection.keyframe?.keyframeId ?? null,
+    Math.round(s.playhead * p.settings.fps),
+    economy,
+    open ? [open.id, open.status] : null,
+    params.include ?? [],
+    params.range ?? null,
+  ]);
+  const hasNotes = s.notes.some((n) => !n.delivered);
+  if (params.knownRevision === p.revision && lastContextKey.get(s) === key && !hasNotes) {
     return { unchanged: true, revision: p.revision };
   }
+  const notes = hasNotes ? s.takeNotes() : undefined;
   const selected = s.selection.clipIds.map((id) => findClip(p, id)).filter(Boolean) as Clip[];
   const ctx: Record<string, unknown> = {
     revision: p.revision,
@@ -81,37 +96,58 @@ export function buildContext(s: EditorSession, params: ContextParams = {}): Reco
     };
   }
   if (inc.has('media')) ctx.media = p.media.map((m) => ({ id: m.id, name: m.name, dur: r3(m.duration), audio: m.hasAudio }));
-  const open = s.openProposal;
-  if (open) ctx.pendingProposal = { id: open.id, status: open.status };
+  if (open) ctx.pendingProposal = open.status === 'stale' ? { id: open.id, status: open.status, redoRequested: open.redoRequested } : { id: open.id, status: open.status };
 
-  const size = byteSize(ctx);
+  // As notas do usuário são palavras dele para o Claude: sempre seguem e não contam para o teto.
+  const size = byteSize(ctx) - (notes ? byteSize({ userNotes: notes }) : 0);
   const ceiling = s.settings.contextCeilingBytes;
   if (size > ceiling) {
+    const scope = JSON.stringify([params.include ?? [], params.range ?? null]);
     const req = s.contextRequest;
-    const granted = req && req.status === 'granted' && req.revision === p.revision && req.bytes >= size;
+    const sameScope = !!req && req.scope === scope;
+    // A autorização vale uma vez para esse pedido, com folga para pequenas mudanças (playhead, nota...).
+    const granted = sameScope && req!.status === 'granted' && size <= req!.bytes * 1.25 + 1024;
     if (!granted) {
-      if (params.allowLarger && (!req || req.status !== 'pending' || req.revision !== p.revision)) s.requestLargerContext(size);
-      const reduced: Record<string, unknown> = {
-        revision: p.revision,
-        fps: p.settings.fps,
-        duration: ctx.duration,
-        playhead: ctx.playhead,
-        selection: (ctx.selection as unknown[]).slice(0, 3),
-        truncated: {
-          neededBytes: size,
-          ceilingBytes: ceiling,
-          hint: params.allowLarger
-            ? 'Aguardando o usuário autorizar no editor. Chame de novo depois.'
-            : 'Reduza com range/include, ou chame com allowLarger:true para pedir autorização ao usuário.',
-        },
-      };
-      lastContextKey = '';
+      const denied = sameScope && req!.status === 'denied' && req!.ceiling === ceiling;
+      const pending = sameScope && req!.status === 'pending';
+      if (params.allowLarger && !denied && !pending) s.requestLargerContext(size, scope);
+      const asked = params.allowLarger || pending;
+      const reduced = reducedContext(ctx, selected, size, ceiling, denied ? 'denied' : asked ? 'waiting' : 'reduce');
+      if (notes) reduced.userNotes = notes;
+      lastContextKey.delete(s);
       return reduced;
     }
     s.contextRequest = null;
   }
-  lastContextKey = selKey;
+  lastContextKey.set(s, key);
   return ctx;
+}
+
+const TRUNCATED_HINT = {
+  denied: 'O usuário recusou o contexto maior. Não peça de novo: reduza com range/include ou trabalhe com a seleção.',
+  waiting: 'Aguardando o usuário autorizar no editor. Chame de novo com os mesmos parâmetros depois.',
+  reduce: 'Reduza com range/include, ou chame com allowLarger:true para pedir autorização ao usuário.',
+};
+
+/** Versão reduzida que cabe no teto: encolhe até sobrar só ids, tipos e tempos. */
+function reducedContext(ctx: Record<string, unknown>, selected: Clip[], neededBytes: number, ceiling: number, why: keyof typeof TRUNCATED_HINT): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    revision: ctx.revision,
+    fps: ctx.fps,
+    duration: ctx.duration,
+    playhead: ctx.playhead,
+    selection: (ctx.selection as unknown[]).slice(0, 3),
+    truncated: { neededBytes, ceilingBytes: ceiling, why, hint: TRUNCATED_HINT[why] },
+  };
+  const fits = () => byteSize(out) <= ceiling;
+  if (!fits()) out.selection = selected.slice(0, 3).map((c) => ({ id: c.id, kind: c.kind, start: r3(c.start), dur: r3(c.duration) }));
+  if (!fits()) {
+    delete out.selection;
+    out.selectionIds = selected.slice(0, 5).map((c) => c.id);
+  }
+  if (!fits()) delete out.selectionIds;
+  if (!fits()) out.truncated = { neededBytes, ceilingBytes: ceiling, why };
+  return out;
 }
 
 export function compactProposal(p: Proposal, revision: number): Record<string, unknown> {
@@ -137,7 +173,9 @@ export function compactProposal(p: Proposal, revision: number): Record<string, u
     p.status === 'active'
       ? 'O usuário está vendo o rascunho. Use get_proposal com waitSeconds para esperar a decisão.'
       : p.status === 'stale'
-        ? 'Rascunho desatualizado. Leia get_context e proponha de novo com replaces=' + p.id + '.'
+        ? p.redoRequested
+          ? `O usuário pediu para refazer: leia get_context e chame propose_edit com replaces="${p.id}" e um requestId novo.`
+          : 'O usuário mexeu no projeto e o rascunho ficou desatualizado. Não refaça por conta própria: espere com get_proposal (waitSeconds) até o usuário pedir "refazer" no editor ou no chat.'
         : 'Nada pendente.';
   return out;
 }
@@ -170,14 +208,15 @@ export async function handleBridge(s: EditorSession, method: string, params: any
       const id = String(params.proposalId ?? s.openProposal?.id ?? '');
       let p = s.proposals.find((x) => x.id === id);
       if (!p) return { error: 'not_found', message: 'Proposta não encontrada.' };
-      const wait = Math.min(Math.max(Number(params.waitSeconds ?? 0), 0), 50);
-      if (wait > 0) {
-        const since = Number(params.sinceVersion ?? p.version);
+      const wait = Math.min(Math.max(Number(params.waitSeconds) || 0, 0), MAX_WAIT_SECONDS);
+      if (wait > 0 && !s.notes.some((n) => !n.delivered)) {
+        const since = Number.isFinite(Number(params.sinceVersion)) ? Number(params.sinceVersion) : p.version;
         await s.waitForProposal(id, since, wait * 1000);
         p = s.proposals.find((x) => x.id === id)!;
       }
       const out = compactProposal(p, s.project.revision);
       if (p.status === 'stale' && p.redoRequested) out.context = buildContext(s, {});
+      else if (s.notes.some((n) => !n.delivered)) out.userNotes = s.takeNotes();
       return out;
     }
     case 'cancel_proposal': {

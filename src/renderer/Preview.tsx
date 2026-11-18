@@ -3,11 +3,23 @@ import { type Clip, type VideoClip, findClip, projectDuration } from '../core/mo
 import type { Op } from '../core/operations';
 import { evalClipProp } from '../core/properties';
 import { hitTest, isActiveAt, layoutText, renderFrame, sourceTime, videoRect } from '../core/render';
-import { fmtTime, playback, session, usePlayback, useSession } from './store';
-import { Icon, run } from './ui';
-import { VideoPool, seekExact } from './video';
+import { fmtTime, frameAt, playback, session, usePlayback, useSession } from './store';
+import { Icon, run, showToast } from './ui';
+import { SEEK_EPSILON, VideoPool, seekExact } from './video';
 
 export const previewPool: { current: VideoPool | null } = { current: null };
+
+// Última sincronização da prévia parada (vídeos posicionados + quadro desenhado).
+let lastSync: Promise<void> = Promise.resolve();
+const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+
+/** Resolve quando a prévia mostra o quadro do playhead atual (usado pelo teste de ponta a ponta). */
+export async function previewSettled(): Promise<void> {
+  await nextFrame();
+  await nextFrame();
+  await lastSync;
+  await nextFrame();
+}
 
 export function Preview() {
   const s = useSession();
@@ -17,7 +29,13 @@ export function Preview() {
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [css, setCss] = useState({ w: 640, h: 360 });
-  const [volume, setVolume] = useState(0.9);
+  const [volume, setVolumeState] = useState(0.9);
+  // O volume fica num ref: mexer no controle não reinicia a reprodução.
+  const volumeRef = useRef(0.9);
+  const setVolume = (v: number) => {
+    volumeRef.current = v;
+    setVolumeState(v);
+  };
   const drag = useRef<{ clipId: string; sx: number; sy: number; dx: number; dy: number } | null>(null);
   const raf = useRef(0);
 
@@ -33,7 +51,12 @@ export function Preview() {
     });
   }, []);
 
-  if (!previewPool.current) previewPool.current = new VideoPool(() => requestAnimationFrame(draw), true);
+  if (!previewPool.current)
+    previewPool.current = new VideoPool(
+      () => requestAnimationFrame(draw),
+      true,
+      (path, msg) => showToast(`Não consegui abrir ${path.split(/[\\/]/).pop()}: ${msg}`, true),
+    );
 
   // Encaixa o canvas (tamanho real do projeto) no palco.
   useLayoutEffect(() => {
@@ -56,49 +79,87 @@ export function Preview() {
     for (const [, el] of pool.all()) if (!el.paused) el.pause();
     const t = pb.time;
     const active = view.clips.filter((c): c is VideoClip => c.kind === 'video' && isActiveAt(c, t));
-    Promise.all(active.map((c) => seekExact(pool.element(c, view)!, sourceTime(c, t)))).then(draw);
-    draw();
+    const els = active.map((c) => ({ c, el: pool.element(c, view) })).filter((x): x is { c: VideoClip; el: HTMLVideoElement } => !!x.el);
+    const settled = els.every(({ c, el }) => !!el.error || (el.readyState >= 2 && !el.seeking && Math.abs(el.currentTime - (sourceTime(c, t) + SEEK_EPSILON)) < 1e-3));
+    lastSync = Promise.all(els.map(({ c, el }) => seekExact(el, sourceTime(c, t)))).then(draw);
+    // Só desenha já se nenhum vídeo precisa buscar quadro: durante a busca o
+    // canvas continua mostrando o quadro anterior (sem piscar preto).
+    if (settled) draw();
   }, [view, pb.time, pb.playing, draw]);
 
-  // Reprodução: relógio próprio; vídeos seguem o relógio.
+  // Reprodução: o vídeo que está tocando é o relógio (títulos e animação
+  // acompanham a imagem e o som); sem vídeo ativo, o relógio do sistema.
   useEffect(() => {
     if (!pb.playing) return;
     const pool = previewPool.current!;
-    const t0 = playback.get().time;
-    const start = performance.now();
-    const tick = () => {
-      const p = session.view;
-      const end = projectDuration(p);
-      const t = t0 + (performance.now() - start) / 1000;
-      if (t >= end) {
-        playback.set({ playing: false });
-        playback.seek(end);
-        return;
-      }
-      playback.set({ time: t });
+    let anchor = { wall: performance.now(), t: playback.get().time };
+    let epoch = playback.epoch();
+    let stopped = false;
+    const sync = (p: typeof view, t: number, hard: boolean) => {
       const videoTrack = p.tracks.find((tr) => tr.kind === 'video');
       for (const c of p.clips) {
         if (c.kind !== 'video') continue;
         const el = pool.element(c, p);
-        if (!el) continue;
+        if (!el || el.error) continue;
         if (isActiveAt(c, t)) {
-          el.volume = Math.min(1, volume * Math.min(c.volume, 1));
+          el.volume = Math.max(0, Math.min(1, volumeRef.current * c.volume));
           el.muted = c.muted || !!videoTrack?.hidden;
           const want = sourceTime(c, t);
-          if (Math.abs(el.currentTime - want) > 0.25) el.currentTime = want;
+          if (hard || Math.abs(el.currentTime - want) > 0.3) el.currentTime = want;
           if (el.paused) void el.play().catch(() => undefined);
         } else if (!el.paused) el.pause();
       }
+    };
+    const masterTime = (p: typeof view, t: number): number | null => {
+      for (const c of p.clips) {
+        if (c.kind !== 'video' || !isActiveAt(c, t)) continue;
+        const el = pool.element(c, p);
+        if (el && !el.paused && !el.seeking && el.readyState >= 3) return c.start + (el.currentTime - c.in);
+      }
+      return null;
+    };
+    const tick = () => {
+      if (stopped) return;
+      const p = session.view;
+      const now = performance.now();
+      if (playback.epoch() !== epoch) {
+        // O usuário clicou em outro ponto durante a reprodução.
+        epoch = playback.epoch();
+        anchor = { wall: now, t: playback.get().time };
+        sync(p, anchor.t, true);
+      }
+      let t = anchor.t + (now - anchor.wall) / 1000;
+      const vt = masterTime(p, t);
+      if (vt !== null && Math.abs(vt - t) < 0.5) {
+        t = vt;
+        anchor = { wall: now, t };
+      }
+      const last = Math.max(0, projectDuration(p) - 1 / p.settings.fps);
+      if (t >= last) {
+        playback.set({ playing: false });
+        playback.seek(last); // para no último quadro (não num quadro preto depois do fim)
+        return;
+      }
+      playback.set({ time: t });
+      sync(p, t, false);
       draw();
       raf.current = requestAnimationFrame(tick);
     };
+    sync(session.view, anchor.t, true);
     raf.current = requestAnimationFrame(tick);
+    // Janela minimizada: o rAF para, então pausa tudo (o som não passa do ponto de corte).
+    const onVisibility = () => {
+      if (document.hidden) playback.set({ playing: false });
+    };
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
+      stopped = true;
       cancelAnimationFrame(raf.current);
+      document.removeEventListener('visibilitychange', onVisibility);
       for (const [, el] of pool.all()) el.pause();
       session.setPlayhead(playback.get().time);
     };
-  }, [pb.playing, draw, volume]);
+  }, [pb.playing, draw]);
 
   const toProject = (e: React.PointerEvent) => {
     const r = canvasRef.current!.getBoundingClientRect();
@@ -183,8 +244,11 @@ export function Preview() {
         <button className="btn ghost icon" title="Fim" onClick={() => playback.seek(Math.max(0, total - 1 / fps))}>
           {Icon.end}
         </button>
-        <span className="time">
+        <span className="time" data-testid="timecode">
           {fmtTime(pb.time, fps)} / {fmtTime(total, fps)}
+        </span>
+        <span className="hint" title="Número do quadro (a partir de 0), útil para pedir “do quadro 15 ao 45”">
+          quadro {frameAt(pb.time, fps)}
         </span>
         <span style={{ flex: 1 }} />
         <span className="hint">
@@ -199,8 +263,9 @@ export function Preview() {
 
 export function togglePlay() {
   const { playing, time } = playback.get();
-  const end = projectDuration(session.view);
-  if (!playing && time >= end - 0.01) playback.seek(0);
+  const p = session.view;
+  const end = projectDuration(p);
+  if (!playing && time >= end - 1.5 / p.settings.fps) playback.seek(0);
   playback.set({ playing: !playing && end > 0 });
 }
 

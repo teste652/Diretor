@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import { type CaptionPreset, type Clip, EASINGS, type Easing, findClip } from '../core/model';
-import { ANIMATION_PRESETS, type AnimationPreset } from '../core/operations';
-import { evalClipProp, keyframeGroups, propsForKind } from '../core/properties';
-import { playback, usePlayback, useSession } from './store';
-import { NumberField, TextField, run } from './ui';
+import { ANIMATION_PRESETS, type AnimationPreset, CAPTION_PRESETS, type TrimEdge, clampTrimDelta } from '../core/operations';
+import { evalClipProp, keyframeGroups, propDef, propsForKind } from '../core/properties';
+import { playback, session, usePlayback, useSession } from './store';
+import { ColorField, NumberField, TextField, run } from './ui';
 
 const EASE_LABEL: Record<Easing, string> = { linear: 'Linear', easeIn: 'Acelerar', easeOut: 'Desacelerar', easeInOut: 'Suave', hold: 'Segurar' };
 
@@ -15,6 +15,13 @@ export function Inspector() {
   if (!c) return <div className="empty">Selecione um clipe na linha do tempo ou na prévia para editar texto, tempo, estilo e animação.</div>;
   const isDraft = s.draftInfo.clipIds.has(c.id);
   const set = (changes: Record<string, unknown>, label = 'Editar clipe') => run([{ op: 'updateClip', clipId: c.id, set: changes }], label);
+  // Aparar pelo painel: mesmo comportamento das bordas na linha do tempo (limitado ao arquivo).
+  const trim = (edge: TrimEdge, delta: number, label: string) => {
+    const cur = findClip(session.view, c.id);
+    if (!cur) return;
+    const d = clampTrimDelta(session.view, cur, edge, delta);
+    if (Math.abs(d) > 1e-6) run([{ op: 'trimClip', clipId: c.id, edge, delta: d }], label);
+  };
   const local = Math.min(Math.max(pb.time - c.start, 0), c.duration);
 
   return (
@@ -23,7 +30,7 @@ export function Inspector() {
         <strong>{c.kind === 'video' ? 'Vídeo' : c.kind === 'title' ? 'Título' : 'Legenda'}</strong>
         {isDraft && <span className="badge">{s.adjustMode ? 'Ajustando rascunho' : 'No rascunho'}</span>}
       </div>
-      {isDraft && <p className="hint">Mudanças nos pontos do rascunho ficam no rascunho até você aceitar.</p>}
+      {isDraft && <p className="hint">Este clipe está no rascunho do Claude: o que você mudar aqui entra no rascunho e só é gravado quando você aceitar.</p>}
 
       {c.kind !== 'video' && (
         <div className="field" style={{ gridTemplateColumns: '1fr' }}>
@@ -37,21 +44,21 @@ export function Inspector() {
       <div className="field">
         <label>{c.kind === 'video' ? 'Duração (s)' : 'Fim (s)'}</label>
         {c.kind === 'video' ? (
-          <NumberField value={c.duration} min={0.04} step={1 / 30} digits={3} onCommit={(v) => set({ duration: v }, 'Aparar fim')} />
+          <NumberField value={c.duration} min={0.04} step={1 / 30} digits={3} onCommit={(v) => trim('end', v - c.duration, 'Aparar fim')} />
         ) : (
-          <NumberField value={c.start + c.duration} min={c.start + 0.04} step={1 / 30} digits={3} onCommit={(v) => set({ duration: Math.max(0.04, v - c.start) }, 'Editar fim')} />
+          <NumberField value={c.start + c.duration} min={c.start + 0.04} step={1 / 30} digits={3} onCommit={(v) => trim('end', v - (c.start + c.duration), 'Editar fim')} />
         )}
       </div>
       {c.kind === 'video' && (
         <>
           <div className="field">
             <label>Corte inicial</label>
-            <NumberField value={c.in} min={0} step={1 / 30} digits={3} title="Ponto de entrada no arquivo original" onCommit={(v) => set({ in: v }, 'Aparar início')} />
+            <NumberField value={c.in} min={0} step={1 / 30} digits={3} title="Ponto de entrada no arquivo original (o clipe fica no lugar e o fim acompanha)" onCommit={(v) => trim('start', v - c.in, 'Aparar início')} />
           </div>
           <div className="field">
             <label>Volume</label>
             <div className="row">
-              <NumberField value={c.volume} min={0} max={2} step={0.05} onCommit={(v) => set({ volume: v }, 'Volume')} />
+              <NumberField value={c.volume} min={0} max={1} step={0.05} onCommit={(v) => set({ volume: v }, 'Volume')} />
               <button className={`btn ${c.muted ? 'on' : ''}`} onClick={() => set({ muted: !c.muted }, 'Mudo')}>
                 Mudo
               </button>
@@ -136,12 +143,12 @@ function StyleSection({ clip: c, set }: { clip: Extract<Clip, { kind: 'title' | 
       </div>
       <div className="field">
         <label>Cor</label>
-        <input className="input" type="color" value={toHex(c.style.color)} onChange={(e) => set({ style: { color: e.target.value } }, 'Cor do texto')} />
+        <ColorField value={toHex(c.style.color)} onCommit={(v) => set({ style: { color: v } }, 'Cor do texto')} />
       </div>
       <div className="field">
         <label>Fundo</label>
         <div className="row">
-          <input className="input" type="color" value={toHex(c.style.background || '#000000')} onChange={(e) => set({ style: { background: e.target.value } }, 'Fundo do texto')} />
+          <ColorField value={toHex(c.style.background || '#000000')} onCommit={(v) => set({ style: { background: v } }, 'Fundo do texto')} />
           <button className={`btn ${c.style.background ? 'on' : ''}`} onClick={() => set({ style: { background: c.style.background ? '' : 'rgba(0,0,0,0.55)' } }, 'Fundo do texto')}>
             {c.style.background ? 'Com' : 'Sem'}
           </button>
@@ -176,8 +183,20 @@ function Groups({ clip: c }: { clip: Clip }) {
       {groups.map((g) => (
         <div className="group-chip" key={g.group}>
           <span className="name">{GROUP_LABEL[g.group] ?? g.group}</span>
-          <NumberField value={g.start} min={0} step={0.05} onCommit={(v) => run([{ op: 'retimeGroup', clipId: c.id, group: g.group, start: v, duration: g.end - g.start }], 'Mover animação')} />
-          <NumberField value={g.end - g.start} min={0} step={0.05} onCommit={(v) => run([{ op: 'retimeGroup', clipId: c.id, group: g.group, start: g.start, duration: v }], 'Duração da animação')} />
+          <NumberField
+            value={g.start}
+            min={0}
+            max={Math.max(0, c.duration - Math.max(0.01, g.end - g.start))}
+            step={0.05}
+            onCommit={(v) => run([{ op: 'retimeGroup', clipId: c.id, group: g.group, start: v, duration: Math.max(0.01, g.end - g.start) }], 'Mover animação')}
+          />
+          <NumberField
+            value={g.end - g.start}
+            min={0.01}
+            max={Math.max(0.01, c.duration - g.start)}
+            step={0.05}
+            onCommit={(v) => run([{ op: 'retimeGroup', clipId: c.id, group: g.group, start: g.start, duration: v }], 'Duração da animação')}
+          />
         </div>
       ))}
     </div>
@@ -190,6 +209,7 @@ function SelectedKeyframe({ clip: c }: { clip: Clip }) {
   if (!sel || sel.clipId !== c.id) return null;
   const k = c.props[sel.prop]?.keyframes.find((x) => x.id === sel.keyframeId);
   if (!k) return null;
+  const d = propDef(sel.prop);
   const upd = (patch: Partial<{ t: number; v: number; ease: Easing }>) =>
     run([{ op: 'setKeyframe', clipId: c.id, prop: sel.prop, keyframeId: k.id, t: patch.t ?? k.t, v: patch.v ?? k.v, ease: patch.ease ?? k.ease }], 'Editar ponto');
   return (
@@ -201,7 +221,7 @@ function SelectedKeyframe({ clip: c }: { clip: Clip }) {
       </div>
       <div className="field">
         <label>Valor</label>
-        <NumberField value={k.v} step={0.1} onCommit={(v) => upd({ v })} />
+        <NumberField value={k.v} min={d?.min} max={d?.max} step={d?.step ?? 0.1} onCommit={(v) => upd({ v })} />
       </div>
       <div className="field">
         <label>Suavização</label>
@@ -221,9 +241,11 @@ function SelectedKeyframe({ clip: c }: { clip: Clip }) {
 }
 
 function PresetPicker({ clip: c }: { clip: Clip }) {
-  const [preset, setPreset] = useState<AnimationPreset>('slideUpIn');
+  const [chosen, setPreset] = useState<AnimationPreset>('slideUpIn');
   const [dur, setDur] = useState(0.6);
-  const options = ANIMATION_PRESETS.filter((p) => c.kind !== 'caption' || p.name === 'fadeIn' || p.name === 'fadeOut');
+  const options = ANIMATION_PRESETS.filter((p) => c.kind !== 'caption' || CAPTION_PRESETS.includes(p.name));
+  // Legenda só aceita alguns presets: o escolhido precisa estar na lista mostrada.
+  const preset = options.some((o) => o.name === chosen) ? chosen : options[0].name;
   return (
     <div style={{ marginTop: 12 }}>
       <h4 style={{ margin: '0 0 6px', fontSize: 12, color: 'var(--muted)' }}>ANIMAÇÃO PRONTA</h4>

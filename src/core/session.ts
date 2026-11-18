@@ -2,7 +2,7 @@
 // propostas do Claude em rascunho. É a única porta de entrada para mudar o
 // projeto, tanto pela interface quanto pelo MCP.
 
-import { type Op, OpValidationError, applyOps, describeOp, touchedClipIds } from './operations';
+import { type Op, OpValidationError, USER_ONLY_OPS, applyOps, describeOp, touchedClipIds } from './operations';
 import { type Project, createProject, findClip } from './model';
 
 export type Source = 'user' | 'ai';
@@ -34,6 +34,10 @@ export interface ProposalStep {
   ops: Op[];
   /** Ajustes feitos à mão sobre o rascunho, antes de aceitar. */
   manualOps: Op[];
+  /** Onde começa cada ajuste em manualOps (Ctrl+Z desfaz um ajuste por vez). */
+  manualMarks: number[];
+  /** Ajustes desfeitos que Ctrl+Y pode refazer. */
+  manualRedo: Op[][];
   status: StepStatus;
   error?: string;
 }
@@ -60,6 +64,10 @@ export interface Proposal {
   /** O usuário pediu "refazer com o contexto atual". */
   redoRequested: boolean;
   replaces?: string;
+  /** requestIds das chamadas que acrescentaram etapas (idempotência). */
+  appendedRequestIds: string[];
+  /** Impressão digital do pedido original (mesmo requestId com outro conteúdo é conflito). */
+  fingerprint: string;
   /** Aumenta a cada mudança visível (para o Claude esperar decisões). */
   version: number;
 }
@@ -95,14 +103,35 @@ export interface ProposeInput {
   summary?: string;
   steps: { label: string; summary?: string; ops: Op[] }[];
   replaces?: string;
+  /** Acrescenta as etapas a uma proposta existente (mostrar cada etapa assim que fica pronta). */
+  appendTo?: string;
 }
 
 export type ProposeResult =
   | { ok: true; proposal: Proposal; reused: boolean }
-  | { ok: false; code: 'stale_revision' | 'invalid_ops' | 'proposal_pending' | 'bad_request'; message: string; details?: unknown };
+  | {
+      ok: false;
+      code: 'stale_revision' | 'invalid_ops' | 'proposal_pending' | 'proposal_closed' | 'bad_request' | 'request_id_conflict';
+      message: string;
+      details?: unknown;
+    };
 
 let seq = 0;
 const sid = (p: string) => `${p}${Date.now().toString(36)}${(++seq).toString(36)}`;
+
+function newStep(s: ProposeInput['steps'][number]): ProposalStep {
+  return {
+    id: sid('step_'),
+    label: typeof s.label === 'string' && s.label.trim() ? s.label.trim().slice(0, 80) : 'Etapa',
+    summary: typeof s.summary === 'string' ? s.summary : '',
+    requested: s.ops,
+    ops: [],
+    manualOps: [],
+    manualMarks: [],
+    manualRedo: [],
+    status: 'waiting',
+  };
+}
 
 function hashString(s: string): string {
   let h = 2166136261;
@@ -126,8 +155,13 @@ export class EditorSession {
   activity: ActivityEntry[] = [];
   notes: UserNote[] = [];
   settings: Settings = { economy: true, contextCeilingBytes: 6000 };
-  /** Pedido do assistente para enviar um contexto maior que o teto. */
-  contextRequest: { bytes: number; revision: number; status: 'pending' | 'granted' | 'denied' } | null = null;
+  /**
+   * Pedido do assistente para enviar um contexto maior que o teto. `scope` é o
+   * que ele pediu (include/range): a resposta do usuário vale para esse pedido.
+   */
+  contextRequest: { bytes: number; revision: number; scope: string; ceiling: number; status: 'pending' | 'granted' | 'denied' } | null = null;
+  /** Aviso curto para a interface (ex.: por que Ctrl+Z não mexeu no projeto). */
+  hint: { text: string; at: number } | null = null;
   /** Aumenta a cada mudança de estado (para a interface re-renderizar). */
   version = 0;
 
@@ -136,6 +170,8 @@ export class EditorSession {
   private viewCache: { key: string; project: Project } | null = null;
   private activitySeq = 0;
   private noteSeq = 0;
+  /** requestId → proposta e conteúdo do pedido (idempotência sem engolir pedidos novos). */
+  private requestLog = new Map<string, { proposalId: string; fingerprint: string }>();
 
   constructor(project?: Project) {
     this.project = project ?? createProject();
@@ -156,6 +192,13 @@ export class EditorSession {
     });
     this.waiters = this.waiters.filter((w) => !ready.includes(w));
     for (const w of ready) w.resolve();
+  }
+
+  /** Acorda todas as esperas (nota nova do usuário, projeto trocado). */
+  private wakeAll(): void {
+    const all = this.waiters;
+    this.waiters = [];
+    for (const w of all) w.resolve();
   }
 
   log(kind: ActivityEntry['kind'], text: string, extra: Partial<ActivityEntry> = {}): void {
@@ -194,15 +237,29 @@ export class EditorSession {
   }
 
   /** Ids de clipes e pontos que só existem / mudaram no rascunho. */
-  get draftInfo(): { clipIds: Set<string>; createdClipIds: Set<string>; keyframeIds: Set<string>; range: { clipId: string; start: number; end: number }[] } {
+  get draftInfo(): {
+    clipIds: Set<string>;
+    createdClipIds: Set<string>;
+    /** Clipes que o rascunho remove (aparecem tracejados na linha do tempo). */
+    removedClipIds: Set<string>;
+    keyframeIds: Set<string>;
+    range: { clipId: string; start: number; end: number }[];
+  } {
     const step = this.activeStep;
-    const out = { clipIds: new Set<string>(), createdClipIds: new Set<string>(), keyframeIds: new Set<string>(), range: [] as { clipId: string; start: number; end: number }[] };
+    const out = {
+      clipIds: new Set<string>(),
+      createdClipIds: new Set<string>(),
+      removedClipIds: new Set<string>(),
+      keyframeIds: new Set<string>(),
+      range: [] as { clipId: string; start: number; end: number }[],
+    };
     if (!step) return out;
     const all = [...step.ops, ...step.manualOps];
     for (const id of touchedClipIds(all)) out.clipIds.add(id);
     for (const o of all) {
       if (o.op === 'addClip' && o.clip.id) out.createdClipIds.add(o.clip.id);
       if (o.op === 'setKeyframe' && o.keyframeId) out.keyframeIds.add(o.keyframeId);
+      if (o.op === 'removeClip' && !findClip(this.view, o.clipId) && findClip(this.project, o.clipId)) out.removedClipIds.add(o.clipId);
     }
     const view = this.view;
     const ranges = new Map<string, { start: number; end: number }>();
@@ -227,9 +284,10 @@ export class EditorSession {
 
   // ---------- edição ----------
   /**
-   * Ponto de entrada das edições manuais. Se a edição mexe em algo que só
-   * existe no rascunho (ou o modo "ajustar" está ligado), ela vira ajuste do
-   * rascunho; senão é gravada no projeto.
+   * Ponto de entrada das edições manuais. Enquanto há uma etapa em rascunho,
+   * editar um clipe que o rascunho mexe (ou qualquer coisa, com o modo
+   * "ajustar" ligado) vira ajuste do rascunho: você está editando o que vê na
+   * prévia. O resto é gravado no projeto (e desatualiza o rascunho).
    */
   dispatch(ops: Op[], label?: string): { ok: true; target: 'draft' | 'project' } | { ok: false; message: string } {
     try {
@@ -238,7 +296,9 @@ export class EditorSession {
         const step = this.activeStep!;
         const base = this.view;
         const { applied } = applyOps(base, ops);
+        step.manualMarks.push(step.manualOps.length);
         step.manualOps.push(...applied);
+        step.manualRedo = [];
         p.version++;
         this.viewCache = null;
         this.emit();
@@ -256,17 +316,7 @@ export class EditorSession {
     if (!step) return false;
     if (this.adjustMode) return true;
     const d = this.draftInfo;
-    return ops.some(
-      (o) =>
-        ('clipId' in o && d.createdClipIds.has(o.clipId)) ||
-        ('keyframeId' in o && !!o.keyframeId && d.keyframeIds.has(o.keyframeId)) ||
-        (o.op === 'retimeGroup' && d.clipIds.has(o.clipId) && this.groupIsDraft(o.clipId, o.group)),
-    );
-  }
-
-  private groupIsDraft(clipId: string, group: string): boolean {
-    const step = this.activeStep!;
-    return [...step.ops, ...step.manualOps].some((o) => o.op === 'setKeyframe' && o.clipId === clipId && o.group === group);
+    return ops.some((o) => 'clipId' in o && d.clipIds.has(o.clipId));
   }
 
   private commit(ops: Op[], label: string, source: Source, meta: { proposalId?: string; stepId?: string } = {}): void {
@@ -284,7 +334,50 @@ export class EditorSession {
     this.emit();
   }
 
+  /** Com um rascunho aberto, desfazer/refazer mexe só nos ajustes do rascunho. */
+  get canUndo(): boolean {
+    const step = this.activeStep;
+    return step ? step.manualMarks.length > 0 : this.past.length > 0;
+  }
+
+  get canRedo(): boolean {
+    const step = this.activeStep;
+    return step ? step.manualRedo.length > 0 : this.future.length > 0;
+  }
+
+  private draftHistoryMove(dir: 'undo' | 'redo'): boolean {
+    const p = this.openProposal!;
+    const step = this.activeStep!;
+    if (dir === 'undo') {
+      const from = step.manualMarks.pop();
+      if (from === undefined) {
+        this.setHint('O rascunho do Claude está aberto: Ctrl+Z desfaz só os seus ajustes nele. Aceite ou descarte o rascunho para desfazer o projeto.');
+        return false;
+      }
+      step.manualRedo.push(step.manualOps.splice(from));
+    } else {
+      const batch = step.manualRedo.pop();
+      if (!batch) {
+        this.setHint('Nada para refazer no rascunho.');
+        return false;
+      }
+      step.manualMarks.push(step.manualOps.length);
+      step.manualOps.push(...batch);
+    }
+    p.version++;
+    this.viewCache = null;
+    this.selection = this.cleanSelection(this.selection);
+    this.log('info', dir === 'undo' ? 'Ajuste do rascunho desfeito' : 'Ajuste do rascunho refeito');
+    return true;
+  }
+
+  setHint(text: string): void {
+    this.hint = { text, at: Date.now() };
+    this.emit();
+  }
+
   undo(): boolean {
+    if (this.activeStep) return this.draftHistoryMove('undo');
     const e = this.past.pop();
     if (!e) return false;
     const rev = this.project.revision + 1;
@@ -295,6 +388,7 @@ export class EditorSession {
   }
 
   redo(): boolean {
+    if (this.activeStep) return this.draftHistoryMove('redo');
     const e = this.future.pop();
     if (!e) return false;
     const rev = this.project.revision + 1;
@@ -315,7 +409,9 @@ export class EditorSession {
   private cleanSelection(s: Selection): Selection {
     const exists = (id: string) => !!findClip(this.view, id) || !!findClip(this.project, id);
     const clipIds = s.clipIds.filter(exists);
-    const keyframe = s.keyframe && exists(s.keyframe.clipId) ? s.keyframe : undefined;
+    const kf = s.keyframe;
+    const kfExists = (p: Project) => !!findClip(p, kf!.clipId)?.props[kf!.prop]?.keyframes.some((k) => k.id === kf!.keyframeId);
+    const keyframe = kf && (kfExists(this.view) || kfExists(this.project)) ? kf : undefined;
     return { clipIds, keyframe };
   }
 
@@ -360,12 +456,15 @@ export class EditorSession {
   }
 
   updateSettings(s: Partial<Settings>): void {
+    const ceiling = this.settings.contextCeilingBytes;
     this.settings = { ...this.settings, ...s };
+    // Teto novo: uma recusa anterior deixa de valer.
+    if (this.settings.contextCeilingBytes !== ceiling) this.contextRequest = null;
     this.emit();
   }
 
-  requestLargerContext(bytes: number): void {
-    this.contextRequest = { bytes, revision: this.project.revision, status: 'pending' };
+  requestLargerContext(bytes: number, scope = '[]'): void {
+    this.contextRequest = { bytes, revision: this.project.revision, scope, ceiling: this.settings.contextCeilingBytes, status: 'pending' };
     this.log('info', `O Claude pediu um contexto de ${(bytes / 1024).toFixed(1)} KB (teto ${(this.settings.contextCeilingBytes / 1024).toFixed(1)} KB).`);
   }
 
@@ -380,6 +479,8 @@ export class EditorSession {
     if (!t) return;
     this.notes.push({ id: ++this.noteSeq, text: t, time: Date.now(), delivered: false });
     this.log('note', t);
+    // Se o Claude está esperando uma decisão, a nota chega nessa resposta.
+    this.wakeAll();
   }
 
   takeNotes(): string[] {
@@ -390,17 +491,26 @@ export class EditorSession {
 
   // ---------- arquivo ----------
   load(project: Project, filePath: string | null): void {
-    this.project = project;
+    // A revisão só cresce na sessão: um knownRevision antigo nunca bate com outro conteúdo.
+    this.project = { ...project, revision: Math.max(project.revision, this.project.revision + 1) };
     this.past = [];
     this.future = [];
     this.selection = { clipIds: [] };
     this.playhead = 0;
-    for (const p of this.proposals) if (p.status === 'active' || p.status === 'stale') p.status = 'cancelled';
+    for (const p of this.proposals) {
+      if (p.status !== 'active' && p.status !== 'stale') continue;
+      p.status = 'cancelled';
+      for (const s of p.steps) if (s.status === 'draft' || s.status === 'waiting') s.status = 'discarded';
+      p.version++;
+    }
     this.adjustMode = false;
     this.filePath = filePath;
     this.dirty = false;
     this.viewCache = null;
+    this.contextRequest = null;
+    this.notes = this.notes.filter((n) => n.delivered);
     this.emit();
+    this.wakeAll();
   }
 
   markSaved(filePath: string): void {
@@ -414,10 +524,36 @@ export class EditorSession {
     if (!input || !Array.isArray(input.steps) || input.steps.length === 0 || !input.title) {
       return { ok: false, code: 'bad_request', message: 'Informe title e pelo menos uma etapa (steps) com ops.' };
     }
-    const requestId =
-      input.requestId?.trim() || `h_${hashString(JSON.stringify([input.baseRevision, input.title, input.steps]))}`;
-    const existing = this.proposals.find((p) => p.requestId === requestId);
-    if (existing) return { ok: true, proposal: existing, reused: true };
+    const fingerprint = hashString(JSON.stringify([input.baseRevision, input.title, input.steps, input.replaces ?? null, input.appendTo ?? null]));
+    const requestId = (typeof input.requestId === 'string' && input.requestId.trim()) || `h_${fingerprint}`;
+    const seen = this.requestLog.get(requestId);
+    if (seen) {
+      const existing = this.proposals.find((p) => p.id === seen.proposalId);
+      if (existing && seen.fingerprint === fingerprint) return { ok: true, proposal: existing, reused: true };
+      return {
+        ok: false,
+        code: 'request_id_conflict',
+        message: `O requestId "${requestId}" já foi usado num pedido diferente. Use um requestId novo para cada pedido (repita o mesmo só para reenviar exatamente a mesma chamada).`,
+        details: { proposalId: seen.proposalId },
+      };
+    }
+    for (let i = 0; i < input.steps.length; i++) {
+      const st = input.steps[i];
+      if (!st || !Array.isArray(st.ops) || st.ops.length === 0) return { ok: false, code: 'bad_request', message: `Etapa ${i + 1} sem ops.` };
+      const blocked = st.ops.find((o) => USER_ONLY_OPS.includes((o as { op?: Op['op'] })?.op as Op['op']));
+      if (blocked)
+        return {
+          ok: false,
+          code: 'invalid_ops',
+          message: `Etapa ${i + 1}: "${blocked.op}" é só da interface (importar mídia, travar ou esconder faixas). Peça ao usuário para fazer isso no editor.`,
+          details: { step: i + 1 },
+        };
+    }
+    if (input.appendTo) {
+      const r = this.appendSteps(input, requestId);
+      if (r.ok) this.requestLog.set(requestId, { proposalId: r.proposal.id, fingerprint });
+      return r;
+    }
 
     if (input.baseRevision !== this.project.revision) {
       return {
@@ -437,25 +573,14 @@ export class EditorSession {
       };
     }
     // Simulação: todas as etapas, em ordem, precisam ser válidas.
-    let sim = this.project;
     const targets = new Set<string>();
-    for (let i = 0; i < input.steps.length; i++) {
-      const st = input.steps[i];
-      if (!st || !Array.isArray(st.ops) || st.ops.length === 0)
-        return { ok: false, code: 'bad_request', message: `Etapa ${i + 1} sem ops.` };
-      try {
-        const r = applyOps(sim, st.ops);
-        sim = r.project;
-        touchedClipIds(r.applied).forEach((id) => targets.add(id));
-      } catch (e) {
-        if (e instanceof OpValidationError)
-          return { ok: false, code: 'invalid_ops', message: `Etapa ${i + 1}: ${e.message}`, details: { step: i + 1, errors: e.errors } };
-        throw e;
-      }
-    }
+    const simulated = this.simulateSteps(this.project, input.steps, 0);
+    if (!simulated.ok) return simulated;
+    simulated.targets.forEach((id) => targets.add(id));
     for (const p of this.proposals) {
       if ((p.status === 'active' || p.status === 'stale') && (p.id === input.replaces || p.status === 'stale')) {
         p.status = 'superseded';
+        for (const st of p.steps) if (st.status === 'draft' || st.status === 'waiting') st.status = 'discarded';
         p.version++;
       }
     }
@@ -469,25 +594,92 @@ export class EditorSession {
       expectedRevision: this.project.revision,
       selection: [...this.selection.clipIds],
       targets: [...targets],
-      steps: input.steps.map((s) => ({
-        id: sid('step_'),
-        label: s.label || 'Etapa',
-        summary: s.summary ?? '',
-        requested: s.ops,
-        ops: [],
-        manualOps: [],
-        status: 'waiting',
-      })),
+      steps: input.steps.map(newStep),
       current: -1,
       status: 'active',
       redoRequested: false,
       replaces: input.replaces,
+      appendedRequestIds: [],
+      fingerprint,
       version: 1,
     };
     this.proposals.push(proposal);
+    this.requestLog.set(requestId, { proposalId: proposal.id, fingerprint });
     this.log('proposal', `Proposta: ${proposal.title} (${proposal.steps.length} etapa${proposal.steps.length > 1 ? 's' : ''})`);
     this.advance(proposal);
     return { ok: true, proposal, reused: false };
+  }
+
+  /** Valida etapas em sequência sobre `base`. */
+  private simulateSteps(
+    base: Project,
+    steps: ProposeInput['steps'],
+    offset: number,
+  ): { ok: true; targets: string[] } | { ok: false; code: 'invalid_ops'; message: string; details: unknown } {
+    let sim = base;
+    const targets = new Set<string>();
+    for (let i = 0; i < steps.length; i++) {
+      try {
+        const r = applyOps(sim, steps[i].ops);
+        sim = r.project;
+        touchedClipIds(r.applied).forEach((id) => targets.add(id));
+      } catch (e) {
+        if (e instanceof OpValidationError)
+          return { ok: false, code: 'invalid_ops', message: `Etapa ${offset + i + 1}: ${e.message}`, details: { step: offset + i + 1, errors: e.errors } };
+        // Qualquer outro erro também é culpa das ops recebidas: responde em vez de quebrar.
+        return { ok: false, code: 'invalid_ops', message: `Etapa ${offset + i + 1}: operação malformada (${e instanceof Error ? e.message : String(e)}).`, details: { step: offset + i + 1 } };
+      }
+    }
+    return { ok: true, targets: [...targets] };
+  }
+
+  /**
+   * Acrescenta etapas a uma proposta: o Claude pode mandar a primeira etapa
+   * assim que ela fica pronta e as seguintes depois.
+   */
+  private appendSteps(input: ProposeInput, requestId: string): ProposeResult {
+    const p = this.proposals.find((x) => x.id === input.appendTo);
+    if (!p) return { ok: false, code: 'bad_request', message: `Proposta "${input.appendTo}" não encontrada.` };
+    if (p.status !== 'active' && p.status !== 'done') {
+      return { ok: false, code: 'proposal_closed', message: `A proposta está "${p.status}". Leia o contexto e faça uma nova proposta.`, details: { status: p.status } };
+    }
+    // Só as decisões desta proposta podem ter mudado a revisão desde então.
+    if (input.baseRevision !== this.project.revision && p.expectedRevision !== this.project.revision) {
+      return {
+        ok: false,
+        code: 'stale_revision',
+        message: `A revisão do projeto agora é ${this.project.revision} (você usou ${input.baseRevision}). Leia o contexto de novo.`,
+        details: { revision: this.project.revision },
+      };
+    }
+    const open = this.openProposal;
+    if (p.status === 'done' && open && open.id !== p.id && open.status === 'active') {
+      return { ok: false, code: 'proposal_pending', message: `Há outra proposta aguardando decisão (${open.id}).`, details: { proposalId: open.id } };
+    }
+    // Base da simulação: projeto + rascunho atual + etapas ainda na fila.
+    let base = this.view;
+    for (const s of p.steps) {
+      if (s.status !== 'waiting') continue;
+      try {
+        base = applyOps(base, s.requested).project;
+      } catch {
+        /* a etapa da fila será marcada inválida quando chegar a vez dela */
+      }
+    }
+    const simulated = this.simulateSteps(base, input.steps, p.steps.length);
+    if (!simulated.ok) return simulated;
+    for (const id of simulated.targets) if (!p.targets.includes(id)) p.targets.push(id);
+    const firstNew = p.steps.length;
+    p.steps.push(...input.steps.map(newStep));
+    p.appendedRequestIds.push(requestId);
+    p.version++;
+    this.log('proposal', `Mais ${input.steps.length} etapa${input.steps.length > 1 ? 's' : ''} em: ${p.title}`);
+    if (p.status === 'done') {
+      p.status = 'active';
+      p.current = firstNew - 1;
+      this.advance(p);
+    } else this.emit();
+    return { ok: true, proposal: p, reused: false };
   }
 
   /** Prepara a próxima etapa pendente como rascunho. */
@@ -500,6 +692,8 @@ export class EditorSession {
       try {
         s.ops = applyOps(this.project, s.requested).applied;
         s.status = 'draft';
+        // Ids definitivos (clipes criados nesta etapa) passam a contar como alvos da proposta.
+        for (const id of touchedClipIds(s.ops)) if (!p.targets.includes(id)) p.targets.push(id);
         p.expectedRevision = this.project.revision;
         p.version++;
         this.viewCache = null;

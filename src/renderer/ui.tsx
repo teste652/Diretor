@@ -1,20 +1,32 @@
-import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { Op } from '../core/operations';
 import { session } from './store';
 
-/** Campo numérico que só grava ao confirmar (Enter/sair do campo): uma entrada de histórico por edição. */
+/**
+ * Campo numérico que só grava ao confirmar (Enter/sair do campo): uma entrada
+ * de histórico por edição. O destino é o do momento em que você entrou no campo:
+ * clicar em outro clipe enquanto digita não grava o número no clipe errado.
+ */
 export function NumberField(props: { value: number; onCommit: (v: number) => void; step?: number; min?: number; max?: number; digits?: number; disabled?: boolean; title?: string }) {
   const digits = props.digits ?? 2;
   const fmt = (v: number) => (Number.isFinite(v) ? String(Math.round(v * 10 ** digits) / 10 ** digits) : '');
   const [text, setText] = useState(fmt(props.value));
   const [focus, setFocus] = useState(false);
+  const edit = useRef<{ onCommit: (v: number) => void; value: number; edited: boolean; cancelled: boolean } | null>(null);
   useEffect(() => {
     if (!focus) setText(fmt(props.value));
   }, [props.value, focus]);
-  const commit = () => {
-    const v = Number(text.replace(',', '.'));
-    if (Number.isFinite(v) && Math.abs(v - props.value) > 1e-9) props.onCommit(v);
-    else setText(fmt(props.value));
+  const finish = () => {
+    const e = edit.current;
+    edit.current = null;
+    setFocus(false);
+    if (!e || e.cancelled || !e.edited) return setText(fmt(props.value));
+    const raw = text.trim().replace(',', '.');
+    const v = Number(raw);
+    if (!raw || !Number.isFinite(v)) return setText(fmt(e.value));
+    const clamped = Math.min(props.max ?? Infinity, Math.max(props.min ?? -Infinity, v));
+    if (Math.abs(clamped - e.value) > 1e-9) e.onCommit(clamped);
+    else setText(fmt(e.value));
   };
   return (
     <input
@@ -26,16 +38,19 @@ export function NumberField(props: { value: number; onCommit: (v: number) => voi
       max={props.max}
       value={text}
       disabled={props.disabled}
-      onFocus={() => setFocus(true)}
-      onBlur={() => {
-        setFocus(false);
-        commit();
+      onFocus={() => {
+        edit.current = { onCommit: props.onCommit, value: props.value, edited: false, cancelled: false };
+        setFocus(true);
       }}
-      onChange={(e) => setText(e.target.value)}
+      onBlur={finish}
+      onChange={(e) => {
+        if (edit.current) edit.current.edited = true;
+        setText(e.target.value);
+      }}
       onKeyDown={(e) => {
         if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
         if (e.key === 'Escape') {
-          setText(fmt(props.value));
+          if (edit.current) edit.current.cancelled = true;
           (e.target as HTMLInputElement).blur();
         }
       }}
@@ -46,6 +61,7 @@ export function NumberField(props: { value: number; onCommit: (v: number) => voi
 export function TextField(props: { value: string; onCommit: (v: string) => void; multiline?: boolean; placeholder?: string }) {
   const [text, setText] = useState(props.value);
   const [focus, setFocus] = useState(false);
+  const edit = useRef<{ onCommit: (v: string) => void; value: string; cancelled: boolean } | null>(null);
   useEffect(() => {
     if (!focus) setText(props.value);
   }, [props.value, focus]);
@@ -53,14 +69,46 @@ export function TextField(props: { value: string; onCommit: (v: string) => void;
     className: 'input',
     value: text,
     placeholder: props.placeholder,
-    onFocus: () => setFocus(true),
+    onFocus: () => {
+      edit.current = { onCommit: props.onCommit, value: props.value, cancelled: false };
+      setFocus(true);
+    },
     onBlur: () => {
+      const e = edit.current;
+      edit.current = null;
       setFocus(false);
-      if (text !== props.value) props.onCommit(text);
+      if (!e || e.cancelled || text === e.value) return setText(props.value);
+      e.onCommit(text);
     },
     onChange: (e: { target: { value: string } }) => setText(e.target.value),
+    onKeyDown: (e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (e.key === 'Escape') {
+        if (edit.current) edit.current.cancelled = true;
+        (e.target as HTMLElement).blur();
+      }
+      if (e.key === 'Enter' && !props.multiline) (e.target as HTMLElement).blur();
+    },
   };
-  return props.multiline ? <textarea {...common} /> : <input {...common} onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()} />;
+  return props.multiline ? <textarea {...common} /> : <input {...common} />;
+}
+
+/** Cor: mostra ao arrastar no seletor, mas grava uma vez só, quando o seletor fecha. */
+export function ColorField(props: { value: string; onCommit: (v: string) => void; title?: string }) {
+  const ref = useRef<HTMLInputElement>(null);
+  const [local, setLocal] = useState(props.value);
+  const commitRef = useRef(props.onCommit);
+  commitRef.current = props.onCommit;
+  useEffect(() => setLocal(props.value), [props.value]);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const onChange = () => {
+      if (el.value.toLowerCase() !== props.value.toLowerCase()) commitRef.current(el.value);
+    };
+    el.addEventListener('change', onChange);
+    return () => el.removeEventListener('change', onChange);
+  }, [props.value]);
+  return <input ref={ref} className="input" type="color" title={props.title} value={local} onChange={(e) => setLocal(e.target.value)} />;
 }
 
 // ---------- avisos ----------

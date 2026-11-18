@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { type Clip, type Track, projectDuration } from '../core/model';
-import type { Op } from '../core/operations';
+import { type Clip, type Track, newId, projectDuration } from '../core/model';
+import { type Op, clampTrimDelta } from '../core/operations';
 import { fmtTime, playback, session, usePlayback, useSession } from './store';
 import { Icon, run } from './ui';
 
@@ -16,18 +16,20 @@ const LANES: { label: string; kind: Track['kind'] | 'audio' }[] = [
   { label: 'Áudio', kind: 'audio' },
 ];
 
-export function addCaptionAtPlayhead() {
+/** Cria no playhead e seleciona o clipe criado (só se a criação deu certo). */
+function addAtPlayhead(kind: 'caption' | 'title') {
   const t = playback.get().time;
-  run([{ op: 'addClip', clip: { kind: 'caption', start: round(t), duration: 2, text: 'Nova legenda' } }], 'Adicionar legenda');
-  const c = session.project.clips[session.project.clips.length - 1];
-  if (c) session.setSelection({ clipIds: [c.id] });
+  const id = newId(kind === 'caption' ? 'cap' : 'ttl');
+  const clip = kind === 'caption' ? { kind, id, start: round(t), duration: 2, text: 'Nova legenda' } : { kind, id, start: round(t), duration: 3, text: 'EM MOVIMENTO' };
+  if (run([{ op: 'addClip', clip }], kind === 'caption' ? 'Adicionar legenda' : 'Adicionar título')) session.setSelection({ clipIds: [id] });
+}
+
+export function addCaptionAtPlayhead() {
+  addAtPlayhead('caption');
 }
 
 export function addTitleAtPlayhead() {
-  const t = playback.get().time;
-  run([{ op: 'addClip', clip: { kind: 'title', start: round(t), duration: 3, text: 'EM MOVIMENTO' } }], 'Adicionar título');
-  const c = session.project.clips[session.project.clips.length - 1];
-  if (c) session.setSelection({ clipIds: [c.id] });
+  addAtPlayhead('title');
 }
 
 export function deleteSelection() {
@@ -76,14 +78,12 @@ export function Timeline() {
       const c = view.clips.find((x) => x.id === drag.clipId);
       if (!c) return;
       if (drag.kind === 'move') run([{ op: 'updateClip', clipId: c.id, set: { start: round(Math.max(0, c.start + drag.dt)) } }], 'Mover clipe');
-      if (drag.kind === 'trimR') run([{ op: 'updateClip', clipId: c.id, set: { duration: round(c.duration + drag.dt) } }], 'Aparar fim');
-      if (drag.kind === 'trimL') {
-        const d = Math.min(drag.dt, c.duration - 1 / fps);
-        const set: Record<string, number> = { start: round(c.start + d), duration: round(c.duration - d) };
-        if (c.kind === 'video') set.in = round(c.in + d);
-        // Mantém a animação presa ao conteúdo: desloca os pontos junto.
-        const ops: Op[] = [{ op: 'updateClip', clipId: c.id, set }];
-        run(ops, 'Aparar início');
+      if (drag.kind === 'trimL' || drag.kind === 'trimR') {
+        // Limitado ao arquivo e à duração mínima. Entrada fica no começo, saída no
+        // fim, e o resto da animação acompanha o conteúdo (ver trimClip).
+        const edge = drag.kind === 'trimL' ? 'start' : 'end';
+        const d = clampTrimDelta(view, c, edge, drag.dt);
+        if (Math.abs(d) > 1e-6) run([{ op: 'trimClip', clipId: c.id, edge, delta: d }], edge === 'start' ? 'Aparar início' : 'Aparar fim');
       }
       if (drag.kind === 'kf') moveKeyframesAt(c, drag.t, drag.dt);
     };
@@ -104,9 +104,9 @@ export function Timeline() {
     let dur = c.duration;
     if (drag && 'clipId' in drag && drag.clipId === c.id) {
       if (drag.kind === 'move') start = Math.max(0, start + drag.dt);
-      if (drag.kind === 'trimR') dur = Math.max(1 / fps, dur + drag.dt);
+      if (drag.kind === 'trimR') dur += clampTrimDelta(view, c, 'end', drag.dt);
       if (drag.kind === 'trimL') {
-        const d = Math.min(drag.dt, dur - 1 / fps);
+        const d = clampTrimDelta(view, c, 'start', drag.dt);
         start += d;
         dur -= d;
       }
@@ -119,10 +119,15 @@ export function Timeline() {
   return (
     <div className="panel timeline">
       <div className="tl-toolbar">
-        <button className="btn ghost icon" title="Desfazer (Ctrl+Z)" disabled={!s.past.length} onClick={() => s.undo()}>
+        <button
+          className="btn ghost icon"
+          title={s.activeStep ? 'Desfazer ajuste do rascunho (Ctrl+Z). Para desfazer o projeto, aceite ou descarte o rascunho.' : 'Desfazer (Ctrl+Z)'}
+          disabled={!s.canUndo}
+          onClick={() => s.undo()}
+        >
           {Icon.undo}
         </button>
-        <button className="btn ghost icon" title="Refazer (Ctrl+Y)" disabled={!s.future.length} onClick={() => s.redo()}>
+        <button className="btn ghost icon" title={s.activeStep ? 'Refazer ajuste do rascunho (Ctrl+Y)' : 'Refazer (Ctrl+Y)'} disabled={!s.canRedo} onClick={() => s.redo()}>
           {Icon.redo}
         </button>
         <button className="btn ghost icon" title="Remover selecionado (Delete)" disabled={!s.selection.clipIds.length} onClick={deleteSelection}>
@@ -135,7 +140,11 @@ export function Timeline() {
           {Icon.text} Título
         </button>
         <span style={{ flex: 1 }} />
-        {s.past.length > 0 && <span className="hint">Último: {s.past[s.past.length - 1].label}</span>}
+        {s.activeStep ? (
+          <span className="hint">Rascunho aberto: Ctrl+Z desfaz só os seus ajustes nele</span>
+        ) : (
+          s.past.length > 0 && <span className="hint">Último: {s.past[s.past.length - 1].label}</span>
+        )}
         <span className="hint">Zoom</span>
         <input type="range" min={20} max={400} value={pps} onChange={(e) => setPps(Number(e.target.value))} style={{ accentColor: 'var(--accent)', width: 120 }} />
       </div>
@@ -231,11 +240,19 @@ export function Timeline() {
                         const left = Math.max(g.left, r.start * pps - 8);
                         const right = Math.min(g.left + g.width, Math.max(r.end * pps + 8, left + 60));
                         return (
-                          <div key={`dz-${r.clipId}`} className="draft-zone" style={{ left, width: Math.max(40, right - left) }}>
-                            Rascunho da IA
+                          <div key={`dz-${r.clipId}`} className="draft-zone" style={{ left, width: Math.max(40, right - left) }} title="Trecho que o rascunho do Claude muda">
+                            <span className="tag">Rascunho da IA</span>
                           </div>
                         );
                       })}
+                  {l.kind !== 'audio' &&
+                    s.project.clips
+                      .filter((c) => draft.removedClipIds.has(c.id) && c.trackId === tr?.id)
+                      .map((c) => (
+                        <div key={`rm-${c.id}`} className="clip removed" style={{ left: c.start * pps, width: Math.max(4, c.duration * pps) }} title="O rascunho do Claude remove este clipe">
+                          <span className="label">Remoção proposta · {c.kind === 'video' ? c.name : c.text}</span>
+                        </div>
+                      ))}
                 </div>
               );
             })}

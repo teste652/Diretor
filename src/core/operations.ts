@@ -9,6 +9,7 @@ import {
   type ClipKind,
   type Easing,
   EASINGS,
+  type Keyframe,
   type MediaItem,
   type Project,
   type TextStyle,
@@ -21,7 +22,7 @@ import {
   newId,
   trackForKind,
 } from './model';
-import { defaultProps, evalProp, propDef, sortedKeyframes } from './properties';
+import { defaultProps, evalProp, keyframeGroups, propDef, sortedKeyframes } from './properties';
 
 export type ClipChanges = {
   name?: string;
@@ -62,6 +63,9 @@ export const ANIMATION_PRESETS: { name: AnimationPreset; label: string; kind: 'i
   { name: 'slowZoom', label: 'Zoom lento', kind: 'span' },
 ];
 
+/** Presets que valem para legendas (a legenda tem posição fixa). */
+export const CAPTION_PRESETS: AnimationPreset[] = ['fadeIn', 'fadeOut'];
+
 export type NewClipSpec = {
   kind: ClipKind;
   id?: string;
@@ -74,6 +78,8 @@ export type NewClipSpec = {
   style?: Partial<TextStyle>;
   preset?: CaptionPreset;
 };
+
+export type TrimEdge = 'start' | 'end';
 
 export type Op =
   | { op: 'addMedia'; media: MediaItem }
@@ -96,6 +102,13 @@ export type Op =
   | { op: 'removeKeyframe'; clipId: string; prop: string; keyframeId: string }
   | { op: 'clearKeyframes'; clipId: string; prop?: string; group?: string }
   | { op: 'retimeGroup'; clipId: string; group: string; start: number; duration: number }
+  /**
+   * Apara uma borda do clipe. `delta` é quanto a borda anda na linha do tempo
+   * (positivo = para a direita). No vídeo, aparar o início mantém o clipe no
+   * lugar e puxa os vídeos seguintes (sem buraco); a animação de entrada fica
+   * no começo, a de saída no fim, e o resto acompanha o conteúdo.
+   */
+  | { op: 'trimClip'; clipId: string; edge: TrimEdge; delta: number; ripple?: boolean }
   | { op: 'updateTrack'; trackId: string; set: { hidden?: boolean; locked?: boolean } }
   | { op: 'renameProject'; name: string }
   | { op: 'setCanvas'; width: number; height: number; fps?: number }
@@ -110,10 +123,13 @@ export type Op =
       group?: string;
     };
 
+/** Operações que só a interface usa (o Claude não importa arquivos nem trava/esconde faixas). */
+export const USER_ONLY_OPS: Op['op'][] = ['addMedia', 'updateTrack'];
+
 export interface OpError {
   index: number;
   op: string;
-  code: 'target_not_found' | 'invalid_param' | 'out_of_range' | 'locked' | 'unknown_op';
+  code: 'target_not_found' | 'invalid_param' | 'out_of_range' | 'locked' | 'unknown_op' | 'not_allowed';
   message: string;
 }
 
@@ -124,8 +140,19 @@ export class OpValidationError extends Error {
 }
 
 const EPS = 1e-6;
-const MIN_DURATION = 0.04;
+/** Tolerância para "mesmo instante" entre pontos de animação (s). */
+const SAME_T = 1e-3;
+export const MIN_DURATION = 0.04;
+const MIN_GROUP_DURATION = 0.01;
+const MAX_TEXT = 2000;
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const isStr = (v: unknown): v is string => typeof v === 'string';
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+const round = (n: number) => Math.round(n * 1000) / 1000;
+const CAPTION_PRESET_NAMES: CaptionPreset[] = ['padrao', 'caixa', 'destaque'];
+const COLOR_RE = /^(#[0-9a-f]{3,4}|#[0-9a-f]{6}|#[0-9a-f]{8}|(rgb|rgba|hsl|hsla)\([\d\s.,%+-]+\)|[a-z]{3,24})$/i;
+const STYLE_KEYS = ['fontFamily', 'fontSize', 'fontWeight', 'color', 'background', 'align', 'shadow'];
+const CHANGE_KEYS = ['name', 'start', 'duration', 'in', 'text', 'style', 'preset', 'volume', 'muted'];
 
 function err(index: number, op: string, code: OpError['code'], message: string): OpError {
   return { index, op, code, message };
@@ -135,80 +162,160 @@ function trackLocked(p: Project, clip: Clip): boolean {
   return !!findTrack(p, clip.trackId)?.locked;
 }
 
+const sameGroup = (a: string | undefined, b: string | undefined) => (a ?? '') === (b ?? '');
+
+/** Intervalo de uma animação pronta, com os mesmos padrões na validação e na expansão. */
+export function animateRange(
+  c: Clip,
+  o: { preset: AnimationPreset; start?: number; duration?: number },
+): { start: number; duration: number; end: number; kind: 'in' | 'out' | 'span' } {
+  const kind = ANIMATION_PRESETS.find((x) => x.name === o.preset)?.kind ?? 'in';
+  const from = o.start ?? 0;
+  const room = kind === 'out' && o.start === undefined ? c.duration : c.duration - from;
+  const duration = o.duration ?? (kind === 'span' ? room : Math.min(0.6, room));
+  const start = o.start ?? (kind === 'out' ? c.duration - duration : 0);
+  return { start, duration, end: start + duration, kind };
+}
+
+function validateStyle(style: unknown, push: (code: OpError['code'], m: string) => void): void {
+  if (style === undefined) return;
+  if (!isObj(style)) return push('invalid_param', 'style deve ser um objeto.');
+  for (const k of Object.keys(style)) if (!STYLE_KEYS.includes(k)) push('invalid_param', `style.${k} não existe (use ${STYLE_KEYS.join(', ')}).`);
+  const s = style as Partial<Record<keyof TextStyle, unknown>>;
+  if (s.fontFamily !== undefined && (!isStr(s.fontFamily) || !s.fontFamily.trim() || s.fontFamily.length > 200)) push('invalid_param', 'style.fontFamily deve ser um nome de fonte.');
+  if (s.fontSize !== undefined && (!isNum(s.fontSize) || s.fontSize < 6 || s.fontSize > 400)) push('out_of_range', 'style.fontSize vai de 6 a 400.');
+  if (s.fontWeight !== undefined && (!isNum(s.fontWeight) || s.fontWeight < 100 || s.fontWeight > 1000)) push('out_of_range', 'style.fontWeight vai de 100 a 1000.');
+  if (s.color !== undefined && (!isStr(s.color) || !COLOR_RE.test(s.color.trim()))) push('invalid_param', 'style.color deve ser uma cor CSS (ex.: #ffffff).');
+  if (s.background !== undefined && (!isStr(s.background) || (s.background !== '' && !COLOR_RE.test(s.background.trim()))))
+    push('invalid_param', 'style.background deve ser uma cor CSS ou "" (sem caixa).');
+  if (s.align !== undefined && !['left', 'center', 'right'].includes(s.align as string)) push('invalid_param', 'style.align: left, center ou right.');
+  if (s.shadow !== undefined && typeof s.shadow !== 'boolean') push('invalid_param', 'style.shadow deve ser true ou false.');
+}
+
 /** Valida uma operação contra o estado atual. Lista vazia = ok. */
 export function validateOp(p: Project, o: Op, index = 0): OpError[] {
   const e: OpError[] = [];
-  const name = (o as { op?: string })?.op ?? '?';
-  const need = (clipId: string): Clip | undefined => {
+  const name = isObj(o) && isStr((o as { op?: unknown }).op) ? (o as { op: string }).op : '?';
+  const push = (code: OpError['code'], message: string) => e.push(err(index, name, code, message));
+  if (!isObj(o)) {
+    push('invalid_param', 'Cada operação deve ser um objeto com "op".');
+    return e;
+  }
+  const need = (clipId: unknown): Clip | undefined => {
+    if (!isStr(clipId) || !clipId) {
+      push('invalid_param', 'clipId é obrigatório.');
+      return undefined;
+    }
     const c = findClip(p, clipId);
-    if (!c) e.push(err(index, name, 'target_not_found', `Clipe "${clipId}" não existe nesta revisão.`));
-    else if (trackLocked(p, c)) e.push(err(index, name, 'locked', `A faixa do clipe "${clipId}" está travada.`));
+    if (!c) push('target_not_found', `Clipe "${clipId}" não existe nesta revisão.`);
+    else if (trackLocked(p, c)) push('locked', `A faixa do clipe "${clipId}" está travada.`);
     return c;
   };
-  switch (o?.op) {
+  const checkGroup = (g: unknown, required: boolean) => {
+    if (g === undefined && !required) return;
+    if (!isStr(g) || !g.trim() || g.length > 40) push('invalid_param', 'group deve ser um nome (texto não vazio, até 40 caracteres).');
+  };
+  const checkEase = (ez: unknown) => {
+    if (ez !== undefined && !EASINGS.includes(ez as Easing)) push('invalid_param', `ease: ${EASINGS.join(', ')}.`);
+  };
+  switch (o.op) {
     case 'addMedia': {
       const m = o.media;
-      if (!m || !m.id || !m.path || !isNum(m.duration) || m.duration <= 0)
-        e.push(err(index, name, 'invalid_param', 'Mídia precisa de id, caminho e duração.'));
-      else if (p.media.some((x) => x.id === m.id))
-        e.push(err(index, name, 'invalid_param', `Mídia "${m.id}" já existe.`));
+      if (!isObj(m) || !isStr(m.id) || !m.id || !isStr(m.path) || !m.path || !isNum(m.duration) || m.duration <= 0 || !isNum(m.width) || !isNum(m.height))
+        push('invalid_param', 'Mídia precisa de id, caminho, duração e tamanho.');
+      else if (p.media.some((x) => x.id === m.id)) push('invalid_param', `Mídia "${m.id}" já existe.`);
       break;
     }
     case 'addClip': {
-      const c = o.clip;
-      if (!c || !['video', 'title', 'caption'].includes(c.kind)) {
-        e.push(err(index, name, 'invalid_param', 'kind deve ser video, title ou caption.'));
+      const c = o.clip as NewClipSpec | undefined;
+      if (!isObj(c) || !['video', 'title', 'caption'].includes(c.kind as string)) {
+        push('invalid_param', 'clip.kind deve ser video, title ou caption.');
         break;
       }
-      if (c.id && findClip(p, c.id)) e.push(err(index, name, 'invalid_param', `Já existe um clipe "${c.id}".`));
-      if (c.start !== undefined && (!isNum(c.start) || c.start < 0))
-        e.push(err(index, name, 'out_of_range', 'start deve ser ≥ 0.'));
-      if (c.duration !== undefined && (!isNum(c.duration) || c.duration < MIN_DURATION))
-        e.push(err(index, name, 'out_of_range', `duration deve ser ≥ ${MIN_DURATION}s.`));
+      if (c.id !== undefined && (!isStr(c.id) || !c.id.trim())) push('invalid_param', 'clip.id deve ser um texto.');
+      else if (c.id && findClip(p, c.id)) push('invalid_param', `Já existe um clipe "${c.id}".`);
+      if (c.name !== undefined && (!isStr(c.name) || c.name.length > 200)) push('invalid_param', 'name deve ser um texto.');
+      if (c.start !== undefined && (!isNum(c.start) || c.start < 0)) push('out_of_range', 'start deve ser um número ≥ 0.');
+      if (c.duration !== undefined && (!isNum(c.duration) || c.duration < MIN_DURATION)) push('out_of_range', `duration deve ser ≥ ${MIN_DURATION}s.`);
       const tr = trackForKind(p, c.kind);
-      if (!tr) e.push(err(index, name, 'target_not_found', 'Não há faixa para esse tipo de clipe.'));
-      else if (tr.locked) e.push(err(index, name, 'locked', `A faixa "${tr.name}" está travada.`));
+      if (!tr) push('target_not_found', 'Não há faixa para esse tipo de clipe.');
+      else if (tr.locked) push('locked', `A faixa "${tr.name}" está travada.`);
       if (c.kind === 'video') {
+        if (c.text !== undefined || c.style !== undefined || c.preset !== undefined) push('invalid_param', 'text, style e preset não valem para vídeo.');
         const m = p.media.find((x) => x.id === c.mediaId);
-        if (!m) e.push(err(index, name, 'target_not_found', `Mídia "${c.mediaId}" não existe.`));
+        if (!m) push('target_not_found', `Mídia "${String(c.mediaId)}" não existe.`);
         else {
           const inn = c.in ?? 0;
-          const dur = c.duration ?? m.duration - inn;
-          if (inn < 0 || inn + dur > m.duration + 0.05)
-            e.push(err(index, name, 'out_of_range', `Trecho além do arquivo (duração ${m.duration.toFixed(2)}s).`));
+          if (!isNum(inn) || inn < 0 || inn > m.duration - MIN_DURATION) push('out_of_range', `in deve ficar entre 0 e ${(m.duration - MIN_DURATION).toFixed(2)}s.`);
+          else {
+            const dur = c.duration ?? m.duration - inn;
+            if (inn + dur > m.duration + 0.05) push('out_of_range', `Trecho além do arquivo (duração ${m.duration.toFixed(2)}s).`);
+          }
         }
+      } else {
+        if (c.in !== undefined || c.mediaId !== undefined) push('invalid_param', 'in e mediaId só valem para vídeo.');
+        if (c.text !== undefined && (!isStr(c.text) || c.text.length > MAX_TEXT)) push('invalid_param', `text deve ser um texto (até ${MAX_TEXT} caracteres).`);
+        validateStyle(c.style, push);
+        if (c.preset !== undefined && (c.kind !== 'caption' || !CAPTION_PRESET_NAMES.includes(c.preset)))
+          push('invalid_param', 'preset só vale para legenda: padrao, caixa ou destaque.');
       }
       break;
     }
     case 'updateClip': {
       const c = need(o.clipId);
       if (!c) break;
-      const s = o.set ?? {};
-      const start = s.start ?? c.start;
-      const dur = s.duration ?? c.duration;
-      if (!isNum(start) || start < 0) e.push(err(index, name, 'out_of_range', 'start deve ser ≥ 0.'));
-      if (!isNum(dur) || dur < MIN_DURATION) e.push(err(index, name, 'out_of_range', `duration deve ser ≥ ${MIN_DURATION}s.`));
-      if (c.kind === 'video') {
-        const m = p.media.find((x) => x.id === c.mediaId);
-        const inn = s.in ?? c.in;
-        if (!isNum(inn) || inn < 0) e.push(err(index, name, 'out_of_range', 'in deve ser ≥ 0.'));
-        else if (m && inn + dur > m.duration + 0.05)
-          e.push(err(index, name, 'out_of_range', `Trecho além do arquivo (duração ${m.duration.toFixed(2)}s).`));
-        if (s.volume !== undefined && (!isNum(s.volume) || s.volume < 0 || s.volume > 2))
-          e.push(err(index, name, 'out_of_range', 'volume vai de 0 a 2.'));
-      } else {
-        if (s.in !== undefined) e.push(err(index, name, 'invalid_param', 'in só vale para vídeo.'));
-        if (s.text !== undefined && typeof s.text !== 'string') e.push(err(index, name, 'invalid_param', 'text deve ser texto.'));
-        if (s.style?.fontSize !== undefined && (!isNum(s.style.fontSize) || s.style.fontSize < 6 || s.style.fontSize > 400))
-          e.push(err(index, name, 'out_of_range', 'fontSize vai de 6 a 400.'));
+      if (!isObj(o.set)) {
+        push('invalid_param', 'set deve ser um objeto com os campos a mudar.');
+        break;
       }
-      if (s.preset !== undefined && !['padrao', 'caixa', 'destaque'].includes(s.preset))
-        e.push(err(index, name, 'invalid_param', 'preset de legenda: padrao, caixa ou destaque.'));
+      const s = o.set as Record<string, unknown>;
+      for (const k of Object.keys(s)) {
+        if (!CHANGE_KEYS.includes(k)) push('invalid_param', `Campo desconhecido: ${k}.`);
+        else if (s[k] === null) push('invalid_param', `${k} não pode ser null (omita o campo para não mudar).`);
+      }
+      if (e.length) break;
+      const ch = o.set;
+      if (ch.name !== undefined && (!isStr(ch.name) || ch.name.length > 200)) push('invalid_param', 'name deve ser um texto.');
+      const start = ch.start ?? c.start;
+      const dur = ch.duration ?? c.duration;
+      if (!isNum(start) || start < 0) push('out_of_range', 'start deve ser um número ≥ 0.');
+      if (!isNum(dur) || dur < MIN_DURATION) push('out_of_range', `duration deve ser ≥ ${MIN_DURATION}s.`);
+      if (c.kind === 'video') {
+        if (ch.text !== undefined || ch.style !== undefined || ch.preset !== undefined) push('invalid_param', 'text, style e preset não valem para vídeo.');
+        const m = p.media.find((x) => x.id === c.mediaId);
+        const inn = ch.in ?? c.in;
+        if (!isNum(inn) || inn < 0) push('out_of_range', 'in deve ser um número ≥ 0.');
+        else if (m && isNum(dur) && inn + dur > m.duration + 0.05) push('out_of_range', `Trecho além do arquivo (duração ${m.duration.toFixed(2)}s).`);
+        if (ch.volume !== undefined && (!isNum(ch.volume) || ch.volume < 0 || ch.volume > 1)) push('out_of_range', 'volume vai de 0 a 1.');
+        if (ch.muted !== undefined && typeof ch.muted !== 'boolean') push('invalid_param', 'muted deve ser true ou false.');
+      } else {
+        if (ch.in !== undefined || ch.volume !== undefined || ch.muted !== undefined) push('invalid_param', 'in, volume e muted só valem para vídeo.');
+        if (ch.text !== undefined && (!isStr(ch.text) || ch.text.length > MAX_TEXT)) push('invalid_param', `text deve ser um texto (até ${MAX_TEXT} caracteres).`);
+        validateStyle(ch.style, push);
+        if (ch.preset !== undefined && (c.kind !== 'caption' || !CAPTION_PRESET_NAMES.includes(ch.preset)))
+          push('invalid_param', 'preset só vale para legenda: padrao, caixa ou destaque.');
+      }
       break;
     }
     case 'removeClip':
       need(o.clipId);
       break;
+    case 'trimClip': {
+      const c = need(o.clipId);
+      if (!c) break;
+      if (o.edge !== 'start' && o.edge !== 'end') {
+        push('invalid_param', 'edge: start ou end.');
+        break;
+      }
+      if (!isNum(o.delta)) {
+        push('invalid_param', 'delta deve ser um número (segundos).');
+        break;
+      }
+      const lim = trimLimits(p, c, o.edge);
+      if (o.delta < lim.min - EPS || o.delta > lim.max + EPS)
+        push('out_of_range', `Para aparar ${o.edge === 'start' ? 'o início' : 'o fim'}, delta vai de ${lim.min.toFixed(3)} a ${lim.max.toFixed(3)}s.`);
+      break;
+    }
     case 'setProperty':
     case 'setKeyframe':
     case 'removeKeyframe':
@@ -217,60 +324,107 @@ export function validateOp(p: Project, o: Op, index = 0): OpError[] {
     case 'animate': {
       const c = need(o.clipId);
       if (!c) break;
+      const needsProp = o.op === 'setProperty' || o.op === 'setKeyframe' || o.op === 'removeKeyframe';
       const prop = 'prop' in o ? o.prop : undefined;
+      if (prop === undefined && needsProp) {
+        push('invalid_param', 'prop é obrigatório (x, y, scale ou opacity).');
+        break;
+      }
       if (prop !== undefined) {
-        const d = propDef(prop);
+        const d = isStr(prop) ? propDef(prop) : undefined;
         if (!d || !d.kinds.includes(c.kind)) {
-          e.push(err(index, name, 'invalid_param', `Propriedade "${prop}" não existe para ${c.kind}.`));
+          push('invalid_param', `Propriedade "${String(prop)}" não existe para ${c.kind}.`);
           break;
         }
-        const val = o.op === 'setProperty' ? o.value : o.op === 'setKeyframe' ? o.v : undefined;
-        if (val !== undefined && (!isNum(val) || val < d.min - EPS || val > d.max + EPS))
-          e.push(err(index, name, 'out_of_range', `${d.label} vai de ${d.min} a ${d.max}.`));
+        if (o.op === 'setProperty' || o.op === 'setKeyframe') {
+          const val = o.op === 'setProperty' ? o.value : o.v;
+          const field = o.op === 'setProperty' ? 'value' : 'v';
+          if (!isNum(val)) push('invalid_param', `${field} deve ser um número.`);
+          else if (val < d.min - EPS || val > d.max + EPS) push('out_of_range', `${d.label} vai de ${d.min} a ${d.max}.`);
+        }
+        if (o.op === 'setProperty' && c.props[d.name]?.keyframes.length)
+          push('invalid_param', `${d.label} tem pontos de animação: use setKeyframe para mudar um ponto, ou clearKeyframes antes de fixar um valor.`);
       }
       if (o.op === 'setKeyframe') {
-        if (!isNum(o.t) || o.t < -EPS || o.t > c.duration + EPS)
-          e.push(err(index, name, 'out_of_range', `t (relativo ao clipe) deve ficar entre 0 e ${c.duration.toFixed(3)}s.`));
-        if (o.ease && !EASINGS.includes(o.ease)) e.push(err(index, name, 'invalid_param', `ease: ${EASINGS.join(', ')}.`));
+        const existing = isStr(o.keyframeId) ? c.props[o.prop]?.keyframes.find((k) => k.id === o.keyframeId) : undefined;
+        // Um ponto que já existe pode ter valor/suavização editados sem mexer no tempo.
+        const unchangedT = !!existing && isNum(o.t) && Math.abs(existing.t - o.t) < EPS;
+        if (!isNum(o.t) || (!unchangedT && (o.t < -EPS || o.t > c.duration + EPS)))
+          push('out_of_range', `t (relativo ao clipe) deve ficar entre 0 e ${c.duration.toFixed(3)}s.`);
+        if (o.keyframeId !== undefined && (!isStr(o.keyframeId) || !o.keyframeId)) push('invalid_param', 'keyframeId deve ser um texto.');
+        checkEase(o.ease);
+        checkGroup(o.group, false);
       }
       if (o.op === 'removeKeyframe' && !c.props[o.prop]?.keyframes.some((k) => k.id === o.keyframeId))
-        e.push(err(index, name, 'target_not_found', `Ponto "${o.keyframeId}" não existe.`));
+        push('target_not_found', `Ponto "${String(o.keyframeId)}" não existe.`);
+      if (o.op === 'clearKeyframes') checkGroup(o.group, false);
       if (o.op === 'retimeGroup') {
+        checkGroup(o.group, true);
         const has = Object.values(c.props).some((pp) => pp.keyframes.some((k) => k.group === o.group));
-        if (!has) e.push(err(index, name, 'target_not_found', `Grupo de animação "${o.group}" não existe.`));
-        if (!isNum(o.start) || !isNum(o.duration) || o.start < -EPS || o.duration < 0 || o.start + o.duration > c.duration + EPS)
-          e.push(err(index, name, 'out_of_range', `Intervalo deve caber no clipe (0 a ${c.duration.toFixed(3)}s).`));
+        if (isStr(o.group) && o.group && !has) push('target_not_found', `Grupo de animação "${o.group}" não existe.`);
+        if (!isNum(o.start) || !isNum(o.duration) || o.start < -EPS || o.duration < MIN_GROUP_DURATION || o.start + o.duration > c.duration + EPS)
+          push('out_of_range', `Intervalo deve caber no clipe (0 a ${c.duration.toFixed(3)}s) e durar pelo menos ${MIN_GROUP_DURATION}s.`);
       }
       if (o.op === 'animate') {
         const pr = ANIMATION_PRESETS.find((x) => x.name === o.preset);
-        if (!pr) e.push(err(index, name, 'invalid_param', `preset: ${ANIMATION_PRESETS.map((x) => x.name).join(', ')}.`));
-        if (pr && o.preset !== 'fadeIn' && o.preset !== 'fadeOut' && c.kind === 'caption')
-          e.push(err(index, name, 'invalid_param', 'Legendas só aceitam fadeIn/fadeOut.'));
-        const dur = o.duration ?? 0.6;
-        const start = o.start ?? 0;
-        if (!isNum(dur) || dur <= 0 || dur > c.duration + EPS)
-          e.push(err(index, name, 'out_of_range', `duration deve ficar entre 0 e ${c.duration.toFixed(3)}s.`));
-        if (o.start !== undefined && (!isNum(start) || start < -EPS || start + dur > c.duration + EPS))
-          e.push(err(index, name, 'out_of_range', `Intervalo deve caber no clipe (0 a ${c.duration.toFixed(3)}s).`));
-        if (o.ease && !EASINGS.includes(o.ease)) e.push(err(index, name, 'invalid_param', `ease: ${EASINGS.join(', ')}.`));
+        if (!pr) {
+          push('invalid_param', `preset: ${ANIMATION_PRESETS.map((x) => x.name).join(', ')}.`);
+          break;
+        }
+        if (c.kind === 'caption' && !CAPTION_PRESETS.includes(o.preset)) push('invalid_param', 'Legendas só aceitam fadeIn/fadeOut.');
+        if (o.start !== undefined && (!isNum(o.start) || o.start < -EPS)) push('out_of_range', 'start deve ser um número ≥ 0.');
+        if (o.duration !== undefined && (!isNum(o.duration) || o.duration <= 0)) push('out_of_range', 'duration deve ser > 0.');
+        if (!e.length) {
+          const r = animateRange(c, o);
+          if (r.duration <= 0 || r.start < -EPS || r.end > c.duration + EPS)
+            push('out_of_range', `A animação precisa caber no clipe (0 a ${c.duration.toFixed(3)}s).`);
+        }
+        checkEase(o.ease);
+        checkGroup(o.group, false);
       }
       break;
     }
     case 'updateTrack':
-      if (!findTrack(p, o.trackId)) e.push(err(index, name, 'target_not_found', `Faixa "${o.trackId}" não existe.`));
+      if (!findTrack(p, o.trackId)) push('target_not_found', `Faixa "${String(o.trackId)}" não existe.`);
+      else if (!isObj(o.set)) push('invalid_param', 'set deve ser um objeto.');
+      else if ((o.set.hidden !== undefined && typeof o.set.hidden !== 'boolean') || (o.set.locked !== undefined && typeof o.set.locked !== 'boolean'))
+        push('invalid_param', 'hidden e locked devem ser true ou false.');
       break;
     case 'renameProject':
-      if (typeof o.name !== 'string' || !o.name.trim()) e.push(err(index, name, 'invalid_param', 'Nome vazio.'));
+      if (!isStr(o.name) || !o.name.trim() || o.name.length > 200) push('invalid_param', 'Nome vazio.');
       break;
     case 'setCanvas':
       if (!isNum(o.width) || !isNum(o.height) || o.width < 16 || o.height < 16 || o.width > 3840 || o.height > 3840 || o.width % 2 || o.height % 2)
-        e.push(err(index, name, 'out_of_range', 'Largura e altura pares, entre 16 e 3840.'));
-      if (o.fps !== undefined && (!isNum(o.fps) || o.fps < 1 || o.fps > 120)) e.push(err(index, name, 'out_of_range', 'fps entre 1 e 120.'));
+        push('out_of_range', 'Largura e altura pares, entre 16 e 3840.');
+      if (o.fps !== undefined && (!isNum(o.fps) || o.fps < 1 || o.fps > 120)) push('out_of_range', 'fps entre 1 e 120.');
       break;
     default:
-      e.push(err(index, name, 'unknown_op', `Operação desconhecida "${name}".`));
+      push('unknown_op', `Operação desconhecida "${name}".`);
   }
   return e;
+}
+
+/** Quanto cada borda pode andar (segundos), respeitando o arquivo e a duração mínima. */
+export function trimLimits(p: Project, c: Clip, edge: TrimEdge): { min: number; max: number } {
+  const room = c.duration - MIN_DURATION;
+  if (c.kind === 'video') {
+    const m = p.media.find((x) => x.id === c.mediaId);
+    const mediaDur = m?.duration ?? c.in + c.duration;
+    if (edge === 'start') return { min: -c.in, max: room };
+    return { min: -room, max: Math.max(0, mediaDur - (c.in + c.duration)) };
+  }
+  if (edge === 'start') return { min: -c.start, max: room };
+  return { min: -room, max: 3600 };
+}
+
+/** Limita o deslocamento de uma borda ao permitido (arrastes na linha do tempo). */
+export function clampTrimDelta(p: Project, c: Clip, edge: TrimEdge, delta: number): number {
+  const lim = trimLimits(p, c, edge);
+  const d = Math.min(lim.max, Math.max(lim.min, delta));
+  // Arredonda para dentro do limite (nunca para fora).
+  const r = round(d);
+  const out = r > lim.max ? Math.floor(d * 1000) / 1000 : r < lim.min ? Math.ceil(d * 1000) / 1000 : r;
+  return out + 0; // sem -0
 }
 
 /** Transforma macros (animate) em operações primitivas e preenche ids. */
@@ -279,40 +433,59 @@ export function expandOp(p: Project, o: Op): Op[] {
     return [{ ...o, clip: { ...o.clip, id: newId(o.clip.kind === 'video' ? 'vid' : o.clip.kind === 'title' ? 'ttl' : 'cap') } }];
   }
   if (o.op === 'setKeyframe' && !o.keyframeId) {
+    // Edita o ponto que já está nesse instante (do mesmo grupo, se o grupo foi informado).
     const c = findClip(p, o.clipId);
-    const existing = c?.props[o.prop]?.keyframes.find((k) => Math.abs(k.t - o.t) < 1e-3);
+    const near = (c?.props[o.prop]?.keyframes ?? []).filter((k) => Math.abs(k.t - o.t) < SAME_T && (o.group === undefined || sameGroup(k.group, o.group)));
+    const existing = near[near.length - 1];
     return [{ ...o, keyframeId: existing?.id ?? newId('kf') }];
+  }
+  if (o.op === 'trimClip') {
+    const c = findClip(p, o.clipId)!;
+    if (o.ripple === false || c.kind !== 'video') return [{ ...o, ripple: false }];
+    // Vídeo: a borda que mexe no fim do clipe empurra/puxa os vídeos seguintes da faixa.
+    const endShift = o.edge === 'start' ? -o.delta : o.delta;
+    const oldEnd = c.start + c.duration;
+    const ripple: Op[] = p.clips
+      .filter((x) => x.id !== c.id && x.trackId === c.trackId && x.start >= oldEnd - 1e-3 && Math.abs(endShift) > EPS)
+      .map((x) => ({ op: 'updateClip', clipId: x.id, set: { start: round(Math.max(0, x.start + endShift)) } }));
+    return [{ ...o, ripple: false }, ...ripple];
   }
   if (o.op !== 'animate') return [o];
   const c = findClip(p, o.clipId)!;
   const pr = ANIMATION_PRESETS.find((x) => x.name === o.preset)!;
-  const dur = Math.min(o.duration ?? (pr.kind === 'span' ? c.duration : 0.6), c.duration);
-  const start = o.start ?? (pr.kind === 'out' ? c.duration - dur : 0);
-  const end = start + dur;
-  const group = o.group ?? (pr.kind === 'in' ? 'entrada' : pr.kind === 'out' ? 'saida' : o.preset);
+  const { start, end, kind } = animateRange(c, o);
+  const group = o.group ?? (kind === 'in' ? 'entrada' : kind === 'out' ? 'saida' : o.preset);
   const easeIn: Easing = o.ease ?? 'easeOut';
   const easeOut: Easing = o.ease ?? 'easeIn';
-  // Valor-base de cada propriedade, ignorando o próprio grupo (reaplicar é idempotente).
-  const base = (prop: string, t: number) => {
+  /**
+   * Valor-base de cada propriedade, sem o próprio grupo (reaplicar é idempotente).
+   * Entrada: o valor onde ela termina; saída: onde ela começa; zoom do clipe
+   * inteiro: o valor de repouso (sem entrada/saída).
+   */
+  const base = (prop: string) => {
     const ap = c.props[prop];
     const d = propDef(prop)!;
     if (!ap) return d.default;
-    const others = ap.keyframes.filter((k) => k.group !== group);
-    return others.length ? evalProp({ value: ap.value, keyframes: others }, t, d.default) : ap.value;
+    const others = ap.keyframes.filter((k) => (kind === 'span' ? k.group === undefined : k.group !== group));
+    const at = kind === 'in' ? end : start;
+    return others.length ? evalProp({ value: ap.value, keyframes: others }, at, d.default) : ap.value;
   };
   const off = 60;
   const ops: Op[] = [{ op: 'clearKeyframes', clipId: c.id, group }];
-  const kf = (prop: string, t: number, v: number, ez: Easing) =>
-    ops.push({ op: 'setKeyframe', clipId: c.id, prop, t: round(t), v: round(v), ease: ez, group, keyframeId: newId('kf') });
+  const clampT = (t: number) => Math.min(c.duration, Math.max(0, round(t)));
+  const kf = (prop: string, t: number, v: number, ez: Easing) => {
+    const d = propDef(prop)!;
+    ops.push({ op: 'setKeyframe', clipId: c.id, prop, t: clampT(t), v: Math.min(d.max, Math.max(d.min, round(v))), ease: ez, group, keyframeId: newId('kf') });
+  };
   const inOut = (prop: string, from: number, to: number) => {
     const ez = pr.kind === 'out' ? easeOut : easeIn;
     kf(prop, start, from, ez);
     kf(prop, end, to, 'linear');
   };
-  const by = base('y', pr.kind === 'out' ? start : end);
-  const bx = base('x', pr.kind === 'out' ? start : end);
-  const bs = base('scale', pr.kind === 'out' ? start : end);
-  const bo = base('opacity', pr.kind === 'out' ? start : end);
+  const by = base('y');
+  const bx = base('x');
+  const bs = base('scale');
+  const bo = base('opacity');
   switch (o.preset) {
     case 'fadeIn':
       inOut('opacity', 0, bo);
@@ -360,7 +533,54 @@ export function expandOp(p: Project, o: Op): Op[] {
   return ops;
 }
 
-const round = (n: number) => Math.round(n * 1000) / 1000;
+/**
+ * Reposiciona os pontos quando a duração do clipe muda (aparar). Grupos que
+ * ocupam o clipe inteiro esticam; grupos presos ao fim (saída) acompanham o fim;
+ * grupos presos ao começo (entrada) ficam; o resto acompanha o conteúdo
+ * (`contentShift`). Pontos que saem do clipe viram um ponto na borda com o
+ * valor que a animação tinha ali.
+ */
+function remapKeyframes(c: Clip, newDur: number, contentShift: number): void {
+  const D = c.duration;
+  if (Math.abs(newDur - D) < EPS && Math.abs(contentShift) < EPS) return;
+  const groups = new Map(keyframeGroups(c).map((g) => [g.group, g]));
+  const snap = (t: number) => (Math.abs(t) < SAME_T ? 0 : Math.abs(t - newDur) < SAME_T ? newDur : round(t));
+  for (const ap of Object.values(c.props)) {
+    if (!ap.keyframes.length) continue;
+    const mapped = ap.keyframes.map((k) => {
+      const g = k.group ? groups.get(k.group) : undefined;
+      const atStart = !!g && g.start <= SAME_T;
+      const atEnd = !!g && g.end >= D - SAME_T;
+      let t: number;
+      if (atStart && atEnd) t = D > SAME_T ? (k.t / D) * newDur : k.t;
+      else if (atEnd) t = k.t + (newDur - D);
+      else if (atStart) t = k.t;
+      else t = k.t + contentShift;
+      return { ...k, t: snap(t) };
+    });
+    ap.keyframes = clampKeyframes(mapped, newDur, ap.value);
+  }
+}
+
+function clampKeyframes(kfs: Keyframe[], dur: number, value: number): Keyframe[] {
+  const sorted = sortedKeyframes(kfs);
+  const inside: Keyframe[] = [];
+  const below: Keyframe[] = [];
+  const above: Keyframe[] = [];
+  for (const k of sorted) {
+    if (k.t < -EPS) below.push(k);
+    else if (k.t > dur + EPS) above.push(k);
+    else inside.push({ ...k, t: Math.min(Math.max(k.t, 0), dur) });
+  }
+  const curve = { value, keyframes: sorted };
+  const addEdge = (src: Keyframe, t: number) => {
+    if (inside.some((k) => Math.abs(k.t - t) < SAME_T && sameGroup(k.group, src.group))) return;
+    inside.push({ ...src, t, v: evalProp(curve, t, value) });
+  };
+  if (below.length) addEdge(below[below.length - 1], 0);
+  if (above.length) addEdge(above[0], dur);
+  return sortedKeyframes(inside);
+}
 
 function applyPrimitive(p: Project, o: Op): void {
   switch (o.op) {
@@ -417,6 +637,9 @@ function applyPrimitive(p: Project, o: Op): void {
     case 'updateClip': {
       const c = findClip(p, o.clipId)!;
       const s = o.set;
+      const newDur = s.duration ?? c.duration;
+      const shift = c.kind === 'video' && s.in !== undefined ? -(s.in - c.in) : 0;
+      remapKeyframes(c, newDur, shift);
       if (s.name !== undefined) c.name = s.name;
       if (s.start !== undefined) c.start = s.start;
       if (s.duration !== undefined) c.duration = s.duration;
@@ -432,6 +655,24 @@ function applyPrimitive(p: Project, o: Op): void {
         }
         if (s.style) c.style = { ...c.style, ...s.style };
       }
+      return;
+    }
+    case 'trimClip': {
+      const c = findClip(p, o.clipId)!;
+      const d = o.delta;
+      if (o.edge === 'end') {
+        const nd = round(c.duration + d);
+        remapKeyframes(c, nd, 0);
+        c.duration = nd;
+        return;
+      }
+      // Início: o conteúdo anda -d dentro do clipe. O vídeo fica no lugar (sem
+      // buraco no começo); o texto mantém o fim no lugar.
+      const nd = round(c.duration - d);
+      remapKeyframes(c, nd, -d);
+      c.duration = nd;
+      if (c.kind === 'video') c.in = round(c.in + d);
+      else c.start = round(c.start + d);
       return;
     }
     case 'removeClip':
@@ -451,10 +692,12 @@ function applyPrimitive(p: Project, o: Op): void {
         existing.t = o.t;
         existing.v = o.v;
         if (o.ease) existing.ease = o.ease;
-        if (o.group !== undefined) existing.group = o.group || undefined;
+        if (o.group !== undefined) existing.group = o.group;
+        // Arrastar um ponto para cima de outro do mesmo grupo junta os dois.
+        ap.keyframes = ap.keyframes.filter((k) => k === existing || !(Math.abs(k.t - o.t) < SAME_T && sameGroup(k.group, existing.group)));
       } else {
-        // Um ponto por instante: substitui o que estiver no mesmo tempo.
-        ap.keyframes = ap.keyframes.filter((k) => Math.abs(k.t - o.t) >= 1e-3);
+        // Um ponto por instante em cada grupo: substitui o do mesmo grupo nesse tempo.
+        ap.keyframes = ap.keyframes.filter((k) => !(Math.abs(k.t - o.t) < SAME_T && sameGroup(k.group, o.group)));
         ap.keyframes.push({ id: o.keyframeId!, t: o.t, v: o.v, ease: o.ease ?? 'easeInOut', ...(o.group ? { group: o.group } : {}) });
       }
       ap.keyframes = sortedKeyframes(ap.keyframes);
@@ -463,21 +706,18 @@ function applyPrimitive(p: Project, o: Op): void {
     case 'removeKeyframe': {
       const ap = findClip(p, o.clipId)!.props[o.prop];
       const removed = ap.keyframes.find((k) => k.id === o.keyframeId);
-      ap.keyframes = ap.keyframes.filter((k) => k.id !== o.keyframeId);
-      if (ap.keyframes.length === 0 && removed) ap.value = removed.v;
+      ap.keyframes = sortedKeyframes(ap.keyframes.filter((k) => k.id !== o.keyframeId));
+      // Ponto feito à mão: o valor que ele tinha passa a ser o valor fixo. Pontos
+      // de animação pronta (com grupo) não mexem no valor de repouso.
+      if (ap.keyframes.length === 0 && removed && !removed.group) ap.value = removed.v;
       return;
     }
     case 'clearKeyframes': {
+      // O valor fixo (repouso) não muda: é a base que as animações prontas usam.
       const c = findClip(p, o.clipId)!;
       for (const [name, ap] of Object.entries(c.props)) {
         if (o.prop && name !== o.prop) continue;
-        const before = ap.keyframes;
-        ap.keyframes = before.filter((k) => (o.group ? k.group !== o.group : false));
-        if (ap.keyframes.length === 0 && before.length > 0) {
-          // Mantém o valor "de repouso" que a animação removida tinha no fim.
-          const last = sortedKeyframes(before);
-          ap.value = o.group && /saida|out/i.test(o.group) ? last[0].v : last[last.length - 1].v;
-        }
+        ap.keyframes = sortedKeyframes(ap.keyframes.filter((k) => (o.group ? k.group !== o.group : false)));
       }
       return;
     }
@@ -491,7 +731,7 @@ function applyPrimitive(p: Project, o: Op): void {
       for (const ap of Object.values(c.props)) {
         for (const k of ap.keyframes) {
           if (k.group !== o.group) continue;
-          k.t = round(span > 0 ? o.start + ((k.t - s0) / span) * o.duration : o.start);
+          k.t = Math.min(c.duration, round(span > 0 ? o.start + ((k.t - s0) / span) * o.duration : o.start));
         }
         ap.keyframes = sortedKeyframes(ap.keyframes);
       }
@@ -525,6 +765,7 @@ export interface ApplyResult {
  * projeto. Não altera `project` nem a revisão. Lança OpValidationError.
  */
 export function applyOps(project: Project, ops: Op[]): ApplyResult {
+  if (!Array.isArray(ops)) throw new OpValidationError([err(0, '?', 'invalid_param', 'ops deve ser uma lista de operações.')]);
   const p: Project = structuredClone(project);
   const applied: Op[] = [];
   const errors: OpError[] = [];
@@ -568,12 +809,14 @@ export function describeOp(o: Op): string {
       return o.clip.kind === 'video' ? 'Adicionar vídeo' : o.clip.kind === 'title' ? `Adicionar título "${o.clip.text ?? ''}"` : `Adicionar legenda "${o.clip.text ?? ''}"`;
     case 'updateClip':
       return 'Editar clipe';
+    case 'trimClip':
+      return o.edge === 'start' ? 'Aparar início' : 'Aparar fim';
     case 'removeClip':
       return 'Remover clipe';
     case 'setProperty':
       return `Definir ${propDef(o.prop)?.label ?? o.prop}`;
     case 'setKeyframe':
-      return `Ponto de ${propDef(o.prop)?.label ?? o.prop} em ${o.t.toFixed(2)}s`;
+      return `Ponto de ${propDef(o.prop)?.label ?? o.prop} em ${Number(o.t).toFixed(2)}s`;
     case 'removeKeyframe':
       return 'Remover ponto de animação';
     case 'clearKeyframes':
@@ -588,5 +831,7 @@ export function describeOp(o: Op): string {
       return `Formato ${o.width}×${o.height}`;
     case 'animate':
       return `Animação ${ANIMATION_PRESETS.find((p) => p.name === o.preset)?.label ?? o.preset}`;
+    default:
+      return 'Edição';
   }
 }
