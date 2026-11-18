@@ -446,13 +446,21 @@ function mcpEntry(): McpEntry {
 
 /**
  * O Claude Desktop está aberto? No Windows, a resposta vem do PowerShell, que custa caro
- * para rodar a cada 5 s com o cartão na tela: uma consulta por vez, e a última vale por
- * `maxAgeMs` (curto quando a pessoa acabou de voltar para a janela ou clicou em Conectar).
+ * para rodar a cada 5 s com o cartão na tela: uma consulta por vez (quem chega durante uma
+ * espera por ela), e a resposta vale por `maxAgeMs` depois de chegar (curto quando a pessoa
+ * acabou de voltar para a janela ou clicou em Conectar). O tempo é o do performance.now(),
+ * que não volta quando alguém acerta o relógio do computador.
  */
-let runningCheck: { at: number; result: Promise<boolean | null> } | null = null;
+let runningCheck: { at: number; pending: boolean; result: Promise<boolean | null> } | null = null;
 function claudeRunning(maxAgeMs: number): Promise<boolean | null> {
-  if (!runningCheck || Date.now() - runningCheck.at > maxAgeMs) runningCheck = { at: Date.now(), result: claudeDesktopRunning() };
-  return runningCheck.result;
+  if (runningCheck && (runningCheck.pending || performance.now() - runningCheck.at <= maxAgeMs)) return runningCheck.result;
+  const check = { at: performance.now(), pending: true, result: claudeDesktopRunning() };
+  void check.result.then(() => {
+    check.pending = false;
+    check.at = performance.now();
+  });
+  runningCheck = check;
+  return check.result;
 }
 
 ipcMain.handle('claude:status', async (_e, fresh?: unknown) => {

@@ -18,6 +18,8 @@ export interface Outcome {
   text: string;
   /** Arquivo para o botão "Mostrar o arquivo". */
   file?: string;
+  /** Como estava esse arquivo quando o Conectar não conseguiu gravar nele. */
+  failed?: { state: 'invalid' | 'error'; error: string };
 }
 
 /**
@@ -55,17 +57,21 @@ export function connectOutcome(reply: ConnectReply, claudeRunning: boolean | nul
     return { tone: 'ok', text: `Pronto! ${next} O conector “diretor” aparece nele e é só pedir na conversa.` };
   }
   const first = bad[0];
+  const failed = { state: first.state === 'invalid' ? ('invalid' as const) : ('error' as const), error: why(first) };
+  // Colar a configuração não conserta um arquivo com erro de formato: é preciso corrigir o erro.
+  const broken = failed.state === 'invalid';
   if (!okCount) {
-    return {
-      tone: 'error',
-      text: `Não consegui gravar a configuração do Claude Desktop (${why(first)}). Use “Copiar configuração” e cole à mão no arquivo.`,
-      file: first.file,
-    };
+    const what = broken
+      ? 'Clique em “Mostrar o arquivo”, corrija o erro, salve e clique em Conectar de novo.'
+      : 'Use “Copiar configuração” e cole à mão no arquivo (em “Mostrar o arquivo”).';
+    return { tone: 'error', text: `Não consegui gravar a configuração do Claude Desktop (${why(first)}). ${what}`, file: first.file, failed };
   }
+  const what = broken ? 'clique em “Mostrar o arquivo”, corrija o erro, salve e clique em Conectar de novo' : 'use “Copiar configuração” e cole à mão nesse arquivo';
   return {
     tone: 'warn',
-    text: `Gravei em ${okCount} de ${rs.length} arquivos de configuração do Claude Desktop, mas não neste: ${first.file} (${why(first)}). Se o conector “diretor” não aparecer no Claude, use “Copiar configuração” e cole à mão nesse arquivo.`,
+    text: `Gravei em ${okCount} de ${rs.length} arquivos de configuração do Claude Desktop, mas não neste: ${first.file} (${why(first)}). Se o conector “diretor” não aparecer no Claude, ${what}.`,
     file: first.file,
+    failed,
   };
 }
 
@@ -100,15 +106,27 @@ export function setupMessage(view: SetupView, mac = false): string {
 
 /**
  * O resultado do último Conectar continua na tela depois de conferir de novo? Some quando
- * deixa de valer: "Pronto" só enquanto está tudo gravado (se o Claude regravou o arquivo e
- * tirou o Diretor, o cartão volta aos passos); um erro some quando tudo ficou certo, ou
- * quando o Claude Desktop que não estava aqui apareceu.
+ * deixa de valer, e o cartão volta a dizer o que fazer agora:
+ * - "Pronto" só enquanto está tudo gravado (se o Claude regravou o arquivo e tirou o
+ *   Diretor, o cartão volta aos passos);
+ * - um erro some quando tudo ficou certo, quando o arquivo dele mudou (corrigido, gravado à
+ *   mão ou com outro problema), quando todos os arquivos estão com erro (o cartão mostra
+ *   qual corrigir) e quando o Claude Desktop sumiu ou apareceu.
  */
-export function keepOutcome(r: Outcome | null, view: SetupView): Outcome | null {
+export function keepOutcome(r: Outcome | null, st: ClaudeStatus): Outcome | null {
   if (!r) return r;
+  const view = setupView(st);
   if (r.tone === 'ok') return view.kind === 'ready' ? r : null;
-  if (view.kind === 'ready') return null;
-  if (r.text === NOT_FOUND && view.kind !== 'not-found') return null;
+  if (view.kind === 'ready' || view.kind === 'broken') return null;
+  if ((r.text === NOT_FOUND) !== (view.kind === 'not-found')) return null;
+  if (r.file && r.failed) {
+    const now = st.configs.find((c) => c.file === r.file);
+    const same =
+      r.failed.state === 'invalid'
+        ? now?.state === 'invalid' && now.error === r.failed.error
+        : now?.state === 'missing' || now?.state === 'outdated';
+    if (!same) return null;
+  }
   return r;
 }
 

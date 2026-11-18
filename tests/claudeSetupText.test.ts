@@ -71,20 +71,48 @@ describe('antes do clique', () => {
 });
 
 describe('o resultado do Conectar depois de conferir de novo', () => {
-  const ok = { tone: 'ok' as const, text: 'Pronto!' };
-  const err = { tone: 'error' as const, text: 'Não consegui gravar', file: A };
+  const st = (configs: ConfigState[]) => ({ configs, serverFound: true, claudeRunning: false });
+  const connected = { file: A, state: 'connected' as const };
   it('"Pronto" só enquanto está tudo gravado', () => {
-    expect(keepOutcome(ok, { kind: 'ready' })).toBe(ok);
+    const ok = connectOutcome({ results: [{ file: A, state: 'added' }] }, false);
+    expect(keepOutcome(ok, st([connected]))).toBe(ok);
     // O Claude regravou o arquivo e tirou o Diretor: volta aos passos.
-    expect(keepOutcome(ok, { kind: 'steps' })).toBeNull();
+    expect(keepOutcome(ok, st([{ file: A, state: 'missing' }]))).toBeNull();
   });
-  it('um erro some quando deixa de valer, e só então', () => {
-    expect(keepOutcome(err, { kind: 'steps' })).toBe(err);
-    expect(keepOutcome(err, { kind: 'ready' })).toBeNull();
-    const notFound = { tone: 'error' as const, text: NOT_FOUND };
-    expect(keepOutcome(notFound, { kind: 'not-found' })).toBe(notFound);
-    // O Claude Desktop foi instalado com o cartão na tela.
-    expect(keepOutcome(notFound, { kind: 'steps' })).toBeNull();
-    expect(keepOutcome(null, { kind: 'steps' })).toBeNull();
+
+  it('não gravou (arquivo preso): o aviso fica até o arquivo mudar', () => {
+    const err = connectOutcome({ results: [{ file: B, state: 'error', error: 'EPERM: operation not permitted' }] }, false);
+    expect(err.text).toMatch(/Copiar configuração/);
+    expect(keepOutcome(err, st([{ file: B, state: 'missing' }]))).toBe(err);
+    // Colado à mão, mas com um erro: o cartão passa a mostrar o erro do arquivo, e não manda colar de novo.
+    expect(keepOutcome(err, st([{ file: B, state: 'invalid', error: 'vírgula sobrando' }]))).toBeNull();
+    // Colado à mão, certo, e outro arquivo ainda sem o Diretor: o aviso velho sai.
+    expect(keepOutcome(err, st([{ file: A, state: 'missing' }, { file: B, state: 'connected' }]))).toBeNull();
+    // O Claude Desktop foi desinstalado: vale o "não encontrei".
+    expect(keepOutcome(err, st([]))).toBeNull();
+  });
+
+  it('arquivo com erro de formato: manda corrigir (colar não conserta), e o aviso sai quando ele muda', () => {
+    const warn = connectOutcome({ results: [{ file: A, state: 'added' }, { file: B, state: 'invalid', error: 'vírgula sobrando' }] }, false);
+    expect(warn.text).toMatch(/Mostrar o arquivo”, corrija o erro/);
+    expect(warn.text).not.toMatch(/Copiar configuração/);
+    expect(keepOutcome(warn, st([connected, { file: B, state: 'invalid', error: 'vírgula sobrando' }]))).toBe(warn);
+    expect(keepOutcome(warn, st([connected, { file: B, state: 'invalid', error: 'outro erro' }]))).toBeNull();
+    expect(keepOutcome(warn, st([connected, { file: B, state: 'missing' }]))).toBeNull();
+    const all = connectOutcome({ results: [{ file: B, state: 'invalid', error: 'vírgula sobrando' }, { file: A, state: 'error', error: 'EPERM' }] }, false);
+    expect(all.tone).toBe('error');
+    expect(all.text).toMatch(/^Não consegui gravar .*\. Clique em “Mostrar o arquivo”, corrija o erro, salve e clique em Conectar de novo\.$/);
+  });
+
+  it('todos os arquivos com erro: o cartão mostra qual corrigir, no lugar do resultado', () => {
+    const err = connectOutcome({ results: [{ file: A, state: 'error', error: 'EPERM' }] }, false);
+    expect(keepOutcome(err, st([{ file: A, state: 'invalid', error: 'x' }]))).toBeNull();
+  });
+
+  it('"não encontrei o Claude" sai quando ele aparece', () => {
+    const notFound = connectOutcome({ results: [] }, null);
+    expect(keepOutcome(notFound, st([]))).toBe(notFound);
+    expect(keepOutcome(notFound, st([{ file: A, state: 'missing' }]))).toBeNull();
+    expect(keepOutcome(null, st([]))).toBeNull();
   });
 });

@@ -215,7 +215,7 @@ function ClaudeSetup() {
         if (id <= shown.current) return;
         shown.current = id;
         setSt(next);
-        setResult((r) => keepOutcome(r, setupView(next)));
+        setResult((r) => keepOutcome(r, next));
       },
       () => undefined,
     );
@@ -278,7 +278,8 @@ function ClaudeSetup() {
       )}
       {!done && st.claudeRunning && view.kind === 'steps' && (
         <p style={{ color: 'var(--warn)' }} data-testid="claude-running">
-          O Claude Desktop ainda está aberto. Feche ele antes de conectar: aberto, ele pode desfazer a mudança.
+          O Claude Desktop ainda está aberto. Feche ele {result ? `por completo (${quit}) ` : ''}antes de conectar: aberto, ele pode desfazer a
+          mudança.
         </p>
       )}
       {!st.serverFound && <p style={{ color: 'var(--warn)' }}>O servidor do Claude não está na pasta do Diretor. Instale o Diretor de novo.</p>}
