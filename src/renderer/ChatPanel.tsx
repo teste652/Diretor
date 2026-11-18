@@ -161,7 +161,6 @@ export function ChatPanel() {
           <button key={k} className={`tab ${tab === k ? 'active' : ''}`} onClick={() => setTab(k)} data-testid={`ai-tab-${k}`}>
             {k === 'claude' ? Icon.chat : Icon.code} {AI_LABEL[k]}
             {k === 'codex' && <span className="tab-sub"> · Reserva</span>}
-            <span className={`dot ${ch.convos[k].runId ? 'busy' : ch.cli[k] ? 'on' : ''}`} style={{ marginLeft: 6 }} />
           </button>
         ))}
       </div>
