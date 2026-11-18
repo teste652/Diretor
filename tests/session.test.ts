@@ -187,6 +187,31 @@ describe('modo econômico', () => {
     expect(e.timeline).toHaveLength(3);
   });
 
+  it('desligado: a IA vê tudo, sem teto e sem pedir licença; ligado de novo, o teto volta', async () => {
+    const s = setup();
+    s.updateSettings({ contextCeilingBytes: 120 });
+    await handleBridge(s, 'get_context', { include: ['timeline'], allowLarger: true });
+    expect(s.contextRequest?.status).toBe('pending');
+    // Desligar tira o cartão que esperava a licença.
+    s.updateSettings({ economy: false });
+    expect(s.contextRequest).toBeNull();
+    const c: any = await handleBridge(s, 'get_context', { include: ['timeline'], allowLarger: true });
+    expect(c.truncated).toBeUndefined();
+    expect(c.timeline).toHaveLength(3);
+    expect(s.contextRequest).toBeNull();
+    // Sem economia, os textos vão com o estilo completo.
+    expect(c.timeline.find((x: any) => x.id === 't1').style).toMatchObject({ color: expect.any(String) });
+    // Uma recusa antiga também não vale depois de trocar o modo.
+    s.updateSettings({ economy: true });
+    await handleBridge(s, 'get_context', { include: ['timeline'], allowLarger: true });
+    s.answerContextRequest(false);
+    expect(s.contextRequest?.status).toBe('denied');
+    s.updateSettings({ economy: false });
+    s.updateSettings({ economy: true });
+    const d: any = await handleBridge(s, 'get_context', { include: ['timeline'] });
+    expect(d.truncated?.why).toBe('reduce');
+  });
+
   it('get_proposal espera a decisão do usuário', async () => {
     const s = setup();
     const r = s.propose(entradaSaida(s.project.revision));

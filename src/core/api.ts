@@ -101,7 +101,8 @@ export function buildContext(s: EditorSession, params: ContextParams = {}): Reco
   // As notas do usuário são palavras dele para o Claude: sempre seguem e não contam para o teto.
   const size = byteSize(ctx) - (notes ? byteSize({ userNotes: notes }) : 0);
   const ceiling = s.settings.contextCeilingBytes;
-  if (size > ceiling) {
+  // O teto é do modo econômico: desligado, a IA vê o que pedir, sem pedir licença ao usuário.
+  if (economy && size > ceiling) {
     const scope = JSON.stringify([params.include ?? [], params.range ?? null]);
     const req = s.contextRequest;
     const sameScope = !!req && req.scope === scope;

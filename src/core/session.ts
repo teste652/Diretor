@@ -463,16 +463,17 @@ export class EditorSession {
   }
 
   updateSettings(s: Partial<Settings>): void {
-    const ceiling = this.settings.contextCeilingBytes;
+    const before = this.settings;
     this.settings = { ...this.settings, ...s };
-    // Teto novo: uma recusa anterior deixa de valer.
-    if (this.settings.contextCeilingBytes !== ceiling) this.contextRequest = null;
+    // Teto novo ou modo econômico trocado: um pedido ou uma recusa anterior deixa de valer
+    // (desligado, a IA vê tudo sem pedir licença, então o cartão pendente sai).
+    if (this.settings.contextCeilingBytes !== before.contextCeilingBytes || this.settings.economy !== before.economy) this.contextRequest = null;
     this.emit();
   }
 
   requestLargerContext(bytes: number, scope = '[]'): void {
     this.contextRequest = { bytes, revision: this.project.revision, scope, ceiling: this.settings.contextCeilingBytes, status: 'pending' };
-    this.log('info', `O Claude pediu um contexto de ${(bytes / 1024).toFixed(1)} KB (teto ${(this.settings.contextCeilingBytes / 1024).toFixed(1)} KB).`);
+    this.log('info', 'A IA pediu para ver mais do projeto do que o modo econômico deixa.');
   }
 
   answerContextRequest(grant: boolean): void {

@@ -11,7 +11,7 @@ Pronto:
 - Camada única de operações para interface e MCP; validação de alvo, parâmetros, intervalo e revisão.
 - Propostas em etapas, mostradas como rascunho uma por vez; ajuste manual vai para o rascunho; gravação só após aceitar; cada etapa aceita é desfeita separadamente.
 - Rascunho desatualizado (projeto ou seleção mudaram) com “Refazer com contexto atual”; chamadas repetidas idempotentes (`requestId`).
-- Modo econômico ligado por padrão, teto de contexto configurável com autorização para pedidos maiores, métricas do editor identificadas como tal.
+- Modo econômico ligado por padrão, com teto de contexto e autorização para pedidos maiores. Depois da Fase 1, a pedido do usuário: o botão liga e desliga com um clique, os números em KB saíram da tela, o teto (6 KB) só vale com o modo ligado (desligado, a IA vê o projeto todo sem pedir licença) e trocar o modo desfaz um pedido ou uma recusa pendente.
 
 Decisões:
 
