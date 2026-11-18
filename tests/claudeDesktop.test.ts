@@ -19,7 +19,7 @@ import {
   unpackedPath,
 } from '../src/main/claudeDesktop';
 
-const ENTRY: McpEntry = { command: 'C:\\Users\\Bruno\\AppData\\Local\\Programs\\diretor\\Diretor.exe', args: ['C:\\x\\server.cjs'], env: { ELECTRON_RUN_AS_NODE: '1' } };
+const ENTRY: McpEntry = { command: 'C:\\Users\\voce\\AppData\\Local\\Programs\\diretor\\Diretor.exe', args: ['C:\\x\\server.cjs'], env: { ELECTRON_RUN_AS_NODE: '1' } };
 const scratch = () => mkdtempSync(join(tmpdir(), 'diretor-claude-'));
 const dirWith = (content?: string | Buffer) => {
   const dir = scratch();
