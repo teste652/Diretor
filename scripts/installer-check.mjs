@@ -6,7 +6,8 @@
 //     Desinstala e confere que o Diretor saiu da configuração do Claude Desktop, e só ele.
 // Usa DIRETOR_APP (o Diretor.exe instalado) e release/Diretor-Setup.exe.
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 const mode = process.argv[2];
@@ -24,6 +25,21 @@ const check = (name, ok, extra = '') => {
   console.log(`${ok ? '✓' : '✗'} ${name}${extra ? ' — ' + extra : ''}`);
 };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Outro programa chamado Diretor.exe, fora da pasta instalada (como uma cópia de desenvolvimento):
+// o instalador e o desinstalador só podem fechar o que roda da pasta deles. É o ping do Windows
+// com outro nome, esperando alguns minutos.
+function startBystander() {
+  const dir = join(process.env.RUNNER_TEMP ?? tmpdir(), 'outro-diretor');
+  mkdirSync(dir, { recursive: true });
+  const exe = join(dir, 'Diretor.exe');
+  copyFileSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'PING.EXE'), exe);
+  const proc = spawn(exe, ['-n', '600', '127.0.0.1'], { stdio: 'ignore' });
+  const state = { exited: false, proc };
+  proc.on('exit', () => (state.exited = true));
+  return state;
+}
+const bystanderName = 'um Diretor.exe de outra pasta continua aberto (só fecha o que roda da pasta instalada)';
 
 if (mode === 'atualizar') {
   // O servidor aberto como o Claude Desktop abre: o próprio Diretor.exe rodando como Node, com a entrada ligada.
@@ -52,12 +68,16 @@ if (mode === 'atualizar') {
   // Uma marca na pasta instalada: se a versão nova entrar no lugar da antiga, ela some.
   const mark = join(installDir, 'resources', 'marca-do-ci.txt');
   writeFileSync(mark, 'some quando a versão nova é instalada');
+  const bystander = startBystander();
+  await wait(500);
   const r = spawnSync(resolve('release', 'Diretor-Setup.exe'), ['/S'], { stdio: 'inherit', timeout: 300_000 });
   check('instalar por cima com o servidor do Claude aberto termina sem erro', r.status === 0, `código ${r.status}${r.error ? `, ${r.error.message}` : ''}`);
   for (let i = 0; i < 20 && !exited; i++) await wait(250);
   check('o instalador fechou o servidor do Claude', exited);
   check('a versão nova ficou no lugar da antiga', existsSync(app) && existsSync(server) && !existsSync(mark));
+  check(bystanderName, !bystander.exited);
   if (!exited) srv.kill();
+  bystander.proc.kill();
 } else {
   // Uma configuração do Claude Desktop no perfil de verdade (esta máquina é do CI, sem Claude):
   // a da instalação clássica com o Diretor desta instalação, outro servidor e preferências,
@@ -85,8 +105,12 @@ if (mode === 'atualizar') {
   writeFileSync(join(moved, CONFIG), other);
 
   // _?= faz o desinstalador rodar daqui e esperar até o fim (sem ele, ele se copia e volta na hora).
+  const bystander = startBystander();
+  await wait(500);
   const r = spawnSync(join(installDir, 'Uninstall Diretor.exe'), ['/S', `_?=${installDir}`], { stdio: 'inherit', timeout: 300_000 });
   check('desinstalar sem perguntas', r.status === 0, `código ${r.status}${r.error ? `, ${r.error.message}` : ''}`);
+  check(bystanderName, !bystander.exited);
+  bystander.proc.kill();
   check('os arquivos do Diretor saíram', !existsSync(app) && !existsSync(server));
   const after = JSON.parse(readFileSync(join(classic, CONFIG), 'utf8'));
   check(
