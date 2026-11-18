@@ -66,6 +66,13 @@ jobs:
       - name: Roteiro de ponta a ponta no app instalado
         run: node scripts/e2e.mjs
 
+      # Atualizar com o Claude Desktop aberto (o servidor do Claude roda do Diretor.exe instalado).
+      - name: Instalar por cima com o servidor do Claude aberto
+        run: node scripts/installer-check.mjs atualizar
+
+      - name: Desinstalar e conferir a configuração do Claude Desktop
+        run: node scripts/installer-check.mjs desinstalar
+
       - name: Guardar capturas do app instalado
         if: always() && env.DIRETOR_APP != ''
         continue-on-error: true
@@ -108,31 +115,52 @@ jobs:
         run: |
           set -euo pipefail
           TAG=teste
-          COMMIT=$(echo "$GITHUB_SHA" | cut -c1-7)
+          NOME=Diretor-Setup.exe
+          # Rodar de novo uma execução antiga nunca troca o link por uma versão mais velha.
+          ATUAL=$(gh api "repos/$GH_REPO/commits/main" --jq .sha)
+          if [ "$ATUAL" != "$GITHUB_SHA" ]; then
+            echo "::notice::A main já está em ${ATUAL:0:7}. Este instalador (${GITHUB_SHA:0:7}) não é o mais novo e não foi publicado."
+            exit 0
+          fi
+          COMMIT=${GITHUB_SHA:0:7}
           TITLE="Diretor $VERSAO (versão de teste)"
           cat > notas.md <<EOF
           Versão de teste gerada automaticamente da \`main\` (commit $COMMIT). Este link sempre baixa a versão mais nova:
-          https://github.com/$GH_REPO/releases/download/$TAG/Diretor-Setup.exe
+          https://github.com/$GH_REPO/releases/download/$TAG/$NOME
 
           **Instalar**
-          1. Baixe o **Diretor-Setup.exe** (em Assets, logo abaixo) e abra.
-          2. O instalador ainda não tem assinatura digital, então o Windows pode avisar "O Windows protegeu o computador": clique em **Mais informações** e depois em **Executar assim mesmo**. Se o navegador disser que o arquivo não é baixado com frequência, escolha **Manter**.
-          3. O Diretor instala sozinho, sem perguntas, e abre. Ele fica no menu Iniciar.
+          1. Com a sua conta do GitHub aberta no navegador (o repositório é privado), baixe o **$NOME** (em Assets, logo abaixo).
+          2. O instalador ainda não tem assinatura digital, então o navegador pode avisar que o arquivo "não é baixado com frequência". No Edge: clique nos três pontinhos ao lado do download, em **Manter**, depois em **Mostrar mais** e em **Manter mesmo assim**. No Chrome: **Manter**.
+          3. Abra o arquivo. Se o Windows mostrar "O Windows protegeu o computador", clique em **Mais informações** e depois em **Executar assim mesmo**.
+          4. O Diretor instala sozinho, sem perguntas, e abre. Ele fica no menu Iniciar.
+
+          Se o Windows bloquear o arquivo sem mostrar "Executar assim mesmo", é o Controle Inteligente de Aplicativos, que barra programas sem assinatura digital. Nesse caso o instalador ainda não funciona nesse computador.
 
           **Usar com o Claude**
-          No painel do Claude, dentro do Diretor, clique em **Conectar**. Depois feche o Claude Desktop por completo (botão direito no ícone dele, perto do relógio → Sair) e abra de novo.
+          1. Feche o Claude Desktop por completo (botão direito no ícone dele, perto do relógio → Sair).
+          2. No painel do Claude, dentro do Diretor, clique em **Conectar**.
+          3. Abra o Claude Desktop de novo. O conector "diretor" aparece nele.
 
           **Atualizar**
-          Baixe de novo por este mesmo link e instale por cima. Seus projetos continuam onde você salvou.
+          1. Salve o seu projeto e feche o Diretor. Se esquecer, o instalador pede.
+          2. Baixe de novo por este mesmo link e instale por cima. Seus projetos continuam onde você salvou.
+          3. Se o Claude Desktop estava aberto, feche ele por completo e abra de novo.
           EOF
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release upload "$TAG" instalador/Diretor-Setup.exe --clobber
-            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true > /dev/null
-            gh release edit "$TAG" --title "$TITLE" --notes-file notas.md --prerelease
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            gh release create "$TAG" "instalador/$NOME" --target "$GITHUB_SHA" --title "$TITLE" --notes-file notas.md --prerelease
           else
-            gh release create "$TAG" instalador/Diretor-Setup.exe --target "$GITHUB_SHA" --title "$TITLE" --notes-file notas.md --prerelease
+            # Sobe com outro nome e só então troca: o link não fica sem arquivo durante o upload,
+            # e se o upload falhar a versão anterior continua lá.
+            asset_ids() { gh api "repos/$GH_REPO/releases/tags/$TAG" --jq ".assets[] | select(.name == \"$1\") | .id"; }
+            for id in $(asset_ids Diretor-Setup-novo.exe); do gh api -X DELETE "repos/$GH_REPO/releases/assets/$id"; done
+            cp "instalador/$NOME" instalador/Diretor-Setup-novo.exe
+            gh release upload "$TAG" instalador/Diretor-Setup-novo.exe
+            NOVO=$(asset_ids Diretor-Setup-novo.exe)
+            for id in $(asset_ids "$NOME"); do gh api -X DELETE "repos/$GH_REPO/releases/assets/$id"; done
+            gh api -X PATCH "repos/$GH_REPO/releases/assets/$NOVO" -f name="$NOME" > /dev/null
+            gh release edit "$TAG" --title "$TITLE" --notes-file notas.md --prerelease
           fi
-          echo "Publicado: https://github.com/$GH_REPO/releases/download/$TAG/Diretor-Setup.exe"
+          echo "Publicado: https://github.com/$GH_REPO/releases/download/$TAG/$NOME"
 
       # Só depois de publicar: se a publicação falhar, "Re-run failed jobs" ainda acha o instalador.
       - name: Apagar o artefato do instalador (já está na versão de teste)

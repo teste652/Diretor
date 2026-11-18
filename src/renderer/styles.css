@@ -127,6 +127,8 @@ textarea.input { height: 64px; padding: 6px 8px; resize: vertical; }
 .card.stale { border-color: rgba(255, 212, 138, 0.5); }
 .card h3 { margin: 8px 0 2px; font-size: 14.5px; }
 .card p { margin: 0 0 8px; color: var(--muted); font-size: 12.5px; }
+.card .setup-steps { margin: 0 0 10px; padding-left: 20px; color: var(--muted); font-size: 12.5px; }
+.card .setup-steps li { margin: 2px 0; }
 .steps { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 10px; }
 .step { display: flex; justify-content: space-between; font-size: 12.5px; padding: 4px 8px; border-radius: 8px; }
 .step.draft { background: var(--accent-soft); color: var(--accent); }

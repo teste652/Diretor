@@ -69,9 +69,10 @@ if (installed && !existsSync(installed)) {
 }
 
 // Um perfil de usuário de mentira, com um Claude Desktop já usado: o botão "Conectar" grava nele.
-// No Windows, a instalação clássica (%APPDATA%\Claude) com uma configuração que já tem outro
-// servidor e preferências (com BOM e CRLF, como o Bloco de Notas grava) e a instalação atual
-// (pacote MSIX), que ainda não tem o arquivo.
+// A configuração tem outro servidor e preferências (com BOM e CRLF, como o Bloco de Notas grava).
+// No Windows, como o Claude Desktop 4 deixa: os dados em %LOCALAPPDATA%\Claude-Data\claude_<editor>,
+// e as pastas antigas (pacote MSIX e %APPDATA%\Claude) só com a marca de mudança e uma
+// configuração velha, que o Claude não lê mais e que têm de ficar intactas.
 const profile = join(out, 'perfil');
 const profileEnv =
   process.platform === 'win32'
@@ -81,15 +82,24 @@ const profileEnv =
       : { XDG_CONFIG_HOME: join(profile, 'config') };
 const claudeDirs =
   process.platform === 'win32'
-    ? [join(profile, 'Roaming', 'Claude'), join(profile, 'Local', 'Packages', 'Claude_pzs8sxrjxfjjc', 'LocalCache', 'Roaming', 'Claude')]
+    ? [join(profile, 'Local', 'Claude-Data', 'claude_pzs8sxrjxfjjc')]
     : process.platform === 'darwin'
       ? []
       : [join(profile, 'config', 'Claude')];
+const claudeLeft =
+  process.platform === 'win32' ? [join(profile, 'Local', 'Packages', 'Claude_pzs8sxrjxfjjc', 'LocalCache', 'Roaming', 'Claude'), join(profile, 'Roaming', 'Claude')] : [];
 const claudeBefore = '\uFEFF{\r\n  "preferences": { "e2e": true },\r\n  "mcpServers": { "outro": { "command": "outro.exe", "args": [] } }\r\n}\r\n';
+const claudeStale = '{"mcpServers":{}}';
 for (const d of claudeDirs) mkdirSync(d, { recursive: true });
 if (claudeDirs[0]) writeFileSync(join(claudeDirs[0], 'claude_desktop_config.json'), claudeBefore);
+for (const d of claudeLeft) {
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, '.user-data-left.claude_pzs8sxrjxfjjc'), '');
+  writeFileSync(join(d, 'claude_desktop_config.json'), claudeStale);
+}
 
-const appEnv = { ...process.env, ...profileEnv, DIRETOR_BRIDGE_FILE: bridgeFile };
+// Perfil próprio do Electron: não esbarra num Diretor de verdade aberto na mesma máquina.
+const appEnv = { ...process.env, ...profileEnv, DIRETOR_BRIDGE_FILE: bridgeFile, DIRETOR_USER_DATA: join(out, 'perfil-electron') };
 if (installed) delete appEnv.DIRETOR_FFMPEG; // o app instalado tem de usar o ffmpeg que vem com ele
 const app = await _electron.launch({
   executablePath: installed ?? electronPath,
@@ -122,6 +132,9 @@ if (installed) {
 // Conectar ao Claude Desktop pelo botão do painel do Claude.
 let claudeEntry = { command: process.execPath, args: ['dist/mcp/server.cjs'] };
 if (claudeDirs.length) {
+  await page.waitForSelector('[data-testid=claude-connect]');
+  const steps = (await page.textContent('[data-testid=claude-setup]')) ?? '';
+  await shot('0-claude-passos');
   await page.click('[data-testid=claude-connect]');
   await page.waitForFunction(() => /Pronto/.test(document.querySelector('[data-testid=claude-setup-msg]')?.textContent ?? ''), null, { timeout: 10_000 });
   await shot('0-claude-conectado');
@@ -136,8 +149,10 @@ if (claudeDirs.length) {
       cfgs.every((c) => JSON.stringify(c.mcpServers.diretor) === JSON.stringify(entry)) &&
       cfgs[0].preferences?.e2e === true &&
       cfgs[0].mcpServers.outro?.command === 'outro.exe' &&
-      backup === claudeBefore,
-    `${claudeDirs.length} instalação(ões) do Claude Desktop: ${JSON.stringify(entry)}`,
+      backup === claudeBefore &&
+      claudeLeft.every((d) => readFileSync(join(d, 'claude_desktop_config.json'), 'utf8') === claudeStale && readdirSync(d).length === 2) &&
+      /Feche o Claude Desktop por completo/.test(steps),
+    `${claudeDirs.length} pasta(s) do Claude Desktop, ${claudeLeft.length} abandonada(s) intacta(s): ${JSON.stringify(entry)}`,
   );
   claudeEntry = entry;
 } else skip('botão Conectar grava a configuração do Claude Desktop', 'sem pasta do Claude Desktop simulada neste sistema');

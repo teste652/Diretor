@@ -15,11 +15,14 @@ Editor de vídeo para Windows com foco em motion graphics, feito para editar à 
 
 **[Diretor-Setup.exe](https://github.com/teste652/Diretor/releases/download/teste/Diretor-Setup.exe)**: sempre a versão mais nova da `main`, sem precisar de Node, Git nem comandos. O repositório é privado, então abra o link com a sua conta do GitHub conectada no navegador. Notas de cada versão: [versão de teste](https://github.com/teste652/Diretor/releases/tag/teste).
 
-1. Baixe e abra o `Diretor-Setup.exe`. O instalador ainda não tem assinatura digital, então o Windows pode avisar “O Windows protegeu o computador”: clique em **Mais informações → Executar assim mesmo**. Se o navegador disser que o arquivo não é baixado com frequência, escolha **Manter**.
-2. Ele instala sozinho, só para o seu usuário (em `%LOCALAPPDATA%\Programs`, sem pedir senha de administrador), cria o atalho no menu Iniciar e abre o Diretor. O ffmpeg e o servidor do Claude vêm dentro dele.
-3. Para atualizar, baixe de novo pelo mesmo link e instale por cima. A versão instalada aparece ao lado do nome, no canto superior esquerdo.
+1. Baixe o `Diretor-Setup.exe`. O instalador ainda não tem assinatura digital, então o navegador pode avisar que o arquivo não é baixado com frequência. No Edge: três pontinhos ao lado do download → **Manter** → **Mostrar mais** → **Manter mesmo assim**. No Chrome: **Manter**.
+2. Abra o arquivo. Se o Windows avisar “O Windows protegeu o computador”, clique em **Mais informações → Executar assim mesmo**. Se ele bloquear sem mostrar essa opção, é o Controle Inteligente de Aplicativos, que barra programas sem assinatura digital: por enquanto o Diretor não instala nesse computador.
+3. Ele instala sozinho, só para o seu usuário (em `%LOCALAPPDATA%\Programs`, sem pedir senha de administrador), cria o atalho no menu Iniciar e abre o Diretor. O ffmpeg e o servidor do Claude vêm dentro dele.
+4. Para atualizar: salve o projeto, feche o Diretor, baixe de novo pelo mesmo link e instale por cima (se o Diretor estiver aberto, o instalador pede para salvar e fechar; ele nunca fecha o editor à força). Se o Claude Desktop estava aberto, feche ele por completo e abra de novo depois. A versão instalada aparece ao lado do nome, no canto superior esquerdo.
 
-O GitHub Actions gera esse instalador a cada mudança na `main`, instala, roda nele o roteiro de ponta a ponta inteiro e só então troca o arquivo do link.
+Para desinstalar: **Configurações do Windows → Aplicativos → Diretor → Desinstalar**. O Diretor sai também da configuração do Claude Desktop (só a entrada desta instalação).
+
+O GitHub Actions gera esse instalador a cada mudança na `main`, instala, roda nele o roteiro de ponta a ponta inteiro, testa instalar por cima e desinstalar, e só então troca o arquivo do link.
 
 ## Instalação para desenvolver (Windows)
 
@@ -36,16 +39,23 @@ npm start
 
 O `npm install` baixa o ffmpeg para Windows x64. Em Windows ARM (ou se a rede bloquear o download) a instalação continua sem ele: instale o ffmpeg, deixe-o no PATH ou aponte a variável `DIRETOR_FFMPEG` para o `ffmpeg.exe`. O editor avisa se não encontrar o ffmpeg.
 
-Para gerar o instalador no seu computador: `npm run dist` (no Windows; sai em `release\Diretor-Setup.exe`). O ícone fica em `build/` (`node scripts/make-icon.mjs` redesenha a partir de `build/icon.svg`).
+Para gerar o instalador no seu computador: `npm run dist` (no Windows; sai em `release\Diretor-Setup.exe`). O ícone fica em `build/`. Para redesenhá-lo a partir de `build/icon.svg`: `npx playwright-core install chromium` (uma vez) e `node scripts/make-icon.mjs`.
 
 ## Conectar ao Claude Desktop
 
 1. Abra o Claude Desktop pelo menos uma vez neste computador.
-2. No Diretor, no painel do Claude (à direita), clique em **Conectar**.
-3. Feche o Claude Desktop por completo (botão direito no ícone dele, perto do relógio → **Sair**) e abra de novo. O conector “diretor” aparece na lista de ferramentas.
-4. Deixe o editor aberto. O painel mostra “Claude conectado” quando o Claude usa as ferramentas.
+2. Feche o Claude Desktop por completo (botão direito no ícone dele, perto do relógio → **Sair**; fechar a janela não basta). Aberto, ele pode regravar a configuração e desfazer a mudança.
+3. No Diretor, no painel do Claude (à direita), clique em **Conectar**.
+4. Abra o Claude Desktop de novo. O conector “diretor” aparece na lista de ferramentas.
+5. Deixe o editor aberto. O painel mostra “Claude conectado” quando o Claude usa as ferramentas.
 
-O botão grava o servidor “diretor” no `claude_desktop_config.json` do Claude Desktop e mantém o resto do arquivo (outros servidores e preferências). Antes, guarda uma cópia do arquivo como estava em `claude_desktop_config.antes-do-diretor.json`, na mesma pasta. Ele grava nas duas pastas que o Claude Desktop usa no Windows quando elas existem: a do instalador atual (pacote da Microsoft Store/MSIX, `%LOCALAPPDATA%\Packages\Claude_…\LocalCache\Roaming\Claude`) e a da instalação antiga (`%APPDATA%\Claude`). Arquivo com erro de formato não é tocado: o editor avisa e mostra onde ele está. O servidor roda com o próprio `Diretor.exe` (`ELECTRON_RUN_AS_NODE=1`), então não precisa do Node.
+O botão grava o servidor “diretor” no `claude_desktop_config.json` do Claude Desktop e mantém o resto do arquivo (outros servidores e preferências). Na primeira vez, guarda uma cópia do arquivo como estava em `claude_desktop_config.antes-do-diretor.json`, na mesma pasta (as vezes seguintes não substituem essa cópia). Arquivo com erro de formato não é tocado: o editor avisa e mostra onde ele está. O servidor roda com o próprio `Diretor.exe` (`ELECTRON_RUN_AS_NODE=1`), então não precisa do Node.
+
+Onde o Claude Desktop guarda a configuração no Windows, e onde o botão grava:
+
+- **Claude Desktop 4** (o atual): `%LOCALAPPDATA%\Claude-Data\claude_…`. Ao mudar para essa pasta, o Claude deixa nas pastas antigas só uma marca (`.user-data-left.…`) e não lê mais nada delas, então o botão não grava lá.
+- **Instalador da Microsoft Store/MSIX mais antigo:** `%LOCALAPPDATA%\Packages\Claude_…\LocalCache\Roaming\Claude`. Quando essa pasta ainda não tem o arquivo, o Claude lê o de `%APPDATA%\Claude`, e o botão grava nesse.
+- **Instalação clássica:** `%APPDATA%\Claude`.
 
 **À mão:** “Copiar configuração”, no mesmo painel, copia o trecho com os caminhos certos deste computador. Cole dentro de `claude_desktop_config.json` (se já houver outros servidores em `mcpServers`, só acrescente `"diretor"`). No app instalado, fica assim:
 
@@ -61,7 +71,7 @@ O botão grava o servidor “diretor” no `claude_desktop_config.json` do Claud
 }
 ```
 
-Na cópia de desenvolvimento, o botão grava o Electron do projeto no lugar do `Diretor.exe`; `npm run build` e depois `npm run mcp:config` imprimem o trecho (também numa versão com `node`). Atenção: no Claude Desktop do instalador atual, **Configurações → Desenvolvedor → Editar configuração** pode abrir o arquivo da instalação antiga, que ele não lê; o botão **Conectar** grava nos dois.
+Na cópia de desenvolvimento, o botão grava o Electron do projeto no lugar do `Diretor.exe`; `npm run build` e depois `npm run mcp:config` imprimem o trecho (também numa versão com `node`). Se for colar à mão, use o arquivo que o próprio Claude abre em **Configurações → Desenvolvedor → Editar configuração**, com o Claude fechado na hora de salvar.
 
 Como funciona: o Claude Desktop inicia `server.cjs`; ele conversa com o editor aberto por uma ponte em `127.0.0.1` protegida por um token aleatório (arquivo `%LOCALAPPDATA%\Diretor\bridge.json`). O editor funciona normalmente sem a IA.
 
@@ -93,14 +103,14 @@ As operações são as mesmas que a interface usa (`src/core/operations.ts`): `a
 ## Testes
 
 ```bash
-npm test            # 100 testes: unitários + MCP real (cliente MCP → servidor stdio → ponte → editor) + exportação com ffmpeg
+npm test            # 121 testes: unitários + MCP real (cliente MCP → servidor stdio → ponte → editor) + exportação com ffmpeg
 npm run typecheck
 npm run test:e2e    # abre o app Electron e roda o roteiro da especificação (no Linux sem tela: xvfb-run -a node scripts/e2e.mjs)
 ```
 
-O teste de ponta a ponta (45 verificações) conecta o Claude Desktop pelo botão **Conectar** (num perfil de usuário de mentira, com outra configuração que precisa continuar intacta), importa e apara um MP4 com acento no nome, cria legenda e título, faz um cliente MCP, iniciado exatamente pelo comando que o botão gravou, pedir “subir suavemente no começo e desaparecer no fim”, ajusta a duração à mão (e desfaz/refaz dentro do rascunho), aceita a entrada, descarta a saída, testa proposta desatualizada, chamada repetida e conflito de `requestId`, o Claude parando no meio de uma espera, desfaz/refaz, salva/reabre e exporta. Depois compara prévia × MP4 em 10 quadros (PSNR > 30 dB) e confere, pelo contador do vídeo de teste, que os dois mostram o quadro exato do original. Também testa vídeo ausente, cancelar a exportação no meio, na conferência e no último quadro (sem apagar o arquivo que já existia nem deixar ffmpeg rodando), exportar com nome longo e acentuado, exportar por cima de um arquivo aberto em outro programa e cancelar enquanto o editor espera ele soltar (no Windows, preso de verdade por outro processo; no Linux, um arquivo imutável), a interface caindo no meio da exportação, e na interface: campo numérico ao trocar de clipe, arrasto da borda do vídeo, lixeira com ponto selecionado e o painel do modo econômico. Capturas e o MP4 ficam em `.test-output/`.
+O teste de ponta a ponta (45 verificações) conecta o Claude Desktop pelo botão **Conectar** (num perfil de usuário de mentira, com outra configuração que precisa continuar intacta e, no Windows, com as pastas antigas que o Claude Desktop 4 abandonou, que não podem ser tocadas), importa e apara um MP4 com acento no nome, cria legenda e título, faz um cliente MCP, iniciado exatamente pelo comando que o botão gravou, pedir “subir suavemente no começo e desaparecer no fim”, ajusta a duração à mão (e desfaz/refaz dentro do rascunho), aceita a entrada, descarta a saída, testa proposta desatualizada, chamada repetida e conflito de `requestId`, o Claude parando no meio de uma espera, desfaz/refaz, salva/reabre e exporta. Depois compara prévia × MP4 em 10 quadros (PSNR > 30 dB) e confere, pelo contador do vídeo de teste, que os dois mostram o quadro exato do original. Também testa vídeo ausente, cancelar a exportação no meio, na conferência e no último quadro (sem apagar o arquivo que já existia nem deixar ffmpeg rodando), exportar com nome longo e acentuado, exportar por cima de um arquivo aberto em outro programa e cancelar enquanto o editor espera ele soltar (no Windows, preso de verdade por outro processo; no Linux, um arquivo imutável), a interface caindo no meio da exportação, e na interface: campo numérico ao trocar de clipe, arrasto da borda do vídeo, lixeira com ponto selecionado e o painel do modo econômico. Capturas e o MP4 ficam em `.test-output/`.
 
-O GitHub Actions roda tudo isso no Windows em cada PR e na `main` (`.github/workflows/ci.yml`) e guarda as capturas e o MP4 como artefato. Depois gera o instalador, instala do jeito que um usuário instalaria e roda o mesmo roteiro no app instalado (`DIRETOR_APP=<Diretor.exe> node scripts/e2e.mjs`, 47 verificações: também confere que o ffmpeg e o servidor do Claude usados são os que vêm dentro dele). Na `main`, só então publica o instalador no link fixo.
+O GitHub Actions roda tudo isso no Windows em cada PR e na `main` (`.github/workflows/ci.yml`) e guarda as capturas e o MP4 como artefato. Depois gera o instalador, instala do jeito que um usuário instalaria e roda o mesmo roteiro no app instalado (`DIRETOR_APP=<Diretor.exe> node scripts/e2e.mjs`, 47 verificações: também confere que o ffmpeg e o servidor do Claude usados são os que vêm dentro dele). Em seguida instala por cima com o servidor do Claude aberto (`node scripts/installer-check.mjs atualizar`: o instalador fecha o servidor e troca os arquivos) e desinstala (`desinstalar`: o Diretor sai da configuração do Claude Desktop e o resto fica). Na `main`, só então publica o instalador no link fixo.
 
 ### Roteiro para testar no seu computador
 

@@ -51,5 +51,5 @@ Limitação conhecida: dois presets na mesma propriedade (ex.: `popOut` e depois
 
 - Fase 1 implementada, revisada a fundo e testada automaticamente no Linux (unitários, MCP real, exportação, e2e no Electron com xvfb) e no Windows pelo GitHub Actions.
 - Falta verificar à mão no Windows e com o Claude Desktop real (ver `docs/ROTEIRO-DE-TESTE.md`).
-- Instalador: `npm run dist` (electron-builder, NSIS por usuário). O CI gera, instala e testa a cada mudança e publica na `main` em https://github.com/teste652/Diretor/releases/download/teste/Diretor-Setup.exe. O botão “Conectar” no painel do Claude grava a configuração do Claude Desktop (instalação MSIX e antiga).
+- Instalador: `npm run dist` (electron-builder, NSIS por usuário). O CI gera, instala e testa a cada mudança e publica na `main` em https://github.com/teste652/Diretor/releases/download/teste/Diretor-Setup.exe. O botão “Conectar” no painel do Claude grava a configuração do Claude Desktop na pasta que cada versão dele lê (Claude-Data no Claude Desktop 4, MSIX mais antigo e instalação clássica). Instalar por cima nunca fecha o editor à força, e desinstalar tira o Diretor da configuração do Claude Desktop.
 - Próximo passo: rodar o roteiro no Windows com o instalador, corrigir o que aparecer e começar as máscaras/imagens.

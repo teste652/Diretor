@@ -1,5 +1,5 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell } from 'electron';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { closeSync, createReadStream, existsSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve } from 'node:path';
@@ -444,9 +444,28 @@ function mcpEntry(): McpEntry {
   return { command: process.execPath, args: [unpackedPath(join(__dirname, '..', 'mcp', 'server.cjs'))], env: { ELECTRON_RUN_AS_NODE: '1' } };
 }
 
-ipcMain.handle('claude:status', () => {
+/**
+ * O Claude Desktop está aberto? Aberto, ele pode regravar a configuração e desfazer o
+ * Conectar, e só lê a configuração ao abrir. null quando não dá para saber.
+ */
+function claudeDesktopRunning(): Promise<boolean | null> {
+  return new Promise((done) => {
+    if (process.platform === 'win32') {
+      // Só o app (pacote da Microsoft Store ou instalação clássica), não o Claude Code, que também se chama claude.exe.
+      const ps = "@(Get-Process -Name claude -ErrorAction SilentlyContinue | Where-Object { $_.Path -match 'WindowsApps|AnthropicClaude' }).Count";
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { timeout: 8000, windowsHide: true }, (err, out) => {
+        const n = Number(String(out).trim());
+        done(err || !Number.isFinite(n) ? null : n > 0);
+      });
+    } else if (process.platform === 'darwin') {
+      execFile('pgrep', ['-x', 'Claude'], { timeout: 4000 }, (err) => done(!err ? true : err.code === 1 ? false : null));
+    } else done(null);
+  });
+}
+
+ipcMain.handle('claude:status', async () => {
   const entry = mcpEntry();
-  return { configs: readClaudeConfigs(claudeConfigDirs(), entry), serverFound: existsSync(entry.args[0]) };
+  return { configs: readClaudeConfigs(claudeConfigDirs(), entry), serverFound: existsSync(entry.args[0]), claudeRunning: await claudeDesktopRunning() };
 });
 
 ipcMain.handle('claude:connect', async () => {
@@ -535,6 +554,9 @@ function createWindow(): void {
 }
 
 let closeBridge: (() => void) | null = null;
+
+// Testes: um perfil próprio, para não esbarrar num Diretor de verdade aberto na mesma máquina.
+if (process.env.DIRETOR_USER_DATA) app.setPath('userData', process.env.DIRETOR_USER_DATA);
 
 // Uma instância só: duas brigariam pelo arquivo da ponte e o Claude falaria com a errada.
 if (!app.requestSingleInstanceLock()) {

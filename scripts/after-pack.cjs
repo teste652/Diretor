@@ -13,6 +13,9 @@ exports.default = async function afterPack(context) {
   if (!existsSync(ffmpeg)) {
     throw new Error(`O ffmpeg para ${name} não está no pacote (${ffmpeg}). Gere o instalador no próprio ${name}, depois de "npm ci".`);
   }
-  const server = join(resources, 'app.asar.unpacked', 'dist', 'mcp', 'server.cjs');
-  if (!existsSync(server)) throw new Error(`O servidor do Claude não está fora do app.asar (${server}). Rode "npm run build" antes.`);
+  // O servidor do Claude e o que o desinstalador usa para desconectá-lo ficam fora do app.asar, para poderem ser executados.
+  for (const file of ['server.cjs', 'desconectar.cjs']) {
+    const p = join(resources, 'app.asar.unpacked', 'dist', 'mcp', file);
+    if (!existsSync(p)) throw new Error(`${file} não está fora do app.asar (${p}). Rode "npm run build" antes.`);
+  }
 };
