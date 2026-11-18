@@ -4,3 +4,12 @@ out/
 *.log
 .test-output/
 release/
+
+# Nunca versionar segredos nem arquivos locais com dados da máquina
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+bridge.json
