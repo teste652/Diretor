@@ -1,5 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from 'electron';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell } from 'electron';
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { closeSync, createReadStream, existsSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve } from 'node:path';
@@ -8,6 +8,7 @@ import { buildFfmpegArgs, parseFfmpegProbe } from '../core/export';
 import type { Project } from '../core/model';
 import { bridgeFilePath } from '../shared/paths';
 import { startBridge } from './bridge';
+import { claudeConfigDirs, connectClaude, type McpEntry, readClaudeConfigs, unpackedPath } from './claudeDesktop';
 import { type MoveResult, moveIntoPlace } from './replace';
 
 app.setName('Diretor');
@@ -30,8 +31,9 @@ function ffmpegPath(): string {
   return 'ffmpeg';
 }
 
-const FFMPEG_MISSING =
-  'Não encontrei o ffmpeg. Rode "npm install" de novo ou instale o ffmpeg e coloque no PATH (ou aponte a variável DIRETOR_FFMPEG para o ffmpeg.exe).';
+const FFMPEG_MISSING = app.isPackaged
+  ? 'Não encontrei o ffmpeg que vem com o Diretor. Instale o Diretor de novo (às vezes o antivírus apaga o ffmpeg.exe).'
+  : 'Não encontrei o ffmpeg. Rode "npm install" de novo ou instale o ffmpeg e coloque no PATH (ou aponte a variável DIRETOR_FFMPEG para o ffmpeg.exe).';
 
 function probe(path: string): Promise<ReturnType<typeof parseFfmpegProbe> | { error: string }> {
   return new Promise((resolve) => {
@@ -432,9 +434,60 @@ ipcMain.handle('export:cancel', async (_e, jobId: number) => {
   return true;
 });
 
+// ---------- Claude Desktop ----------
+/**
+ * Como o Claude Desktop inicia o servidor MCP: o próprio executável do Diretor
+ * rodando como Node (ELECTRON_RUN_AS_NODE), então não precisa instalar o Node.
+ * No instalador, o servidor fica fora do app.asar para poder ser executado.
+ */
+function mcpEntry(): McpEntry {
+  return { command: process.execPath, args: [unpackedPath(join(__dirname, '..', 'mcp', 'server.cjs'))], env: { ELECTRON_RUN_AS_NODE: '1' } };
+}
+
+/**
+ * O Claude Desktop está aberto? Aberto, ele pode regravar a configuração e desfazer o
+ * Conectar, e só lê a configuração ao abrir. null quando não dá para saber.
+ */
+function claudeDesktopRunning(): Promise<boolean | null> {
+  return new Promise((done) => {
+    if (process.platform === 'win32') {
+      // Só o app (pacote da Microsoft Store ou instalação clássica), não o Claude Code, que também se chama claude.exe.
+      const ps = "@(Get-Process -Name claude -ErrorAction SilentlyContinue | Where-Object { $_.Path -match 'WindowsApps|AnthropicClaude' }).Count";
+      // Aberto de um terminal do PowerShell 7, o Diretor herda uma lista de módulos que o Windows PowerShell não carrega.
+      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toLowerCase() !== 'psmodulepath'));
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { env, timeout: 8000, windowsHide: true }, (err, out) => {
+        const n = Number(String(out).trim());
+        done(err || !Number.isFinite(n) ? null : n > 0);
+      });
+    } else if (process.platform === 'darwin') {
+      execFile('pgrep', ['-x', 'Claude'], { timeout: 4000 }, (err) => done(!err ? true : err.code === 1 ? false : null));
+    } else done(null);
+  });
+}
+
+ipcMain.handle('claude:status', async () => {
+  const entry = mcpEntry();
+  return { configs: readClaudeConfigs(claudeConfigDirs(), entry), serverFound: existsSync(entry.args[0]), claudeRunning: await claudeDesktopRunning() };
+});
+
+ipcMain.handle('claude:connect', async () => {
+  const entry = mcpEntry();
+  if (!existsSync(entry.args[0])) return { error: `Não encontrei o servidor do Claude em ${entry.args[0]}. Instale o Diretor de novo.` };
+  return { results: await connectClaude(claudeConfigDirs(), entry) };
+});
+
+/** O trecho para colar à mão no claude_desktop_config.json. */
+ipcMain.handle('claude:copyConfig', () => {
+  clipboard.writeText(JSON.stringify({ mcpServers: { diretor: mcpEntry() } }, null, 2));
+  return true;
+});
+
 ipcMain.handle('app:info', () => ({
+  version: app.getVersion(),
+  packaged: app.isPackaged,
+  ffmpeg: ffmpegPath(),
+  mcp: mcpEntry(),
   bridgeFile: bridgeFilePath(),
-  mcpServer: join(app.getAppPath(), 'dist', 'mcp', 'server.cjs'),
   platform: process.platform,
 }));
 
@@ -503,6 +556,9 @@ function createWindow(): void {
 }
 
 let closeBridge: (() => void) | null = null;
+
+// Testes: um perfil próprio, para não esbarrar num Diretor de verdade aberto na mesma máquina.
+if (process.env.DIRETOR_USER_DATA) app.setPath('userData', process.env.DIRETOR_USER_DATA);
 
 // Uma instância só: duas brigariam pelo arquivo da ponte e o Claude falaria com a errada.
 if (!app.requestSingleInstanceLock()) {

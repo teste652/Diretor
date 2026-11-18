@@ -1,6 +1,8 @@
 // Teste de ponta a ponta no aplicativo Electron real (roteiro da especificação).
 // Em Linux sem tela: xvfb-run -a node scripts/e2e.mjs
 // Gera capturas e o MP4 exportado em .test-output/.
+// Com DIRETOR_APP=<caminho do Diretor.exe instalado>, testa o app instalado pelo
+// instalador (ffmpeg e servidor do Claude que vêm dentro dele) em vez da cópia de desenvolvimento.
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
@@ -59,11 +61,51 @@ const psnr = (a, b, crop) => {
 // MP4 curto de teste: 6 s, 1280x720, 30 fps, com áudio. O testsrc2 escreve o número do quadro no canto superior esquerdo.
 execFileSync(FFMPEG, ['-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30:duration=6', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=6', '-shortest', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', src]);
 
+// O app instalado (teste do instalador) ou a cópia de desenvolvimento.
+const installed = process.env.DIRETOR_APP ? resolve(process.env.DIRETOR_APP) : null;
+if (installed && !existsSync(installed)) {
+  console.error(`✗ DIRETOR_APP aponta para um arquivo que não existe: ${installed}`);
+  process.exit(2);
+}
+
+// Um perfil de usuário de mentira, com um Claude Desktop já usado: o botão "Conectar" grava nele.
+// A configuração tem outro servidor e preferências (com BOM e CRLF, como o Bloco de Notas grava).
+// No Windows, como o Claude Desktop 4 deixa: os dados em %LOCALAPPDATA%\Claude-Data\claude_<editor>,
+// e as pastas antigas (pacote MSIX e %APPDATA%\Claude) só com a marca de mudança e uma
+// configuração velha, que o Claude não lê mais e que têm de ficar intactas.
+const profile = join(out, 'perfil');
+const profileEnv =
+  process.platform === 'win32'
+    ? { APPDATA: join(profile, 'Roaming'), LOCALAPPDATA: join(profile, 'Local') }
+    : process.platform === 'darwin'
+      ? {}
+      : { XDG_CONFIG_HOME: join(profile, 'config') };
+const claudeDirs =
+  process.platform === 'win32'
+    ? [join(profile, 'Local', 'Claude-Data', 'claude_pzs8sxrjxfjjc')]
+    : process.platform === 'darwin'
+      ? []
+      : [join(profile, 'config', 'Claude')];
+const claudeLeft =
+  process.platform === 'win32' ? [join(profile, 'Local', 'Packages', 'Claude_pzs8sxrjxfjjc', 'LocalCache', 'Roaming', 'Claude'), join(profile, 'Roaming', 'Claude')] : [];
+const claudeBefore = '\uFEFF{\r\n  "preferences": { "e2e": true },\r\n  "mcpServers": { "outro": { "command": "outro.exe", "args": [] } }\r\n}\r\n';
+const claudeStale = '{"mcpServers":{}}';
+for (const d of claudeDirs) mkdirSync(d, { recursive: true });
+if (claudeDirs[0]) writeFileSync(join(claudeDirs[0], 'claude_desktop_config.json'), claudeBefore);
+for (const d of claudeLeft) {
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, '.user-data-left.claude_pzs8sxrjxfjjc'), '');
+  writeFileSync(join(d, 'claude_desktop_config.json'), claudeStale);
+}
+
+// Perfil próprio do Electron: não esbarra num Diretor de verdade aberto na mesma máquina.
+const appEnv = { ...process.env, ...profileEnv, DIRETOR_BRIDGE_FILE: bridgeFile, DIRETOR_USER_DATA: join(out, 'perfil-electron') };
+if (installed) delete appEnv.DIRETOR_FFMPEG; // o app instalado tem de usar o ffmpeg que vem com ele
 const app = await _electron.launch({
-  executablePath: electronPath,
+  executablePath: installed ?? electronPath,
   // --no-sandbox só no Linux do contêiner (roda como root); no Windows o sandbox fica ligado.
-  args: ['dist/main/main.cjs', ...(process.platform === 'linux' ? ['--no-sandbox'] : []), '--disable-gpu'],
-  env: { ...process.env, DIRETOR_BRIDGE_FILE: bridgeFile },
+  args: [...(installed ? [] : ['dist/main/main.cjs']), ...(process.platform === 'linux' ? ['--no-sandbox'] : []), '--disable-gpu'],
+  env: appEnv,
 });
 const page = await app.firstWindow();
 await page.setViewportSize({ width: 1480, height: 920 }).catch(() => undefined);
@@ -72,6 +114,48 @@ const ev = (fn, arg) => page.evaluate(fn, arg);
 const shot = (name) => page.screenshot({ path: join(out, `${name}.png`) });
 const settled = () => page.evaluate(() => window.__diretor.previewSettled());
 check('ponte segura com o processo principal (preload em sandbox)', await ev(() => typeof window.diretor?.probeMedia === 'function' && typeof window.require === 'undefined'));
+
+const info = await ev(() => window.diretor.appInfo());
+// No Windows, maiúsculas e minúsculas no caminho não importam.
+const samePath = (a, b) => (process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b));
+if (installed) {
+  const unpacked = (p) => /[\\/]app\.asar\.unpacked[\\/]/.test(p) && existsSync(p);
+  check(
+    'app instalado: ffmpeg e servidor do Claude vêm dentro dele (fora do app.asar)',
+    info.packaged && unpacked(info.ffmpeg) && unpacked(info.mcp.args[0]) && samePath(info.mcp.command, installed),
+    JSON.stringify({ ffmpeg: info.ffmpeg, mcp: info.mcp }),
+  );
+  const shown = await page.textContent('[data-testid=app-version]').catch(() => null);
+  check('app instalado: mostra a versão ao lado do nome', shown === info.version && /^\d+\.\d+\.\d+/.test(shown), String(shown));
+}
+
+// Conectar ao Claude Desktop pelo botão do painel do Claude.
+let claudeEntry = { command: process.execPath, args: ['dist/mcp/server.cjs'] };
+if (claudeDirs.length) {
+  await page.waitForSelector('[data-testid=claude-connect]');
+  const steps = (await page.textContent('[data-testid=claude-setup]')) ?? '';
+  await shot('0-claude-passos');
+  await page.click('[data-testid=claude-connect]');
+  await page.waitForFunction(() => /Pronto/.test(document.querySelector('[data-testid=claude-setup-msg]')?.textContent ?? ''), null, { timeout: 10_000 });
+  await shot('0-claude-conectado');
+  const cfgs = claudeDirs.map((d) => JSON.parse(readFileSync(join(d, 'claude_desktop_config.json'), 'utf8')));
+  const entry = cfgs[0].mcpServers?.diretor;
+  const backup = readFileSync(join(claudeDirs[0], 'claude_desktop_config.antes-do-diretor.json'), 'utf8');
+  check(
+    'botão Conectar grava o Diretor na configuração do Claude Desktop sem estragar o resto',
+    entry?.command === info.mcp.command &&
+      entry?.env?.ELECTRON_RUN_AS_NODE === '1' &&
+      existsSync(entry?.args?.[0] ?? '') &&
+      cfgs.every((c) => JSON.stringify(c.mcpServers.diretor) === JSON.stringify(entry)) &&
+      cfgs[0].preferences?.e2e === true &&
+      cfgs[0].mcpServers.outro?.command === 'outro.exe' &&
+      backup === claudeBefore &&
+      claudeLeft.every((d) => readFileSync(join(d, 'claude_desktop_config.json'), 'utf8') === claudeStale && readdirSync(d).length === 2) &&
+      /Feche o Claude Desktop por completo/.test(steps),
+    `${claudeDirs.length} pasta(s) do Claude Desktop, ${claudeLeft.length} abandonada(s) intacta(s): ${JSON.stringify(entry)}`,
+  );
+  claudeEntry = entry;
+} else skip('botão Conectar grava a configuração do Claude Desktop', 'sem pasta do Claude Desktop simulada neste sistema');
 
 // 1. Importar e aparar (as mesmas operações de arrastar as bordas do clipe)
 await ev((p) => window.__diretor.importPaths([p]), src);
@@ -106,9 +190,10 @@ await ev(() => {
 });
 check('legenda manual e título', await ev(() => window.__diretor.session.project.clips.length === 3));
 
-// 2. Claude Desktop (simulado por um cliente MCP real) propõe a animação
+// 2. Claude Desktop (simulado por um cliente MCP real) propõe a animação. Ele inicia o servidor
+// exatamente como o botão Conectar gravou (o executável do Diretor rodando como Node).
 const client = new Client({ name: 'e2e', version: '1' });
-await client.connect(new StdioClientTransport({ command: process.execPath, args: ['dist/mcp/server.cjs'], env: { ...process.env, DIRETOR_BRIDGE_FILE: bridgeFile } }));
+await client.connect(new StdioClientTransport({ command: claudeEntry.command, args: claudeEntry.args, env: { ...process.env, ...claudeEntry.env, DIRETOR_BRIDGE_FILE: bridgeFile } }));
 const tool = async (name, args = {}) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
 const ctx = await tool('get_context');
 check('Claude lê a seleção (modo econômico)', ctx.selection?.[0]?.id === 'ttl_e2e', `${JSON.stringify(ctx).length} bytes`);

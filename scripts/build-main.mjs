@@ -7,4 +7,6 @@ await Promise.all([
   build({ ...common, entryPoints: ['src/preload/preload.ts'], outfile: 'dist/preload/preload.cjs', external: ['electron'] }),
   // O servidor MCP é autocontido: o Claude Desktop o executa com Node (ou com o próprio Electron).
   build({ ...common, entryPoints: ['src/mcp/server.ts'], outfile: 'dist/mcp/server.cjs' }),
+  // O desinstalador do Windows roda este para tirar o Diretor da configuração do Claude Desktop.
+  build({ ...common, entryPoints: ['src/main/disconnect-cli.ts'], outfile: 'dist/mcp/desconectar.cjs' }),
 ]);

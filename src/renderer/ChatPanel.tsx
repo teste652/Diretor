@@ -3,7 +3,8 @@ import { describeOp } from '../core/operations';
 import type { Proposal } from '../core/session';
 import { bridgeStats } from './bridgeClient';
 import { useSession } from './store';
-import { Icon, NumberField } from './ui';
+import { COPIED, connectOutcome, NOT_FOUND, type ClaudeStatus, type Outcome, quitHint, setupView } from './claudeSetupText';
+import { Icon, NumberField, showToast } from './ui';
 
 const STEP_LABEL: Record<string, string> = { waiting: 'na fila', draft: 'em rascunho', accepted: 'aceita', discarded: 'descartada', invalid: 'inválida' };
 const kb = (b: number) => `${(b / 1024).toFixed(1)} KB`;
@@ -49,6 +50,7 @@ export function ChatPanel() {
 
       {/* Uma área só rola: atividade, pedido de contexto e a proposta. Os botões de decisão ficam sempre à vista. */}
       <div className="assist-scroll" ref={feedRef}>
+      {!connected && <ClaudeSetup />}
       <div className="feed">
         {s.activity.slice(-40).map((a) => (
           <div key={a.id} className={`item ${a.kind === 'note' ? 'note' : ''}`}>
@@ -190,6 +192,97 @@ function ProposalCard({ p }: { p: Proposal }) {
           </div>
         )
       )}
+    </div>
+  );
+}
+
+/** Liga o Claude Desktop ao Diretor com um clique, sem editar arquivo à mão. */
+function ClaudeSetup() {
+  const api = window.diretor;
+  const [st, setSt] = useState<ClaudeStatus | null>(null);
+  const [result, setResult] = useState<Outcome | null>(null);
+  const [busy, setBusy] = useState(false);
+  const mac = /Mac/.test(navigator.userAgent);
+  const refresh = () =>
+    api?.claudeStatus().then(
+      (next) => {
+        setSt(next);
+        // Se o Claude regravou o arquivo e tirou o Diretor, o cartão volta a mostrar os passos.
+        setResult((r) => (r?.tone === 'ok' && setupView(next).kind !== 'ready' ? null : r));
+      },
+      () => undefined,
+    );
+  // Confere de novo de tempos em tempos: o Claude pode ser fechado, aberto ou instalado com o cartão na tela.
+  useEffect(() => {
+    void refresh();
+    const t = setInterval(() => {
+      if (document.visibilityState === 'visible') void refresh();
+    }, 5000);
+    return () => clearInterval(t);
+  }, []);
+  if (!api || !st) return null;
+
+  const view = setupView(st);
+  const quit = quitHint(mac);
+  const connect = async () => {
+    setBusy(true);
+    try {
+      setResult(connectOutcome(await api.connectClaude(), st.claudeRunning, mac));
+    } catch (e) {
+      setResult({ tone: 'error', text: `Não consegui conectar: ${(e as Error).message}` });
+    } finally {
+      setBusy(false);
+      void refresh();
+    }
+  };
+  const copy = async () => {
+    await api.copyClaudeConfig();
+    showToast(COPIED);
+  };
+  const done = result ? result.tone === 'ok' : view.kind === 'ready';
+  const file = result?.file ?? (!result && view.kind === 'broken' ? view.file : undefined);
+
+  let message: string;
+  if (result) message = result.text;
+  else if (view.kind === 'not-found') message = NOT_FOUND;
+  else if (view.kind === 'ready') message = `O Claude Desktop já está configurado. Se o conector “diretor” não aparece nele, feche o Claude Desktop por completo (${quit}) e abra de novo.`;
+  else if (view.kind === 'broken') message = `O arquivo de configuração do Claude Desktop tem um erro (${view.error}), então não mexi nele. Corrija o arquivo ou use “Copiar configuração”.`;
+  else message = 'Um clique e o Claude Desktop passa a enxergar o Diretor. O resto da configuração dele fica como está.';
+
+  return (
+    <div className={`card ${done ? 'draft' : ''}`} data-testid="claude-setup">
+      <h3 style={{ marginTop: 0 }}>{done ? 'Claude Desktop configurado' : 'Conectar ao Claude Desktop'}</h3>
+      <p data-testid="claude-setup-msg" style={result && result.tone !== 'ok' ? { color: 'var(--warn)' } : undefined}>
+        {message}
+      </p>
+      {!result && view.kind === 'steps' && (
+        <ol className="setup-steps">
+          <li>Feche o Claude Desktop por completo ({quit}).</li>
+          <li>Clique em Conectar.</li>
+          <li>Abra o Claude Desktop de novo.</li>
+        </ol>
+      )}
+      {!done && st.claudeRunning && view.kind !== 'not-found' && (
+        <p style={{ color: 'var(--warn)' }} data-testid="claude-running">
+          O Claude Desktop ainda está aberto. Feche ele antes de conectar: aberto, ele pode desfazer a mudança.
+        </p>
+      )}
+      {!st.serverFound && <p style={{ color: 'var(--warn)' }}>O servidor do Claude não está na pasta do Diretor. Instale o Diretor de novo.</p>}
+      <div className="row" style={{ flexWrap: 'wrap' }}>
+        {!done && view.kind !== 'broken' && (
+          <button className="btn primary" disabled={busy} onClick={() => void connect()} data-testid="claude-connect">
+            {busy ? 'Conectando…' : 'Conectar'}
+          </button>
+        )}
+        <button className="btn" onClick={() => void copy()} data-testid="claude-copy" title="Para colar à mão no claude_desktop_config.json">
+          Copiar configuração
+        </button>
+        {file && (
+          <button className="btn ghost" onClick={() => void api.showItem(file)}>
+            Mostrar o arquivo
+          </button>
+        )}
+      </div>
     </div>
   );
 }
