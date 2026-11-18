@@ -41,6 +41,24 @@ function startBystander() {
 }
 const bystanderName = 'um Diretor.exe de outra pasta continua aberto (só fecha o que roda da pasta instalada)';
 
+// Quando o outro Diretor.exe foi fechado, o instalador não usou o PowerShell (fechou pelo nome do
+// programa). Mostra o que o PowerShell de 32 bits, o que o instalador usa, responde aqui.
+function powershellReport() {
+  const ps = join(process.env.SystemRoot ?? 'C:\\Windows', 'SysWOW64', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const tests = {
+    'Get-CimInstance existe': 'if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }',
+    'política de execução': "if ((Get-ExecutionPolicy -Scope Process) -eq 'Restricted') { exit 1 } else { exit 0 }",
+  };
+  const withoutModules = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toLowerCase() !== 'psmodulepath'));
+  console.log(`  PSModulePath: ${process.env.PSModulePath ?? '(nenhum)'}`);
+  for (const [label, env] of [['com o ambiente deste passo', process.env], ['sem PSModulePath', withoutModules]]) {
+    for (const [name, cmd] of Object.entries(tests)) {
+      const r = spawnSync(ps, ['-NoProfile', '-NonInteractive', '-Command', cmd], { env, encoding: 'utf8', timeout: 60_000 });
+      console.log(`  ${name}, ${label}: código ${r.status}${r.error ? `, ${r.error.message}` : ''}${r.stderr?.trim() ? `\n${r.stderr.trim()}` : ''}`);
+    }
+  }
+}
+
 if (mode === 'atualizar') {
   // O servidor aberto como o Claude Desktop abre: o próprio Diretor.exe rodando como Node, com a entrada ligada.
   const srv = spawn(app, [server], {
@@ -76,6 +94,7 @@ if (mode === 'atualizar') {
   check('o instalador fechou o servidor do Claude', exited);
   check('a versão nova ficou no lugar da antiga', existsSync(app) && existsSync(server) && !existsSync(mark));
   check(bystanderName, !bystander.exited);
+  if (bystander.exited) powershellReport();
   if (!exited) srv.kill();
   bystander.proc.kill();
 } else {
@@ -110,6 +129,7 @@ if (mode === 'atualizar') {
   const r = spawnSync(join(installDir, 'Uninstall Diretor.exe'), ['/S', `_?=${installDir}`], { stdio: 'inherit', timeout: 300_000 });
   check('desinstalar sem perguntas', r.status === 0, `código ${r.status}${r.error ? `, ${r.error.message}` : ''}`);
   check(bystanderName, !bystander.exited);
+  if (bystander.exited) powershellReport();
   bystander.proc.kill();
   check('os arquivos do Diretor saíram', !existsSync(app) && !existsSync(server));
   const after = JSON.parse(readFileSync(join(classic, CONFIG), 'utf8'));

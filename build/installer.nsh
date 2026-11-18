@@ -3,13 +3,16 @@
 ;
 ; Instalar por cima e desinstalar: o padrão fecha à força tudo o que roda da pasta do
 ; Diretor. Aqui:
-; - o servidor que o Claude Desktop abriu (Diretor.exe rodando server.cjs) é fechado sem
-;   perguntar, porque não guarda nada. O Claude só o abre de novo quando reinicia, então o
-;   instalador avisa para fechar e abrir o Claude depois.
 ; - o editor nunca é fechado à força com a pessoa olhando: pode ter um projeto sem salvar.
 ;   O instalador pede para salvar e fechar. Só no modo silencioso (/S) ele é fechado.
+; - depois, o servidor que o Claude Desktop abriu (Diretor.exe rodando server.cjs) é fechado
+;   sem perguntar, porque não guarda nada. O Claude só o abre de novo quando reinicia, então,
+;   com os arquivos novos no lugar, o instalador avisa para fechar e abrir o Claude.
+; - só fecha o que roda da pasta instalada: um Diretor.exe de outra pasta continua aberto.
 ;
-; Desinstalar (não ao atualizar): tira o Diretor da configuração do Claude Desktop.
+; Desinstalar (não ao atualizar): tira o Diretor da configuração do Claude Desktop. Antes,
+; se o Claude Desktop está aberto, pede para fechá-lo, senão ele pode gravar de volta a
+; configuração que carregou ao abrir.
 
 ; Processos que rodam da pasta do Diretor ($l), menos o próprio instalador (o pai deste
 ; PowerShell). A pasta vem por variável de ambiente, para aspas no caminho não quebrarem nada.
@@ -19,11 +22,15 @@
 ; Sai com 10 se o editor (qualquer outro processo da pasta) está aberto.
 !define DIRETOR_PS_EDITOR "if(@($$l|?{$$_.CommandLine -notmatch 'server\.cjs'}).Count){exit 10}"
 !define DIRETOR_PS_KILL_ALL "$$l|%{Stop-Process -Id $$_.ProcessId -Force -EA 0}"
+; Sai com 10 se o Claude Desktop (o da Microsoft Store ou o do instalador clássico) está aberto.
+; O Claude Code também se chama claude.exe; por isso olha a pasta de onde ele roda.
+!define DIRETOR_PS_CLAUDE "if(@(Get-CimInstance Win32_Process|?{$$_.Name -eq 'claude.exe' -and $$_.ExecutablePath -match 'WindowsApps|AnthropicClaude'}).Count){exit 10}"
 
 !define DIRETOR_MSG_CLOSE "O Diretor está aberto.$\r$\n$\r$\nSalve o seu projeto, feche o Diretor e clique em Repetir."
 ; Sem PowerShell não dá para separar o editor do servidor que o Claude Desktop abriu.
-!define DIRETOR_MSG_CLOSE_ALL "O Diretor está aberto, ou o Claude Desktop está usando o Diretor.$\r$\n$\r$\nSalve o seu projeto, feche o Diretor e o Claude Desktop e clique em Repetir."
-!define DIRETOR_MSG_RESTART_CLAUDE "O Claude Desktop estava conectado ao Diretor, e a conexão foi fechada para instalar.$\r$\n$\r$\nQuando a instalação terminar, feche o Claude Desktop por completo (botão direito no ícone dele, perto do relógio → Sair) e abra de novo."
+!define DIRETOR_MSG_CLOSE_ALL "O Diretor está aberto, ou o Claude Desktop está usando o Diretor.$\r$\n$\r$\nSalve o seu projeto e feche o Diretor. Feche também o Claude Desktop por completo (botão direito no ícone dele, perto do relógio → Sair). Depois clique em Repetir."
+!define DIRETOR_MSG_RESTART_CLAUDE "O Diretor foi atualizado. O Claude Desktop estava conectado a ele, e a conexão foi fechada para instalar.$\r$\n$\r$\nPara conectar de novo, feche o Claude Desktop por completo (botão direito no ícone dele, perto do relógio → Sair) e abra de novo."
+!define DIRETOR_MSG_QUIT_CLAUDE "O Claude Desktop está aberto.$\r$\n$\r$\nPara o Diretor sair da configuração dele, feche o Claude Desktop por completo (botão direito no ícone dele, perto do relógio → Sair) e clique em Repetir. Ou clique em Ignorar para desinstalar assim mesmo."
 
 ; Devolve 10 em _RETURN se o editor está aberto.
 !macro diretorEditorRunning _RETURN
@@ -49,21 +56,16 @@
 !macroend
 
 !macro customCheckAppRunning
+  ; Aberto de um terminal do PowerShell 7 (como no CI), o instalador herda uma lista de
+  ; módulos que o Windows PowerShell não carrega, e aí parece que não há PowerShell. Sem a
+  ; variável, ele monta a lista padrão.
+  System::Call 'kernel32::SetEnvironmentVariable(t "PSModulePath", p 0)'
   !insertmacro IS_POWERSHELL_AVAILABLE
   System::Call 'kernel32::SetEnvironmentVariable(t "DIRETOR_INSTDIR", t "$INSTDIR")'
   Var /GLOBAL diretorClaudeClosed
   StrCpy $diretorClaudeClosed 0
 
-  ${if} $IsPowerShellAvailable == 0
-    nsExec::Exec `"$PowerShellPath" -NoProfile -NonInteractive -Command "${DIRETOR_PS_LIST};${DIRETOR_PS_KILL_SERVER}"`
-    Pop $R0
-    ${if} $R0 == 10
-      StrCpy $diretorClaudeClosed 1
-      ; os arquivos ficam livres
-      Sleep 1000
-    ${endIf}
-  ${endIf}
-
+  ; Primeiro o editor (o servidor do Claude não conta): se a pessoa cancelar, nada foi fechado.
   StrCpy $R1 0
   diretor_check_editor:
     !insertmacro diretorEditorRunning $R0
@@ -90,12 +92,42 @@
       Quit
     ${endIf}
 
-  !ifndef BUILD_UNINSTALLER
-    ${if} $diretorClaudeClosed == 1
+  !ifdef BUILD_UNINSTALLER
+    ; Desinstalar com o Claude Desktop aberto: ele pode gravar de volta a configuração com o
+    ; Diretor, que o desinstalador vai tirar. Pede para fechar (ou seguir assim mesmo).
+    ${ifNot} ${isUpdated}
     ${andIfNot} ${Silent}
-      MessageBox MB_OK|MB_ICONINFORMATION "${DIRETOR_MSG_RESTART_CLAUDE}"
+    ${andIf} $IsPowerShellAvailable == 0
+      diretor_check_claude:
+        nsExec::Exec `"$PowerShellPath" -NoProfile -NonInteractive -Command "${DIRETOR_PS_CLAUDE}"`
+        Pop $R0
+        ${if} $R0 == 10
+          MessageBox MB_ABORTRETRYIGNORE|MB_ICONEXCLAMATION "${DIRETOR_MSG_QUIT_CLAUDE}" IDRETRY diretor_check_claude IDIGNORE diretor_claude_ok
+          SetErrorLevel 1
+          Quit
+        ${endIf}
+      diretor_claude_ok:
     ${endIf}
   !endif
+
+  ; Por último, o servidor que o Claude Desktop abriu: não guarda nada, então fecha sem perguntar.
+  ${if} $IsPowerShellAvailable == 0
+    nsExec::Exec `"$PowerShellPath" -NoProfile -NonInteractive -Command "${DIRETOR_PS_LIST};${DIRETOR_PS_KILL_SERVER}"`
+    Pop $R0
+    ${if} $R0 == 10
+      StrCpy $diretorClaudeClosed 1
+      ; os arquivos ficam livres
+      Sleep 1000
+    ${endIf}
+  ${endIf}
+!macroend
+
+; Com os arquivos novos no lugar: se o servidor do Claude foi fechado, avisa para reabrir o Claude.
+!macro customInstall
+  ${if} $diretorClaudeClosed == 1
+  ${andIfNot} ${Silent}
+    MessageBox MB_OK|MB_ICONINFORMATION "${DIRETOR_MSG_RESTART_CLAUDE}"
+  ${endIf}
 !macroend
 
 !macro customUnInstall

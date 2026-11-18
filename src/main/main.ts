@@ -453,7 +453,9 @@ function claudeDesktopRunning(): Promise<boolean | null> {
     if (process.platform === 'win32') {
       // Só o app (pacote da Microsoft Store ou instalação clássica), não o Claude Code, que também se chama claude.exe.
       const ps = "@(Get-Process -Name claude -ErrorAction SilentlyContinue | Where-Object { $_.Path -match 'WindowsApps|AnthropicClaude' }).Count";
-      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { timeout: 8000, windowsHide: true }, (err, out) => {
+      // Aberto de um terminal do PowerShell 7, o Diretor herda uma lista de módulos que o Windows PowerShell não carrega.
+      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toLowerCase() !== 'psmodulepath'));
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { env, timeout: 8000, windowsHide: true }, (err, out) => {
         const n = Number(String(out).trim());
         done(err || !Number.isFinite(n) ? null : n > 0);
       });

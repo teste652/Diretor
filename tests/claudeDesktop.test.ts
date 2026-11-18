@@ -48,6 +48,8 @@ function winProfile() {
     pkg: (family = 'Claude_pzs8sxrjxfjjc') => join(local, 'Packages', family, 'LocalCache', 'Roaming', 'Claude'),
     /** Instalação clássica: %APPDATA%\Claude */
     classic: join(roaming, 'Claude'),
+    /** Onde o instalador clássico põe o Claude Desktop. */
+    classicApp: join(local, 'AnthropicClaude'),
     dirs: (extra: Record<string, string> = {}) => claudeConfigDirs({ env: { ...env, ...extra }, platform: 'win32', home }),
     candidates: () => claudeConfigCandidates({ env, platform: 'win32', home }),
   };
@@ -84,8 +86,53 @@ describe('onde fica a configuração do Claude Desktop', () => {
     make(w.pkg(), { Preferences: '{}' });
     make(w.classic, { [CONFIG_NAME]: '{"mcpServers":{"outro":{"command":"x"}}}' });
     expect(w.dirs()).toEqual([w.classic]);
+    // Com a cópia particular, o Claude do pacote não vê mais a clássica.
     make(w.pkg(), { [CONFIG_NAME]: '{}' });
-    expect(w.dirs()).toEqual([w.pkg(), w.classic]);
+    expect(w.dirs()).toEqual([w.pkg()]);
+  });
+
+  it('Windows: a mudança para a Claude-Data foi desfeita (a pasta nova só com marcas, os dados de volta no pacote)', () => {
+    const w = winProfile();
+    make(w.moved(), { '.user-data-voltou.claude_pzs8sxrjxfjjc': '' });
+    make(w.pkg(), { Preferences: '{}', [CONFIG_NAME]: '{}' });
+    expect(w.dirs()).toEqual([w.pkg()]);
+    // e depois de "Redefinir" o app: a cópia do pacote vazia, que o Claude volta a usar
+    const v = winProfile();
+    make(v.moved(), { '.user-data-voltou.claude_pzs8sxrjxfjjc': '' });
+    make(v.pkg(), { Preferences: '{}' });
+    expect(v.dirs()).toEqual([v.pkg()]);
+  });
+
+  it('Windows: com dados de verdade na cópia do pacote, sem a marca, o Claude não usa a Claude-Data', () => {
+    const w = winProfile();
+    make(w.moved(), { [CONFIG_NAME]: '{}' });
+    make(w.pkg(), { Preferences: '{}', [CONFIG_NAME]: '{}' });
+    expect(w.dirs()).toEqual([w.pkg()]);
+  });
+
+  it('Windows: um pacote novo sem configuração própria vê a de %APPDATA%\\Claude, mesmo com a marca de outra instalação; a Claude-Data de um pacote desinstalado fica de fora', () => {
+    const w = winProfile();
+    make(w.classic, { [LEFT]: '', [CONFIG_NAME]: '{"mcpServers":{"outro":{"command":"x"}}}' });
+    make(w.moved(), { [CONFIG_NAME]: '{}', Preferences: '{}' }); // Claude_pzs8sxrjxfjjc foi desinstalado
+    make(w.pkg('AnthropicPBC.Claude_fnn82j28hfe8t'), { Preferences: '{}' });
+    expect(w.dirs()).toEqual([w.classic]);
+  });
+
+  it('Windows, Claude Desktop 4 com um arquivo velho em %APPDATA%\\Claude (feito à mão, até com erro): não grava lá', () => {
+    const w = winProfile();
+    make(w.moved(), { [CONFIG_NAME]: '{}' });
+    make(w.pkg(), { [LEFT]: '' });
+    make(w.classic, { [CONFIG_NAME]: '{ "mcpServers": { "a": 1, } }' });
+    expect(w.dirs()).toEqual([w.moved()]);
+  });
+
+  it('Windows: o instalador clássico junto com o Claude Desktop 4: as duas pastas', () => {
+    const w = winProfile();
+    make(w.moved(), { [CONFIG_NAME]: '{}' });
+    make(w.pkg(), { [LEFT]: '' });
+    make(w.classicApp);
+    make(w.classic, { Preferences: '{}' });
+    expect(w.dirs()).toEqual([w.moved(), w.classic]);
   });
 
   it('Windows, instalação clássica: %APPDATA%\\Claude, com ou sem arquivo', () => {

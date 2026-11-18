@@ -47,25 +47,34 @@ const FAMILY = /^(anthropicpbc\.)?claude_[a-z0-9]+$/i;
 const LEFT_MARKER = /^\.user-data-left\./i;
 const hasConfig = (names: string[]) => names.some((n) => n.toLowerCase() === CONFIG_NAME);
 const wasLeft = (names: string[]) => names.some((n) => LEFT_MARKER.test(n));
-const onlyMarkers = (names: string[]) => names.every((n) => n.startsWith('.user-data-'));
+const onlyMarkers = (names: string[]) => names.every((n) => n.toLowerCase().startsWith('.user-data-'));
+/** Pasta de onde os dados saíram: tem a marca de saída, ou só marcas (a mudança foi desfeita e os dados voltaram). */
+const abandoned = (names: string[]) => wasLeft(names) || (names.length > 0 && onlyMarkers(names));
 
 function windowsFolders(env: NodeJS.ProcessEnv, home: string) {
   const local = env.LOCALAPPDATA || join(home, 'AppData', 'Local');
   const roaming = env.APPDATA || join(home, 'AppData', 'Roaming');
-  const dataRoot = join(local, 'Claude-Data');
-  const packages = join(local, 'Packages');
-  const moved = list(dataRoot)
-    .filter((n) => FAMILY.test(n) && isDir(join(dataRoot, n)))
-    .sort()
-    .map((family) => ({ family, dir: join(dataRoot, family) }));
-  const pkgs = list(packages)
-    .filter((n) => FAMILY.test(n))
-    .sort()
-    .map((family) => ({ family, dir: join(packages, family, 'LocalCache', 'Roaming', 'Claude') }))
-    .filter((p) => isDir(p.dir));
+  /** Família do pacote (em minúsculas) → pasta. */
+  const families = (root: string) =>
+    new Map(
+      list(root)
+        .filter((n) => FAMILY.test(n) && isDir(join(root, n)))
+        .sort()
+        .map((n) => [n.toLowerCase(), join(root, n)] as const),
+    );
   const classic = join(roaming, 'Claude');
-  return { moved, pkgs, classic: isDir(classic) ? classic : null };
+  return {
+    /** Claude Desktop 4: %LOCALAPPDATA%\Claude-Data\<família>. Pode ter sobrado de um pacote desinstalado. */
+    moved: families(join(local, 'Claude-Data')),
+    /** Pacotes instalados (a Microsoft Store apaga a pasta do pacote ao desinstalar). */
+    packages: families(join(local, 'Packages')),
+    classic: isDir(classic) ? classic : null,
+    /** O instalador clássico põe o Claude Desktop em %LOCALAPPDATA%\AnthropicClaude. */
+    classicInstalled: isDir(join(local, 'AnthropicClaude')),
+  };
 }
+/** A cópia particular de %APPDATA%\Claude dentro da pasta do pacote. */
+const packageCopy = (packageDir: string) => join(packageDir, 'LocalCache', 'Roaming', 'Claude');
 
 /** Tira repetidas (a mesma pasta por dois caminhos, como um atalho de pasta). */
 function unique(dirs: string[], platform: NodeJS.Platform): string[] {
@@ -86,14 +95,18 @@ function unique(dirs: string[], platform: NodeJS.Platform): string[] {
 
 /**
  * Pastas onde o Conectar grava: as que o Claude Desktop instalado lê (ele já abriu
- * pelo menos uma vez). Não cria pasta nenhuma. No Windows, cada versão usa um lugar:
- * - Claude Desktop 4: %LOCALAPPDATA%\Claude-Data\claude_<editor>. A pasta antiga
- *   fica só com a marca .user-data-left.<família>, e o Claude não lê mais nada dela.
- * - Instalador MSIX mais antigo: a cópia particular do pacote,
+ * pelo menos uma vez). Não cria pasta nenhuma. No Windows, para cada pacote instalado,
+ * a mesma escolha que o próprio Claude Desktop faz:
+ * - Claude Desktop 4: %LOCALAPPDATA%\Claude-Data\claude_<editor>, quando a cópia
+ *   particular do pacote ficou só com a marca .user-data-left.<família> (ou só com
+ *   marcas, depois de "Redefinir" o app, ou nem existe).
+ * - Senão, a cópia particular do pacote,
  *   %LOCALAPPDATA%\Packages\Claude_<editor>\LocalCache\Roaming\Claude. Quando ela não
- *   tem o arquivo, o Claude lê o de %APPDATA%\Claude, então não cria uma cópia
- *   particular que esconderia aquele.
+ *   tem o arquivo, o Claude lê o de %APPDATA%\Claude: aí grava nele, e não cria uma
+ *   cópia particular que esconderia aquele.
  * - Instalação clássica: %APPDATA%\Claude.
+ * Uma pasta da Claude-Data que o Claude abandonou (com a marca, ou só com marcas) fica de
+ * fora, e as de pacotes desinstalados também, a não ser que não haja outra.
  * CLAUDE_USER_DATA_DIR, quando definida, troca a pasta de dados do Claude por ela.
  */
 export function claudeConfigDirs(opts: Where = {}): string[] {
@@ -105,20 +118,28 @@ export function claudeConfigDirs(opts: Where = {}): string[] {
     const dir = platform === 'darwin' ? join(home, 'Library', 'Application Support', 'Claude') : join(env.XDG_CONFIG_HOME || join(home, '.config'), 'Claude');
     return isDir(dir) && !wasLeft(list(dir)) ? [dir] : [];
   }
-  const { moved, pkgs, classic } = windowsFolders(env, home);
-  const out: string[] = [];
-  for (const m of moved) if (!wasLeft(list(m.dir))) out.push(m.dir);
+  const { moved, packages, classic, classicInstalled } = windowsFolders(env, home);
   const classicNames = classic ? list(classic) : [];
-  const classicUsed = classic !== null && !wasLeft(classicNames);
-  const classicHasConfig = classicUsed && hasConfig(classicNames);
-  for (const p of pkgs) {
-    const names = list(p.dir);
-    if (wasLeft(names)) continue;
-    // "Redefinir" o app deixa a pasta do pacote só com marcas: o Claude usa a Claude-Data.
-    if (onlyMarkers(names) && moved.some((m) => m.family.toLowerCase() === p.family.toLowerCase())) continue;
-    if (hasConfig(names) || !classicHasConfig) out.push(p.dir);
+  const out: string[] = [];
+  for (const [family, packageDir] of packages) {
+    const copy = packageCopy(packageDir);
+    const copyNames = isDir(copy) ? list(copy) : null;
+    const data = moved.get(family);
+    if (data && !abandoned(list(data)) && (copyNames === null || wasLeft(copyNames) || onlyMarkers(copyNames))) out.push(data);
+    else if (copyNames === null) continue; // nunca abriu
+    else if (hasConfig(copyNames)) out.push(copy);
+    // O Claude do pacote vê o arquivo de %APPDATA%\Claude (mesmo que outra instalação tenha saído de lá).
+    else if (classic && hasConfig(classicNames)) out.push(classic);
+    else out.push(copy);
   }
-  if (classic && classicUsed && (classicHasConfig || out.length === 0)) out.push(classic);
+  const classicUsed = classic !== null && !wasLeft(classicNames);
+  if (out.length) {
+    if (classicUsed && classicInstalled) out.push(classic);
+  } else {
+    // Nenhum pacote instalado lê nada: as pastas que sobraram e não foram abandonadas.
+    for (const [family, data] of moved) if (!packages.has(family) && !abandoned(list(data))) out.push(data);
+    if (classicUsed) out.push(classic);
+  }
   return unique(out, platform);
 }
 
@@ -130,8 +151,8 @@ export function claudeConfigCandidates(opts: Where = {}): string[] {
   const dirs: string[] = [];
   if (env.CLAUDE_USER_DATA_DIR) dirs.push(env.CLAUDE_USER_DATA_DIR);
   if (platform === 'win32') {
-    const { moved, pkgs, classic } = windowsFolders(env, home);
-    dirs.push(...moved.map((m) => m.dir), ...pkgs.map((p) => p.dir));
+    const { moved, packages, classic } = windowsFolders(env, home);
+    dirs.push(...moved.values(), ...[...packages.values()].map(packageCopy));
     if (classic) dirs.push(classic);
   } else {
     dirs.push(platform === 'darwin' ? join(home, 'Library', 'Application Support', 'Claude') : join(env.XDG_CONFIG_HOME || join(home, '.config'), 'Claude'));

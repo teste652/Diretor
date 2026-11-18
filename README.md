@@ -18,9 +18,9 @@ Editor de vídeo para Windows com foco em motion graphics, feito para editar à 
 1. Baixe o `Diretor-Setup.exe`. O instalador ainda não tem assinatura digital, então o navegador pode avisar que o arquivo não é baixado com frequência. No Edge: três pontinhos ao lado do download → **Manter** → **Mostrar mais** → **Manter mesmo assim**. No Chrome: **Manter**.
 2. Abra o arquivo. Se o Windows avisar “O Windows protegeu o computador”, clique em **Mais informações → Executar assim mesmo**. Se ele bloquear sem mostrar essa opção, é o Controle Inteligente de Aplicativos, que barra programas sem assinatura digital: por enquanto o Diretor não instala nesse computador.
 3. Ele instala sozinho, só para o seu usuário (em `%LOCALAPPDATA%\Programs`, sem pedir senha de administrador), cria o atalho no menu Iniciar e abre o Diretor. O ffmpeg e o servidor do Claude vêm dentro dele.
-4. Para atualizar: salve o projeto, feche o Diretor, baixe de novo pelo mesmo link e instale por cima (se o Diretor estiver aberto, o instalador pede para salvar e fechar; ele nunca fecha o editor à força). Se o Claude Desktop estava aberto, feche ele por completo e abra de novo depois. A versão instalada aparece ao lado do nome, no canto superior esquerdo.
+4. Para atualizar: salve o projeto, feche o Diretor, baixe de novo pelo mesmo link e instale por cima (se o Diretor estiver aberto, o instalador pede para salvar e fechar; ele nunca fecha o editor à força). Se o Claude Desktop estava conectado, o instalador avisa no fim para fechá-lo por completo e abrir de novo. A versão instalada aparece ao lado do nome, no canto superior esquerdo.
 
-Para desinstalar: **Configurações do Windows → Aplicativos → Diretor → Desinstalar**. O Diretor sai também da configuração do Claude Desktop (só a entrada desta instalação).
+Para desinstalar: **Configurações do Windows → Aplicativos → Diretor → Desinstalar**. O Diretor sai também da configuração do Claude Desktop (só a entrada desta instalação). Se o Claude Desktop estiver aberto, o desinstalador pede antes para fechá-lo, porque aberto ele pode gravar a configuração antiga de volta.
 
 O GitHub Actions gera esse instalador a cada mudança na `main`, instala, roda nele o roteiro de ponta a ponta inteiro, testa instalar por cima e desinstalar, e só então troca o arquivo do link.
 
@@ -51,11 +51,11 @@ Para gerar o instalador no seu computador: `npm run dist` (no Windows; sai em `r
 
 O botão grava o servidor “diretor” no `claude_desktop_config.json` do Claude Desktop e mantém o resto do arquivo (outros servidores e preferências). Na primeira vez, guarda uma cópia do arquivo como estava em `claude_desktop_config.antes-do-diretor.json`, na mesma pasta (as vezes seguintes não substituem essa cópia). Arquivo com erro de formato não é tocado: o editor avisa e mostra onde ele está. O servidor roda com o próprio `Diretor.exe` (`ELECTRON_RUN_AS_NODE=1`), então não precisa do Node.
 
-Onde o Claude Desktop guarda a configuração no Windows, e onde o botão grava:
+Onde o Claude Desktop guarda a configuração no Windows, e onde o botão grava (para cada Claude Desktop instalado, a mesma escolha que ele faz):
 
-- **Claude Desktop 4** (o atual): `%LOCALAPPDATA%\Claude-Data\claude_…`. Ao mudar para essa pasta, o Claude deixa nas pastas antigas só uma marca (`.user-data-left.…`) e não lê mais nada delas, então o botão não grava lá.
-- **Instalador da Microsoft Store/MSIX mais antigo:** `%LOCALAPPDATA%\Packages\Claude_…\LocalCache\Roaming\Claude`. Quando essa pasta ainda não tem o arquivo, o Claude lê o de `%APPDATA%\Claude`, e o botão grava nesse.
-- **Instalação clássica:** `%APPDATA%\Claude`.
+- **Claude Desktop 4** (o atual): `%LOCALAPPDATA%\Claude-Data\claude_…`. Ao mudar para essa pasta, o Claude deixa na pasta antiga do pacote só uma marca (`.user-data-left.…`) e não lê mais nada dela, então o botão não grava lá. Um arquivo velho em `%APPDATA%\Claude` também fica como está.
+- **Instalador da Microsoft Store/MSIX mais antigo** (ou quando a mudança para a Claude-Data foi desfeita): `%LOCALAPPDATA%\Packages\Claude_…\LocalCache\Roaming\Claude`. Quando essa pasta ainda não tem o arquivo, o Claude lê o de `%APPDATA%\Claude`, e o botão grava nesse, sem criar uma cópia que esconderia os outros servidores.
+- **Instalação clássica** (em `%LOCALAPPDATA%\AnthropicClaude`): `%APPDATA%\Claude`.
 
 **À mão:** “Copiar configuração”, no mesmo painel, copia o trecho com os caminhos certos deste computador. Cole dentro de `claude_desktop_config.json` (se já houver outros servidores em `mcpServers`, só acrescente `"diretor"`). No app instalado, fica assim:
 
@@ -103,14 +103,14 @@ As operações são as mesmas que a interface usa (`src/core/operations.ts`): `a
 ## Testes
 
 ```bash
-npm test            # 121 testes: unitários + MCP real (cliente MCP → servidor stdio → ponte → editor) + exportação com ffmpeg
+npm test            # 126 testes: unitários + MCP real (cliente MCP → servidor stdio → ponte → editor) + exportação com ffmpeg
 npm run typecheck
 npm run test:e2e    # abre o app Electron e roda o roteiro da especificação (no Linux sem tela: xvfb-run -a node scripts/e2e.mjs)
 ```
 
 O teste de ponta a ponta (45 verificações) conecta o Claude Desktop pelo botão **Conectar** (num perfil de usuário de mentira, com outra configuração que precisa continuar intacta e, no Windows, com as pastas antigas que o Claude Desktop 4 abandonou, que não podem ser tocadas), importa e apara um MP4 com acento no nome, cria legenda e título, faz um cliente MCP, iniciado exatamente pelo comando que o botão gravou, pedir “subir suavemente no começo e desaparecer no fim”, ajusta a duração à mão (e desfaz/refaz dentro do rascunho), aceita a entrada, descarta a saída, testa proposta desatualizada, chamada repetida e conflito de `requestId`, o Claude parando no meio de uma espera, desfaz/refaz, salva/reabre e exporta. Depois compara prévia × MP4 em 10 quadros (PSNR > 30 dB) e confere, pelo contador do vídeo de teste, que os dois mostram o quadro exato do original. Também testa vídeo ausente, cancelar a exportação no meio, na conferência e no último quadro (sem apagar o arquivo que já existia nem deixar ffmpeg rodando), exportar com nome longo e acentuado, exportar por cima de um arquivo aberto em outro programa e cancelar enquanto o editor espera ele soltar (no Windows, preso de verdade por outro processo; no Linux, um arquivo imutável), a interface caindo no meio da exportação, e na interface: campo numérico ao trocar de clipe, arrasto da borda do vídeo, lixeira com ponto selecionado e o painel do modo econômico. Capturas e o MP4 ficam em `.test-output/`.
 
-O GitHub Actions roda tudo isso no Windows em cada PR e na `main` (`.github/workflows/ci.yml`) e guarda as capturas e o MP4 como artefato. Depois gera o instalador, instala do jeito que um usuário instalaria e roda o mesmo roteiro no app instalado (`DIRETOR_APP=<Diretor.exe> node scripts/e2e.mjs`, 47 verificações: também confere que o ffmpeg e o servidor do Claude usados são os que vêm dentro dele). Em seguida instala por cima com o servidor do Claude aberto (`node scripts/installer-check.mjs atualizar`: o instalador fecha o servidor e troca os arquivos) e desinstala (`desinstalar`: o Diretor sai da configuração do Claude Desktop e o resto fica). Na `main`, só então publica o instalador no link fixo.
+O GitHub Actions roda tudo isso no Windows em cada PR e na `main` (`.github/workflows/ci.yml`) e guarda as capturas e o MP4 como artefato. Depois gera o instalador, instala do jeito que um usuário instalaria e roda o mesmo roteiro no app instalado (`DIRETOR_APP=<Diretor.exe> node scripts/e2e.mjs`, 47 verificações: também confere que o ffmpeg e o servidor do Claude usados são os que vêm dentro dele). Em seguida instala por cima com o servidor do Claude aberto (`node scripts/installer-check.mjs atualizar`: o instalador fecha o servidor e troca os arquivos) e desinstala (`desinstalar`: o Diretor sai da configuração do Claude Desktop e o resto fica). Nos dois, um `Diretor.exe` de outra pasta tem de continuar aberto: só fecha o que roda da pasta instalada. Na `main`, só então publica o instalador no link fixo.
 
 ### Roteiro para testar no seu computador
 
