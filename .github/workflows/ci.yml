@@ -1,0 +1,40 @@
+# Testes no Windows (o sistema alvo do editor): tipos, testes automáticos e o
+# roteiro de ponta a ponta no app Electron de verdade, com o Claude simulado
+# por um cliente MCP real. Roda em pull requests e sob demanda.
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22 # o Electron 45 pede 22.12 ou mais novo
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:e2e
+      - name: Guardar capturas e o MP4 exportado
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-windows
+          path: .test-output/
+          # a pasta começa com ponto: sem isto o upload a ignora
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7

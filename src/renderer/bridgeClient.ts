@@ -1,0 +1,47 @@
+import { byteSize, handleBridge } from '../core/api';
+import { session } from './store';
+
+export const bridgeStats = { lastCallAt: 0, lastBytesOut: 0, totalBytesOut: 0, calls: 0 };
+
+const LABEL: Record<string, string> = {
+  status: 'Claude conferiu o editor',
+  get_context: 'Claude leu o contexto',
+  propose_edit: 'Claude enviou uma proposta',
+  get_proposal: 'Claude consultou a proposta',
+  cancel_proposal: 'Claude cancelou a proposta',
+};
+
+/** Atende as chamadas do servidor MCP usando a mesma sessão da interface. */
+export function connectBridge(): () => void {
+  const api = window.diretor;
+  if (!api) return () => undefined;
+  // Chamadas em andamento: o Claude pode desistir de uma (botão parar, tempo esgotado).
+  const inflight = new Map<number, AbortController>();
+  const offCancel = api.onBridgeCancel((id) => inflight.get(id)?.abort());
+  const offRequest = api.onBridgeRequest(async ({ id, method, params }) => {
+    const ctrl = new AbortController();
+    inflight.set(id, ctrl);
+    let result: unknown;
+    try {
+      result = await handleBridge(session, method, params, ctrl.signal);
+    } catch (e) {
+      result = { error: 'internal', message: e instanceof Error ? e.message : String(e) };
+    } finally {
+      inflight.delete(id);
+    }
+    // Ninguém espera mais esta resposta.
+    if (ctrl.signal.aborted) return;
+    const out = byteSize(result);
+    bridgeStats.lastCallAt = Date.now();
+    bridgeStats.lastBytesOut = out;
+    bridgeStats.totalBytesOut += out;
+    bridgeStats.calls++;
+    session.log('tool', LABEL[method] ?? method, { bytesOut: out, bytesIn: byteSize(params) });
+    api.bridgeRespond(id, result);
+  });
+  return () => {
+    offRequest();
+    offCancel();
+    for (const c of inflight.values()) c.abort();
+  };
+}
