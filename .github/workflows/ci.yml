@@ -19,10 +19,10 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 22 # o Electron 45 pede 22.12 ou mais novo
           cache: npm
       - run: npm ci
       - run: npm run typecheck
@@ -30,9 +30,11 @@ jobs:
       - run: npm run test:e2e
       - name: Guardar capturas e o MP4 exportado
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: e2e-windows
           path: .test-output/
+          # a pasta começa com ponto: sem isto o upload a ignora
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
