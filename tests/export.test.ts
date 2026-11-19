@@ -1,11 +1,16 @@
 // Exportação: ffmpeg recebe quadros RGBA + áudio aparado do original.
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, statSync } from 'node:fs';
+import { mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { buildFfmpegArgs, exactFps, fpsArg, frameCount, parseFfmpegProbe } from '../src/core/export';
+import { audioGraph, audioLanes, audioSegments } from '../src/core/exportAudio';
+import { type Project, createProject } from '../src/core/model';
+import { type Op, applyOps } from '../src/core/operations';
+import type { TimeRange } from '../src/core/ripple';
 import { EditorSession } from '../src/core/session';
+import { round } from '../src/core/time';
 
 const FFMPEG: string =
   process.env.DIRETOR_FFMPEG ??
@@ -25,6 +30,19 @@ function probe(path: string) {
     return parseFfmpegProbe(String(e.stderr));
   }
   return null;
+}
+
+async function exportFrames(project: EditorSession['project'], out: string, frame: Buffer) {
+  const { args, script } = buildFfmpegArgs(project, out, `${out}.filtro`);
+  writeFileSync(`${out}.filtro`, script);
+  const proc = spawn(FFMPEG, args);
+  let err = '';
+  proc.stderr.on('data', (d) => (err += d));
+  for (let i = 0; i < frameCount(project); i++) if (!proc.stdin.write(frame)) await new Promise((r) => proc.stdin.once('drain', r));
+  proc.stdin.end();
+  const code = await new Promise((r) => proc.on('close', r));
+  expect(err).toBe('');
+  expect(code).toBe(0);
 }
 
 describe('exportação', () => {
@@ -47,7 +65,8 @@ describe('exportação', () => {
       { op: 'addClip', clip: { kind: 'video', id: 'v1', mediaId: 'm1', in: 1, duration: 2 } },
     ]);
     const out = join(dir, 'out.mp4');
-    const args = buildFfmpegArgs(s.project, out);
+    const { args, script } = buildFfmpegArgs(s.project, out, `${out}.filtro`);
+    writeFileSync(`${out}.filtro`, script);
     const n = frameCount(s.project);
     expect(n).toBe(60);
     const proc = spawn(FFMPEG, args);
@@ -108,17 +127,6 @@ describe('exportação', () => {
     }
   });
 
-  async function exportFrames(project: EditorSession['project'], out: string, frame: Buffer) {
-    const proc = spawn(FFMPEG, buildFfmpegArgs(project, out));
-    let err = '';
-    proc.stderr.on('data', (d) => (err += d));
-    for (let i = 0; i < frameCount(project); i++) if (!proc.stdin.write(frame)) await new Promise((r) => proc.stdin.once('drain', r));
-    proc.stdin.end();
-    const code = await new Promise((r) => proc.on('close', r));
-    expect(err).toBe('');
-    expect(code).toBe(0);
-  }
-
   it('cores saem em BT.709 e marcadas no arquivo (iguais à prévia)', async () => {
     const s = new EditorSession();
     s.project.settings = { width: 64, height: 64, fps: 30 };
@@ -146,7 +154,7 @@ describe('exportação', () => {
     s.project.settings = { width: 64, height: 64, fps: 30 };
     s.dispatch([{ op: 'addClip', clip: { kind: 'title', id: 't', text: ' ', duration: 0.3 } }]);
     const part = join(dir, '.diretor-1-1-abc.part');
-    const args = buildFfmpegArgs(s.project, part);
+    const { args } = buildFfmpegArgs(s.project, part, `${part}.filtro`);
     expect(args.slice(-3)).toEqual(['-f', 'mp4', part]);
     await exportFrames(s.project, part, Buffer.alloc(64 * 64 * 4, 200));
     let header = '';
@@ -181,4 +189,158 @@ describe('exportação', () => {
     expect(Number(end![1])).toBeGreaterThan(0.4);
     expect(Number(end![1])).toBeLessThan(0.6);
   }, 30_000);
+});
+
+/** Mídias m1 e m2 com som e m3 sem som (10 s); clipes de vídeo com mudo e volume opcionais. */
+function audioProject(list: { id: string; media?: 'm1' | 'm2' | 'm3'; start: number; duration: number; in: number; muted?: boolean; volume?: number }[]): Project {
+  const media = (id: string, path: string, hasAudio: boolean): Op => ({ op: 'addMedia', media: { id, path, name: path, duration: 10, width: 64, height: 64, hasAudio } });
+  const ops: Op[] = [media('m1', '/v/a.mp4', true), media('m2', '/v/b.mp4', true), media('m3', '/v/mudo.mp4', false)];
+  for (const c of list) {
+    ops.push({ op: 'addClip', clip: { kind: 'video', id: c.id, mediaId: c.media ?? 'm1', start: c.start, duration: c.duration, in: c.in } });
+    if (c.muted !== undefined || c.volume !== undefined) ops.push({ op: 'updateClip', clipId: c.id, set: { ...(c.muted !== undefined ? { muted: c.muted } : {}), ...(c.volume !== undefined ? { volume: c.volume } : {}) } });
+  }
+  const p = applyOps(createProject(), ops).project;
+  p.settings = { width: 64, height: 64, fps: 30 };
+  return p;
+}
+const cmd = (p: Project) => buildFfmpegArgs(p, '/o/x.part', '/o/x.filtro');
+
+describe('som com cortes (montagem)', () => {
+  const one = () => audioProject([{ id: 'v1', start: 0, duration: 4, in: 0 }]);
+  it('dividir sem cortar: um segmento só e os mesmos argumentos', () => {
+    const split = applyOps(one(), [{ op: 'splitClip', clipId: 'v1', at: 1.5 }]).project;
+    expect(audioSegments(split)).toEqual([{ mediaId: 'm1', path: '/v/a.mp4', tl0: 0, src0: 0, n: 192000, volume: 1 }]);
+    expect(cmd(split)).toEqual(cmd(one()));
+  });
+  it('cortar [1; 1,5]: uma entrada, dois trechos e concat', () => {
+    const { args, script } = cmd(applyOps(one(), [{ op: 'removeRanges', ranges: [[1, 1.5]] }]).project);
+    expect(args.filter((a) => a === '-i')).toHaveLength(2);
+    expect(args).toContain('-filter_complex_script');
+    for (const s of ['asplit=2', 'atrim=start_sample=0:end_sample=48000', 'atrim=start_sample=72000:end_sample=192000', 'concat=n=2:v=0:a=1']) expect(script).toContain(s);
+    expect(script).not.toContain('amix');
+  });
+  it('sobreposição vira duas faixas misturadas', () => {
+    const p = audioProject([{ id: 'a', start: 0, duration: 3, in: 0 }, { id: 'b', media: 'm2', start: 2, duration: 2, in: 0 }]);
+    expect(audioLanes(audioSegments(p)).map((l) => l.map((s) => s.mediaId))).toEqual([['m1'], ['m2']]);
+    expect(cmd(p).script).toContain('amix=inputs=2:normalize=0:duration=longest');
+  });
+  it('pedaço que volta no arquivo abre o arquivo de novo', () => {
+    const p = audioProject([{ id: 'a', start: 0, duration: 2, in: 5 }, { id: 'b', start: 2, duration: 2, in: 0 }]);
+    expect(audioGraph(audioSegments(p), 4 * 48000, 1).inputs).toEqual(['/v/a.mp4', '/v/a.mp4']);
+  });
+  it('mídia sem som, pedaço mudo e começo vazio: o som fica no lugar', () => {
+    const p = audioProject([
+      { id: 'semSom', media: 'm3', start: 0, duration: 1, in: 0 },
+      { id: 'fala', start: 1, duration: 2, in: 0 },
+      { id: 'mudo', start: 3, duration: 1, in: 2, muted: true },
+    ]);
+    expect(audioSegments(p).map((s) => s.mediaId)).toEqual(['m1']);
+    expect(cmd(p).script).toContain('anullsrc=r=48000:cl=stereo,atrim=end_sample=48000');
+    const hidden = applyOps(p, [{ op: 'updateTrack', trackId: 'trk_video', set: { hidden: true } }]).project;
+    expect(audioSegments(hidden)).toEqual([]);
+    expect(cmd(hidden).script).not.toContain('[aout]');
+  });
+  it('arquivos demais para a linha de comando do Windows', () => {
+    const ops: Op[] = [];
+    for (let i = 0; i < 300; i++) {
+      ops.push({ op: 'addMedia', media: { id: `m${i}`, path: `C:/videos/${'x'.repeat(110)}${i}.mp4`, name: `${i}.mp4`, duration: 1, width: 64, height: 64, hasAudio: true } });
+      ops.push({ op: 'addClip', clip: { kind: 'video', id: `v${i}`, mediaId: `m${i}`, start: round(i * 0.1), duration: 0.1 } });
+    }
+    expect(() => cmd(applyOps(createProject(), ops).project)).toThrow(/arquivos demais/);
+  });
+});
+
+/** Projeto 64×64 a 30 fps com clipes de vídeo de `path` (com som); cada id de `media` vira uma mídia desse arquivo. */
+function fileProject(path: string, duration: number, list: { id: string; media?: string; start: number; duration?: number; in: number }[]): Project {
+  const ids = [...new Set(list.map((c) => c.media ?? 'm'))];
+  const ops: Op[] = ids.map((id): Op => ({ op: 'addMedia', media: { id, path, name: id, duration, width: 64, height: 64, hasAudio: true } }));
+  for (const c of list) ops.push({ op: 'addClip', clip: { kind: 'video', id: c.id, mediaId: c.media ?? 'm', start: c.start, duration: c.duration, in: c.in } });
+  const p = applyOps(createProject(), ops).project;
+  p.settings = { width: 64, height: 64, fps: 30 };
+  return p;
+}
+
+/** Saída do silencedetect: `silence_start` aparece se houver 50 ms ou mais abaixo de -40 dB. */
+const silence = (path: string) => String(spawnSync(FFMPEG, ['-hide_banner', '-nostats', '-i', path, '-af', 'silencedetect=n=-40dB:d=0.05', '-f', 'null', '-']).stderr);
+
+/** Som do arquivo em mono, amostras float. */
+function pcm(path: string): Float32Array {
+  const b = execFileSync(FFMPEG, ['-v', 'error', '-i', path, '-f', 'f32le', '-ac', '1', '-'], { maxBuffer: 1 << 26 });
+  return Float32Array.from({ length: b.length / 4 }, (_, i) => b.readFloatLE(i * 4));
+}
+
+/** SNR = 10·log10(Σx² / Σ(x − y)²) em dB; som idêntico dá Infinity. */
+function snr(a: string, b: string): number {
+  const x = pcm(a);
+  const y = pcm(b);
+  let sig = 0;
+  let noise = 0;
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    sig += x[i] ** 2;
+    noise += (x[i] - y[i]) ** 2;
+  }
+  return noise === 0 ? Infinity : 10 * Math.log10(sig / noise);
+}
+
+describe('som com cortes (ffmpeg)', () => {
+  const src = join(dir, 'fonte30.mp4');
+  const frame = Buffer.alloc(64 * 64 * 4, 128);
+  beforeAll(() => {
+    execFileSync(FFMPEG, [
+      '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', 'testsrc=size=64x64:rate=30:duration=30', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=30',
+      '-c:v', 'libx264', '-g', '15', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', src,
+    ]);
+  }, 60_000);
+
+  it('300 pedaços: duração certa e som sem buraco', async () => {
+    const ranges = Array.from({ length: 299 }, (_, i): TimeRange => [round(0.1 * (i + 1) - 0.02), round(0.1 * (i + 1))]);
+    const p = applyOps(fileProject(src, 30, [{ id: 'v', start: 0, in: 0 }]), [{ op: 'removeRanges', ranges }]).project;
+    expect(p.clips).toHaveLength(300);
+    const out = join(dir, 'pedacos.mp4');
+    await exportFrames(p, out, frame);
+    expect(probe(out)!.duration).toBeCloseTo(24.02, 1);
+    expect(silence(out)).not.toContain('silence_start');
+  }, 60_000);
+
+  it('dividir sem cortar sai perfeito (duas mídias do mesmo arquivo, com concat)', async () => {
+    const whole = fileProject(src, 30, [{ id: 'a', start: 0, duration: 3, in: 0 }]);
+    const split = fileProject(src, 30, [
+      { id: 'a', media: 'm1', start: 0, duration: 1.5, in: 0 },
+      { id: 'b', media: 'm2', start: 1.5, duration: 1.5, in: 1.5 },
+    ]);
+    expect(audioSegments(split)).toHaveLength(2);
+    const x = join(dir, 'inteiro.mp4');
+    const y = join(dir, 'dividido.mp4');
+    await exportFrames(whole, x, frame);
+    await exportFrames(split, y, frame);
+    expect(snr(x, y)).toBeGreaterThanOrEqual(90);
+  }, 60_000);
+
+  it('pedaços fora da ordem do arquivo: duração certa e som sem buraco', async () => {
+    const p = fileProject(src, 30, [
+      { id: 'a', start: 0, duration: 1, in: 2 },
+      { id: 'b', start: 1, duration: 1, in: 0 },
+    ]);
+    const out = join(dir, 'fora-da-ordem.mp4');
+    await exportFrames(p, out, frame);
+    expect(probe(out)!.duration).toBeCloseTo(2, 1);
+    expect(silence(out)).not.toContain('silence_start');
+  }, 60_000);
+
+  it.runIf(!!(process.env.CI || process.env.DIRETOR_TESTE_LONGO))('1 hora com 300 pedaços espalhados', async () => {
+    const hour = join(dir, 'hora.m4a');
+    execFileSync(FFMPEG, ['-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=3600', '-c:a', 'aac', '-b:a', '96k', hour]);
+    const ranges = Array.from({ length: 300 }, (_, i): TimeRange => [round(12 * i + 0.1), i === 299 ? 3600 : 12 * (i + 1)]);
+    const p = applyOps(fileProject(hour, 3600, [{ id: 'v', start: 0, duration: 3600, in: 0 }]), [{ op: 'removeRanges', ranges }]).project;
+    expect(p.clips).toHaveLength(300);
+    const out = join(dir, 'hora.mp4');
+    const t0 = Date.now();
+    await exportFrames(p, out, frame);
+    console.log(`exportação de 300 pedaços de uma mídia de 1 hora: ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+    const info = probe(out)!;
+    expect(info.duration).toBeCloseTo(30, 1);
+    expect(info.hasAudio).toBe(true);
+    expect(silence(out)).not.toContain('silence_start');
+  }, 20 * 60_000);
 });

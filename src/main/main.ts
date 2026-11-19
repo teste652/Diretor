@@ -331,7 +331,10 @@ ipcMain.handle('export:start', async (_e, { project, outPath }: { project: Proje
   }
   let proc: ChildProcessWithoutNullStreams;
   try {
-    proc = spawn(ffmpegPath(), buildFfmpegArgs(project, tmpPath));
+    const scriptPath = tmpPath.replace(/\.part$/, '.filtro');
+    const { args, script } = buildFfmpegArgs(project, tmpPath, scriptPath);
+    writeFileSync(scriptPath, script);
+    proc = spawn(ffmpegPath(), args);
   } catch (e) {
     removeQuietly(tmpPath);
     return { error: `Não consegui iniciar o ffmpeg: ${e instanceof Error ? e.message : String(e)}` };
