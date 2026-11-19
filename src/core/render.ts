@@ -19,8 +19,15 @@ export interface RenderOptions {
   dragOffset?: { clipId: string; dx: number; dy: number } | null;
 }
 
+/**
+ * Folga de `isActiveAt` (s): só absorve o ruído do ponto flutuante nas pontas do
+ * clipe. Quem precisa decidir do mesmo jeito qual trecho mostra um instante (a
+ * agulha do Antes/Depois, os testes) usa esta constante, não o número solto.
+ */
+export const ACTIVE_EPS = 1e-9;
+
 export function isActiveAt(c: Clip, t: number): boolean {
-  return t >= c.start - 1e-9 && t < c.start + c.duration - 1e-9;
+  return t >= c.start - ACTIVE_EPS && t < c.start + c.duration - ACTIVE_EPS;
 }
 
 /** Tempo no arquivo original para o tempo `t` da linha do tempo. */
