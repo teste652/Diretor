@@ -35,7 +35,7 @@ export function remapKeyframes(c: Clip, newDur: number, contentShift: number): v
   }
 }
 
-export function clampKeyframes(kfs: Keyframe[], dur: number, value: number, edge?: { start?: number; end?: number }): Keyframe[] {
+export function clampKeyframes(kfs: Keyframe[], dur: number, value: number): Keyframe[] {
   const sorted = sortedKeyframes(kfs);
   const inside: Keyframe[] = [];
   for (const k of sorted) if (k.t >= -EPS && k.t <= dur + EPS) inside.push({ ...k, t: Math.min(Math.max(k.t, 0), dur) });
@@ -47,8 +47,7 @@ export function clampKeyframes(kfs: Keyframe[], dur: number, value: number, edge
     const curve = { value, keyframes: own };
     const addEdge = (src: Keyframe | undefined, t: number) => {
       if (!src || inside.some((k) => Math.abs(k.t - t) < SAME_T && sameGroup(k.group, src.group))) return;
-      const forced = t === 0 ? edge?.start : edge?.end;
-      inside.push({ ...src, t, v: forced ?? evalProp(curve, t, value) });
+      inside.push({ ...src, t, v: evalProp(curve, t, value) });
     };
     addEdge(own.filter((k) => k.t < -EPS).at(-1), 0);
     addEdge(own.find((k) => k.t > dur + EPS), dur);
@@ -61,104 +60,126 @@ const cloneProps = (props: Record<string, AnimProp>): Record<string, AnimProp> =
 
 /**
  * Reparte os pontos do clipe em `at` (s, relativo ao clipe): a esquerda fica com
- * [0, at] e a direita com [at, duração] (tempos recomeçando em 0). O ponto de
- * borda de cada camada leva o valor da curva inteira da propriedade (o que a
- * prévia desenha), então a emenda não muda a imagem. Não altera `c`.
+ * [0, at] e a direita com [at, duração] (tempos recomeçando em 0). Decide pela
+ * curva inteira da propriedade (a que a prévia desenha, todas as camadas juntas):
+ * só ganha ponto de borda onde o pedaço desenharia outra coisa, e o ponto leva o
+ * valor e a suavização da curva ali. Não altera `c`.
  */
 export function partitionKeyframes(c: Clip, at: number): { left: Record<string, AnimProp>; right: Record<string, AnimProp> } {
   const left = cloneProps(c.props);
   const right = cloneProps(c.props);
   for (const [name, ap] of Object.entries(c.props)) {
     if (!ap.keyframes.length) continue;
-    const arriving = evalProp(ap, at - 1e-9, ap.value);
-    const leaving = evalProp(ap, at, ap.value);
-    left[name].keyframes = clampKeyframes(ap.keyframes, at, ap.value, { end: arriving });
-    const shifted = ap.keyframes.map((k) => ({ ...k, t: round(k.t - at) }));
-    right[name].keyframes = clampKeyframes(shifted, round(c.duration - at), ap.value, { start: leaving });
+    const s = sortedKeyframes(ap.keyframes);
+    const lefts: Keyframe[] = [];
+    const rights: Keyframe[] = [];
+    const border: Keyframe[] = [];
+    for (const k of s) {
+      if (k.t < at - EPS) lefts.push(k);
+      else if (k.t > at + EPS && round(k.t - at) > EPS) rights.push(k);
+      else border.push(k);
+    }
+    const lp = lefts.at(-1);
+    const rq = rights[0];
+    const L = lefts.map((k) => ({ ...k }));
+    const R: Keyframe[] = [];
+    if (border.length) {
+      const tA = Math.min(at, ...border.map((k) => k.t));
+      const tB = Math.max(at, ...border.map((k) => k.t));
+      const vL = evalProp(ap, tA - 1e-9, ap.value);
+      const vR = evalProp(ap, tB, ap.value);
+      const E = s.filter((k) => k.t <= tB + EPS).at(-1)?.ease ?? 'linear';
+      for (const k of border) {
+        L.push({ ...k, t: at, v: vL });
+        R.push({ ...k, t: 0, v: vR, ease: E });
+      }
+    } else {
+      // Um ponto só existe quando a emenda cairia numa curva diferente da original.
+      const same = !!lp && !!rq && sameGroup(lp.group, rq.group);
+      const group = same && lp.group ? { group: lp.group } : {};
+      const vL = evalProp(ap, at - 1e-9, ap.value);
+      const vR = evalProp(ap, at, ap.value);
+      if (rq && ((!lp && Math.abs(rq.v - ap.value) > EPS) || (lp && Math.abs(lp.v - rq.v) > EPS && lp.ease !== 'hold')))
+        L.push({ id: rq.id, t: at, v: vL, ease: rq.ease, ...group });
+      if (lp && ((!rq && Math.abs(lp.v - ap.value) > EPS) || (rq && Math.abs(lp.v - rq.v) > EPS)))
+        R.push({ id: lp.id, t: 0, v: vR, ease: lp.ease, ...group });
+    }
+    for (const k of rights) R.push({ ...k, t: round(k.t - at) });
+    left[name].keyframes = sortedKeyframes(L);
+    right[name].keyframes = sortedKeyframes(R);
   }
   return { left, right };
 }
 
 /**
  * Tira o trecho [t0, t1] (s, relativo ao clipe). Nas pontas, o mesmo resultado de
- * aparar essa ponta. No meio, as animações presas às bordas (entrada, saída) se
- * comportam como no aparar e as demais camadas ganham, em `t0`, um ponto com o
- * valor que chegava e outro com o valor que volta (um degrau quando diferem).
- * Não altera `c`.
+ * aparar essa ponta. No meio: propriedades só de animações presas às bordas
+ * (entrada, saída) se comportam como aparar o fim; nas demais, a curva inteira
+ * decide, e quando o que fica antes e depois do corte não se encontra sozinho
+ * entram um ou dois pontos em `t0` (um degrau quando os valores diferem), com os
+ * valores da curva original. Não altera `c`.
  */
 export function cutKeyframes(c: Clip, t0: number, t1: number): Record<string, AnimProp> {
   const D = c.duration;
   const d = round(t1 - t0);
   const nd = round(D - d);
+  const copia = structuredClone(c);
   if (t0 <= EPS || t1 >= D - EPS) {
-    const copia = structuredClone(c);
     remapKeyframes(copia, nd, t0 <= EPS ? -d : 0);
     return copia.props;
   }
+  remapKeyframes(copia, nd, 0);
   const groups = new Map(keyframeGroups(c).map((g) => [g.group, g]));
   const out = cloneProps(c.props);
   for (const [name, ap] of Object.entries(c.props)) {
     if (!ap.keyframes.length) continue;
-    const orig = sortedKeyframes(ap.keyframes);
-    const kept: Keyframe[] = [];
-    // Camadas de conteúdo: pontos sem grupo ou de grupos que não tocam nenhuma borda.
-    const layers = new Map<string, { dropped: Keyframe[]; before: boolean; after: boolean; own0: boolean; own1: boolean; at?: number }>();
-    for (const k of orig) {
+    const anchored = ap.keyframes.every((k) => {
       const g = k.group ? groups.get(k.group) : undefined;
-      const atStart = !!g && g.start <= SAME_T;
-      const atEnd = !!g && g.end >= D - SAME_T;
-      if (atStart || atEnd) {
-        const t = atStart && atEnd ? (D > SAME_T ? (k.t * nd) / D : k.t) : atEnd ? k.t - d : k.t;
-        kept.push({ ...k, t: round(t) });
-        continue;
-      }
-      const key = k.group ?? '';
-      const L = layers.get(key) ?? { dropped: [], before: false, after: false, own0: false, own1: false };
-      layers.set(key, L);
-      if (k.t <= t0 + EPS) L.before = true;
-      if (k.t >= t1 - EPS) {
-        L.after = true;
-        L.at ??= kept.length;
-      }
-      if (Math.abs(k.t - t1) < SAME_T) L.own1 = true;
-      if (k.t > t0 + EPS && k.t < t1 - EPS) {
-        L.dropped.push(k);
-        continue;
-      }
-      if (Math.abs(k.t - t0) < SAME_T && k.t < t1 - EPS) L.own0 = true;
-      kept.push(k.t >= t1 - EPS ? { ...k, t: round(k.t - d) } : { ...k });
+      return !!g && (g.start <= SAME_T || g.end >= D - SAME_T);
+    });
+    if (anchored) {
+      out[name].keyframes = copia.props[name].keyframes;
+      continue;
     }
-    // Emenda de cada camada de conteúdo afetada, antes do primeiro ponto que voltou.
-    const taken = new Set<string>(orig.map((k) => k.id));
-    const uniqueId = (base: string) => {
+    const s = sortedKeyframes(ap.keyframes);
+    const kept: Keyframe[] = [];
+    const moved: Keyframe[] = [];
+    const W: Keyframe[] = [];
+    for (const k of s) {
+      if (k.t <= t0 - EPS) kept.push({ ...k });
+      else if (k.t > t1 + EPS && round(k.t - d) > t0 + EPS) moved.push({ ...k, t: round(k.t - d) });
+      else W.push(k);
+    }
+    const f = (t: number) => evalProp(ap, t, ap.value);
+    const p = kept.at(-1);
+    const q = moved[0];
+    const tA = Math.min(t0, ...W.map((k) => k.t));
+    const tR = Math.max(t1, ...W.map((k) => k.t));
+    const vL = f(tA - 1e-9);
+    const vR = f(tR);
+    const E = s.filter((k) => k.t <= tR + EPS).at(-1)?.ease ?? 'linear';
+    const vals = [...(p ? [p.v] : []), ...W.map((k) => k.v), ...(q ? [q.v] : [])];
+    const flat = vals.length > 0 && Math.max(...vals) - Math.min(...vals) <= EPS;
+    const taken = new Set<string>([...kept, ...moved].map((k) => k.id));
+    const novoId = (base: string) => {
       let id = base;
-      for (let n = 1; taken.has(id); n++) id = `${base}${n}`;
+      for (let n = 2; taken.has(id); n++) id = `${base}~${n}`;
       taken.add(id);
       return id;
     };
-    const arriving = evalProp(ap, t0 - 1e-9, ap.value);
-    const leaving = evalProp(ap, t1, ap.value);
-    const junctions: { index: number; pts: Keyframe[] }[] = [];
-    for (const [key, L] of layers) {
-      if (!L.dropped.length && !(L.before && L.after)) continue;
-      const group = key || undefined;
-      const mine = orig.filter((k) => (k.group ?? '') === key);
-      const easeOf = (limit: number) => mine.filter((k) => k.t < limit).at(-1)?.ease;
-      const pts: Keyframe[] = [];
-      const first = L.dropped[0];
-      const last = L.dropped.at(-1);
-      if (!L.own0) {
-        pts.push({ id: first ? first.id : uniqueId(`${name}@${Math.round(t0 * 1000)}<`), t: t0, v: arriving, ease: easeOf(t0 - EPS) ?? 'linear', ...(group ? { group } : {}) });
-      }
-      if (!L.own1 && !(pts.length && Math.abs(arriving - leaving) <= EPS)) {
-        const reuse = last && last !== first ? last.id : undefined;
-        pts.push({ id: reuse ?? uniqueId(`${name}@${Math.round(t0 * 1000)}>`), t: t0, v: leaving, ease: easeOf(t1 - EPS) ?? 'linear', ...(group ? { group } : {}) });
-      }
-      junctions.push({ index: L.at ?? kept.length, pts });
+    const ms = Math.round(t0 * 1000);
+    const idL = () => (W.length ? W[0].id : novoId(`${name}@${ms}<`));
+    const idR = () => (W.length >= 2 ? W.at(-1)!.id : novoId(`${name}@${ms}>`));
+    const junction: Keyframe[] = [];
+    if (flat) {
+      if (!p && !q && Math.abs(vL - ap.value) > EPS) junction.push({ id: idL(), t: t0, v: vL, ease: E });
+    } else if (Math.abs(vL - vR) <= EPS) {
+      junction.push({ id: idL(), t: t0, v: vL, ease: E });
+    } else {
+      junction.push({ id: idL(), t: t0, v: vL, ease: 'linear' });
+      junction.push({ id: idR(), t: t0, v: vR, ease: E });
     }
-    const result = [...kept];
-    for (const j of junctions.sort((a, b) => b.index - a.index)) result.splice(j.index, 0, ...j.pts);
-    out[name].keyframes = clampKeyframes(result, nd, ap.value);
+    out[name].keyframes = sortedKeyframes([...kept, ...junction, ...moved]);
   }
   return out;
 }
