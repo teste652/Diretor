@@ -22,7 +22,9 @@ import {
   newId,
   trackForKind,
 } from './model';
+import { clampKeyframes, remapKeyframes, sameGroup } from './keyframes';
 import { defaultProps, evalProp, keyframeGroups, propDef, sortedKeyframes } from './properties';
+import { EPS, MIN_DURATION, SAME_T, round } from './time';
 
 export type ClipChanges = {
   name?: string;
@@ -139,16 +141,12 @@ export class OpValidationError extends Error {
   }
 }
 
-const EPS = 1e-6;
-/** Tolerância para "mesmo instante" entre pontos de animação (s). */
-const SAME_T = 1e-3;
-export const MIN_DURATION = 0.04;
+export { MIN_DURATION } from './time';
 const MIN_GROUP_DURATION = 0.01;
 const MAX_TEXT = 2000;
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 const isStr = (v: unknown): v is string => typeof v === 'string';
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
-const round = (n: number) => Math.round(n * 1000) / 1000;
 const CAPTION_PRESET_NAMES: CaptionPreset[] = ['padrao', 'caixa', 'destaque'];
 const COLOR_RE = /^(#[0-9a-f]{3,4}|#[0-9a-f]{6}|#[0-9a-f]{8}|(rgb|rgba|hsl|hsla)\([\d\s.,%+-]+\)|[a-z]{3,24})$/i;
 const STYLE_KEYS = ['fontFamily', 'fontSize', 'fontWeight', 'color', 'background', 'align', 'shadow'];
@@ -179,8 +177,6 @@ function err(index: number, op: string, code: OpError['code'], message: string):
 function trackLocked(p: Project, clip: Clip): boolean {
   return !!findTrack(p, clip.trackId)?.locked;
 }
-
-const sameGroup = (a: string | undefined, b: string | undefined) => (a ?? '') === (b ?? '');
 
 /** Intervalo de uma animação pronta, com os mesmos padrões na validação e na expansão. */
 export function animateRange(
@@ -562,55 +558,6 @@ export function expandOp(p: Project, o: Op): Op[] {
       break;
   }
   return ops;
-}
-
-/**
- * Reposiciona os pontos quando a duração do clipe muda (aparar). Grupos que
- * ocupam o clipe inteiro esticam; grupos presos ao fim (saída) acompanham o fim;
- * grupos presos ao começo (entrada) ficam; o resto acompanha o conteúdo
- * (`contentShift`). Pontos que saem do clipe viram um ponto na borda com o
- * valor que a animação tinha ali.
- */
-function remapKeyframes(c: Clip, newDur: number, contentShift: number): void {
-  const D = c.duration;
-  if (Math.abs(newDur - D) < EPS && Math.abs(contentShift) < EPS) return;
-  const groups = new Map(keyframeGroups(c).map((g) => [g.group, g]));
-  const snap = (t: number) => (Math.abs(t) < SAME_T ? 0 : Math.abs(t - newDur) < SAME_T ? newDur : round(t));
-  for (const ap of Object.values(c.props)) {
-    if (!ap.keyframes.length) continue;
-    const mapped = ap.keyframes.map((k) => {
-      const g = k.group ? groups.get(k.group) : undefined;
-      const atStart = !!g && g.start <= SAME_T;
-      const atEnd = !!g && g.end >= D - SAME_T;
-      let t: number;
-      if (atStart && atEnd) t = D > SAME_T ? (k.t / D) * newDur : k.t;
-      else if (atEnd) t = k.t + (newDur - D);
-      else if (atStart) t = k.t;
-      else t = k.t + contentShift;
-      return { ...k, t: snap(t) };
-    });
-    ap.keyframes = clampKeyframes(mapped, newDur, ap.value);
-  }
-}
-
-function clampKeyframes(kfs: Keyframe[], dur: number, value: number): Keyframe[] {
-  const sorted = sortedKeyframes(kfs);
-  const inside: Keyframe[] = [];
-  for (const k of sorted) if (k.t >= -EPS && k.t <= dur + EPS) inside.push({ ...k, t: Math.min(Math.max(k.t, 0), dur) });
-  if (inside.length === sorted.length) return sortedKeyframes(inside);
-  // Cada animação (cada grupo, e os pontos feitos à mão) ganha o próprio ponto na
-  // borda, com o valor da PRÓPRIA curva ali: o valor de uma não vaza para a outra.
-  for (const layer of new Set(sorted.map((k) => k.group ?? ''))) {
-    const own = sorted.filter((k) => (k.group ?? '') === layer);
-    const curve = { value, keyframes: own };
-    const addEdge = (src: Keyframe | undefined, t: number) => {
-      if (!src || inside.some((k) => Math.abs(k.t - t) < SAME_T && sameGroup(k.group, src.group))) return;
-      inside.push({ ...src, t, v: evalProp(curve, t, value) });
-    };
-    addEdge(own.filter((k) => k.t < -EPS).at(-1), 0);
-    addEdge(own.find((k) => k.t > dur + EPS), dur);
-  }
-  return sortedKeyframes(inside);
 }
 
 function applyPrimitive(p: Project, o: Op): void {
