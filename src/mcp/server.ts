@@ -55,7 +55,9 @@ const OPS_HELP = `Cada op é um objeto JSON. Tempos em segundos. "t" de keyframe
 - {"op":"setKeyframe","clipId","prop","t","v","ease"?,"group"?,"keyframeId"?} props: x,y (px a partir do centro), scale, opacity(0-1). ease: linear easeIn easeOut easeInOut hold.
 - {"op":"removeKeyframe","clipId","prop","keyframeId"} | {"op":"clearKeyframes","clipId","prop"?,"group"?}
 - {"op":"retimeGroup","clipId","group","start","duration"} (muda início/duração de um grupo, ex.: "entrada")
-- {"op":"trimClip","clipId","edge":"start"|"end","delta","ripple"?} apara uma borda (delta>0 = para a direita). Entrada fica no começo, saída no fim. Em vídeo, os vídeos seguintes da faixa acompanham a mudança (ripple:false para não mexer neles).
+- {"op":"trimClip","clipId","edge":"start"|"end","delta","ripple"?} apara uma borda (delta>0 = para a direita). Entrada fica no começo, saída no fim. Em vídeo, aparar vale como apagar aquele pedaço em todas as faixas (legendas e títulos em cima saem junto e o que vem depois anda junto); ripple:false não mexe em mais nada.
+- {"op":"splitClip","clipId","at"} divide o clipe no tempo "at" da linha do tempo (segundos); a parte da direita vira um clipe novo.
+- {"op":"removeRanges","ranges":[[início,fim],...]} apaga trechos (até 500 por vez, em segundos da linha do tempo atual) em todas as faixas: o que está dentro sai, o que atravessa é cortado, e tudo depois anda para trás (sem buraco); legendas e títulos continuam sincronizados. Mais de 500: várias removeRanges na mesma etapa, começando pelos trechos do FIM do vídeo.
 - {"op":"setProperty","clipId","prop","value"} (só para propriedade sem pontos; com pontos use setKeyframe)
 - {"op":"addClip","clip":{"kind":"title"|"caption","text","start","duration","id"?,"style"?,"preset"?}} (caption preset: padrao caixa destaque)
 - {"op":"updateClip","clipId","set":{"start"?,"duration"?,"in"?,"text"?,"style"?,"preset"?,"volume"?(0-1),"muted"?}}
