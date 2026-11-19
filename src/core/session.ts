@@ -4,8 +4,52 @@
 
 import { type Op, OpValidationError, USER_ONLY_OPS, applyOps, describeOp, touchedClipIds } from './operations';
 import { type Project, createProject, findClip } from './model';
+import { type Seam, draftSeams } from './pieces';
+import { SAME_T } from './time';
 
 export type Source = 'user' | 'ai';
+
+/** O que a etapa em rascunho muda, para a linha do tempo, a prévia e o inspetor. */
+export interface DraftInfo {
+  /** Clipes que as operações do rascunho tocam. */
+  clipIds: Set<string>;
+  /** Clipes que só existem no rascunho: os criados e os pedaços novos de uma divisão. */
+  createdClipIds: Set<string>;
+  /** Só os criados (addClip): é o que a linha do tempo pinta como "clipe novo". */
+  addedClipIds: Set<string>;
+  /** Clipes que o rascunho remove (aparecem tracejados na linha do tempo). */
+  removedClipIds: Set<string>;
+  keyframeIds: Set<string>;
+  /** Faixa "Rascunho da IA": onde estão os pontos e mudanças, não o clipe inteiro. */
+  range: { clipId: string; start: number; end: number }[];
+  /** Emendas que os cortes do rascunho deixam, com quanto foi tirado em cada uma. */
+  seams: Seam[];
+  /** O rascunho corta ou empurra clipes: as posições do projeto não valem na view. */
+  ripple: boolean;
+}
+
+/** Há emenda a até SAME_T de `t` (as emendas vêm ordenadas por `at`). */
+function hasSeamAt(seams: Seam[], t: number): boolean {
+  let lo = 0;
+  let hi = seams.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (seams[mid].at < t - SAME_T) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo < seams.length && seams[lo].at <= t + SAME_T;
+}
+
+const emptyDraftInfo = (): DraftInfo => ({
+  clipIds: new Set(),
+  createdClipIds: new Set(),
+  addedClipIds: new Set(),
+  removedClipIds: new Set(),
+  keyframeIds: new Set(),
+  range: [],
+  seams: [],
+  ripple: false,
+});
 
 export interface HistoryEntry {
   id: string;
@@ -167,6 +211,9 @@ export class EditorSession {
   private listeners = new Set<() => void>();
   private waiters: { id: string; since: number; resolve: (why?: WaitResult) => void }[] = [];
   private viewCache: { key: string; project: Project } | null = null;
+  private draftCache: { project: Project; view: Project; step: ProposalStep; info: DraftInfo } | null = null;
+  /** Sem etapa em rascunho, draftInfo é sempre este objeto vazio. */
+  private readonly noDraft = emptyDraftInfo();
   private activitySeq = 0;
   private noteSeq = 0;
   /** requestId → proposta e conteúdo do pedido (idempotência sem engolir pedidos novos). */
@@ -236,43 +283,54 @@ export class EditorSession {
     }
   }
 
-  /** Ids de clipes e pontos que só existem / mudaram no rascunho. */
-  get draftInfo(): {
-    clipIds: Set<string>;
-    createdClipIds: Set<string>;
-    /** Clipes que o rascunho remove (aparecem tracejados na linha do tempo). */
-    removedClipIds: Set<string>;
-    keyframeIds: Set<string>;
-    range: { clipId: string; start: number; end: number }[];
-  } {
+  /**
+   * Ids de clipes e pontos que só existem / mudaram no rascunho, emendas e faixa
+   * do rascunho. A linha do tempo lê isto a cada quadro: só recalcula quando o
+   * projeto, a view ou a etapa ativa mudam.
+   */
+  get draftInfo(): DraftInfo {
     const step = this.activeStep;
-    const out = {
-      clipIds: new Set<string>(),
-      createdClipIds: new Set<string>(),
-      removedClipIds: new Set<string>(),
-      keyframeIds: new Set<string>(),
-      range: [] as { clipId: string; start: number; end: number }[],
-    };
-    if (!step) return out;
+    if (!step) return this.noDraft;
+    const view = this.view;
+    const cached = this.draftCache;
+    if (cached && cached.project === this.project && cached.view === view && cached.step === step) return cached.info;
+    const info = this.computeDraftInfo(step, view);
+    this.draftCache = { project: this.project, view, step, info };
+    return info;
+  }
+
+  private computeDraftInfo(step: ProposalStep, view: Project): DraftInfo {
+    const out = emptyDraftInfo();
     const all = [...step.ops, ...step.manualOps];
     for (const id of touchedClipIds(all)) out.clipIds.add(id);
+    const inView = new Map(view.clips.map((c) => [c.id, c]));
+    const inProject = new Set(this.project.clips.map((c) => c.id));
     for (const o of all) {
-      if (o.op === 'addClip' && o.clip.id) out.createdClipIds.add(o.clip.id);
+      if (o.op === 'addClip' && o.clip.id) {
+        out.createdClipIds.add(o.clip.id);
+        out.addedClipIds.add(o.clip.id);
+      }
+      if (o.op === 'splitClip' && o.newId) out.createdClipIds.add(o.newId);
       if (o.op === 'setKeyframe' && o.keyframeId) out.keyframeIds.add(o.keyframeId);
-      if (o.op === 'removeClip' && !findClip(this.view, o.clipId) && findClip(this.project, o.clipId)) out.removedClipIds.add(o.clipId);
+      if (o.op === 'removeClip' && !inView.has(o.clipId) && inProject.has(o.clipId)) out.removedClipIds.add(o.clipId);
     }
-    const view = this.view;
+    out.seams = draftSeams(this.project, view);
+    out.ripple = out.seams.length > 0 || all.some((o) => o.op === 'shiftClips');
     const ranges = new Map<string, { start: number; end: number }>();
-    // Faixa do rascunho: onde estão os pontos/mudanças, não o clipe inteiro.
+    // Faixa do rascunho: onde estão os pontos/mudanças, não o clipe inteiro. Num corte, quem
+    // marca o lugar é o chip da emenda: dividir, encurtar texto e aparar o vídeo na borda de
+    // uma emenda (o corte de um pedaço curto) não contam.
     const keyframeOnly = all.every((o) => ['setKeyframe', 'clearKeyframes', 'retimeGroup', 'removeKeyframe'].includes(o.op));
     for (const o of all) {
       if (!('clipId' in o) && o.op !== 'addClip') continue;
+      if (o.op === 'splitClip' || o.op === 'cutTextTime') continue;
       if (keyframeOnly && (o.op === 'clearKeyframes' || o.op === 'removeKeyframe')) continue;
       const id = o.op === 'addClip' ? o.clip.id! : (o as { clipId: string }).clipId;
-      const c = findClip(view, id);
+      const c = inView.get(id);
       if (!c) continue;
       let s = c.start;
       let e = c.start + c.duration;
+      if (o.op === 'trimClip' && c.kind === 'video' && hasSeamAt(out.seams, o.edge === 'start' ? s : e)) continue;
       if (o.op === 'setKeyframe') s = e = c.start + o.t;
       if (o.op === 'retimeGroup') (s = c.start + o.start), (e = c.start + o.start + o.duration);
       const r = ranges.get(id);
@@ -285,19 +343,22 @@ export class EditorSession {
   // ---------- edição ----------
   /**
    * Ponto de entrada das edições manuais. Enquanto há uma etapa em rascunho,
-   * editar um clipe que o rascunho mexe (ou qualquer coisa, com o modo
-   * "ajustar" ligado) vira ajuste do rascunho: você está editando o que vê na
-   * prévia. O resto é gravado no projeto (e desatualiza o rascunho).
+   * mexer num clipe que o rascunho mexe (inclusive dividir ou empurrar um
+   * pedaço dele num corte), ou em qualquer coisa com o modo "ajustar" ligado,
+   * vira ajuste do rascunho: você está editando o que vê na prévia. O resto é
+   * gravado no projeto (e desatualiza o rascunho).
    */
   dispatch(ops: Op[], label?: string): { ok: true; target: 'draft' | 'project' } | { ok: false; message: string } {
     // Nada a fazer (ex.: botão de áudio sem vídeos): sem histórico vazio e sem desatualizar o rascunho.
     if (Array.isArray(ops) && ops.length === 0) return { ok: true, target: this.activeStep ? 'draft' : 'project' };
     try {
-      if (this.shouldRouteToDraft(ops)) {
+      // As ops aplicadas sobre a view uma vez só: para decidir a rota e para virar o ajuste do rascunho.
+      let onView: Op[] | undefined;
+      const applyOnView = () => (onView ??= applyOps(this.view, ops).applied);
+      if (this.shouldRouteToDraft(ops, applyOnView)) {
         const p = this.openProposal!;
         const step = this.activeStep!;
-        const base = this.view;
-        const { applied } = applyOps(base, ops);
+        const applied = applyOnView();
         step.manualMarks.push(step.manualOps.length);
         step.manualOps.push(...applied);
         step.manualRedo = [];
@@ -313,14 +374,20 @@ export class EditorSession {
     }
   }
 
-  private shouldRouteToDraft(ops: Op[]): boolean {
+  private shouldRouteToDraft(ops: Op[], applyOnView: () => Op[]): boolean {
     const step = this.activeStep;
     if (!step) return false;
     // Importar mídia, faixas, nome e formato do projeto são do usuário: nunca entram na etapa do Claude.
     if (ops.some((o) => USER_ONLY_OPS.includes(o.op) || o.op === 'renameProject' || o.op === 'setCanvas')) return false;
     if (this.adjustMode) return true;
     const d = this.draftInfo;
-    return ops.some((o) => 'clipId' in o && d.clipIds.has(o.clipId));
+    // Os clipes que a edição muda de fato no que você vê: um corte não tem clipId, mas divide e
+    // empurra pedaços do rascunho. Se as ops não se aplicam à view, vale o clipId de cada uma.
+    try {
+      return touchedClipIds(applyOnView()).some((id) => d.clipIds.has(id));
+    } catch {
+      return ops.some((o) => 'clipId' in o && d.clipIds.has(o.clipId));
+    }
   }
 
   private commit(ops: Op[], label: string, source: Source, meta: { proposalId?: string; stepId?: string } = {}): void {

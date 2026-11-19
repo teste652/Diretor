@@ -609,3 +609,79 @@ describe('teto de contexto', () => {
     expect(s.contextRequest?.status).toBe('pending');
   });
 });
+
+describe('cortes e rascunhos', () => {
+  it('um Ctrl+Z desfaz o corte inteiro', () => {
+    const s = setup();
+    const before = structuredClone(s.project.clips);
+    expect(s.dispatch([{ op: 'removeRanges', ranges: [[1.5, 2.5]] }]).ok).toBe(true);
+    s.undo();
+    expect(s.project.clips).toEqual(before);
+  });
+
+  it('corte da IA: emenda, ripple, pedaço que não é "clipe novo" e ajuste manual no rascunho', () => {
+    const s = setup();
+    const steps = [{ label: 'Corte', ops: [{ op: 'removeRanges' as const, ranges: [[1.5, 2.5]] as [number, number][] }] }];
+    expect(s.propose({ requestId: 'corte', baseRevision: s.project.revision, title: 'Corte', steps }).ok).toBe(true);
+    const d = s.draftInfo;
+    expect(d.seams).toEqual([{ at: 1.5, removed: 1 }]);
+    expect(d.ripple).toBe(true);
+    const piece = s.view.clips.find((c) => c.kind === 'video' && c.id !== 'v1')!;
+    expect(d.createdClipIds.has(piece.id)).toBe(true);
+    expect(d.addedClipIds.has(piece.id)).toBe(false);
+    expect(s.draftInfo).toBe(d);
+    s.setSelection({ clipIds: [piece.id] });
+    expect(s.openProposal!.status).toBe('active');
+    expect(s.dispatch([{ op: 'removeRanges', ranges: [[3, 3.5]] }])).toEqual({ ok: true, target: 'draft' });
+    expect(s.draftInfo.seams).toEqual([{ at: 1.5, removed: 1 }, { at: 3, removed: 0.5 }]);
+  });
+
+  it('dividir um clipe fora do rascunho grava no projeto e desatualiza a proposta', () => {
+    const s = setup();
+    s.propose(entradaSaida(s.project.revision));
+    expect(s.dispatch([{ op: 'splitClip', clipId: 'v1', at: 3 }])).toEqual({ ok: true, target: 'project' });
+    expect(s.openProposal!.status).toBe('stale');
+  });
+
+  it('corte de 1 quadro ou maior: a emenda marca o lugar e o vídeo cortado fica fora da faixa do rascunho', () => {
+    // v1 [0,6) mostra 2..8 do arquivo: os dois cortes ficam dentro dele. O de 1 quadro apara o pedaço da esquerda.
+    const cases: [[number, number], number][] = [
+      [[3, 3.033], 0.033],
+      [[3, 3.5], 0.5],
+    ];
+    for (const [range, removed] of cases) {
+      const s = setup();
+      const steps = [{ label: 'Corte', ops: [{ op: 'removeRanges' as const, ranges: [range] }] }];
+      expect(s.propose({ requestId: `corte-${removed}`, baseRevision: s.project.revision, title: 'Corte', steps }).ok).toBe(true);
+      const d = s.draftInfo;
+      expect(d.seams).toEqual([{ at: 3, removed }]);
+      const vids = s.view.clips.filter((c) => c.kind === 'video').map((c) => c.id);
+      expect(vids).toHaveLength(2);
+      expect(d.range.filter((r) => vids.includes(r.clipId))).toEqual([]);
+    }
+  });
+
+  it('aparar o fim do último vídeo não deixa emenda: a faixa do rascunho continua no clipe', () => {
+    const s = setup();
+    const steps = [{ label: 'Fim', ops: [{ op: 'removeRanges' as const, ranges: [[5.98, 6]] as [number, number][] }] }];
+    expect(s.propose({ requestId: 'fim', baseRevision: s.project.revision, title: 'Fim', steps }).ok).toBe(true);
+    const d = s.draftInfo;
+    expect(d.seams).toEqual([]);
+    expect(d.ripple).toBe(false);
+    expect(d.range.find((r) => r.clipId === 'v1')).toEqual({ clipId: 'v1', start: 0, end: 5.98 });
+  });
+
+  it('sem etapa em rascunho, draftInfo é sempre o mesmo objeto vazio', () => {
+    const s = setup();
+    const empty = s.draftInfo;
+    expect(s.draftInfo).toBe(empty);
+    expect([empty.clipIds.size, empty.createdClipIds.size, empty.addedClipIds.size, empty.seams.length, empty.range.length]).toEqual([0, 0, 0, 0, 0]);
+    expect(empty.ripple).toBe(false);
+    s.propose(entradaSaida(s.project.revision));
+    expect(s.draftInfo).not.toBe(empty);
+    s.discardStep();
+    s.discardStep();
+    expect(s.activeStep).toBeUndefined();
+    expect(s.draftInfo).toBe(empty);
+  });
+});

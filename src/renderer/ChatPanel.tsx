@@ -468,7 +468,7 @@ function ProposalCard({ p }: { p: Proposal }) {
       {stale && <p style={{ color: 'var(--warn)' }}>{p.staleReason}</p>}
       <div className="steps">
         {p.steps.map((st, i) => (
-          <div key={st.id} className={`step ${st.status === 'draft' && !stale ? 'draft' : ''}`} title={st.ops.map(describeOp).join(' · ')}>
+          <div key={st.id} className={`step ${st.status === 'draft' && !stale ? 'draft' : ''}`} title={st.requested.map(describeOp).join(' · ')}>
             <span>
               {i + 1}. {st.label}
               {st.manualOps.length > 0 && ' (ajustada)'}
