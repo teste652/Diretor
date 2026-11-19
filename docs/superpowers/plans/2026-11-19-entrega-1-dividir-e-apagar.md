@@ -1078,3 +1078,7 @@ check(
 - `cutTextTime` e `shiftClips` não entram no `OPS_HELP`: são peças da expansão. A IA usa `removeRanges`, `splitClip` e `trimClip`.
 - Uma entrada de áudio da exportação nunca é dividida entre faixas que se sobrepõem, para nenhum ramo do `asplit` ter de guardar som esperando outro.
 - O teste de 1 hora roda só no CI (variável `CI`) ou com `DIRETOR_TESTE_LONGO=1`, para não pesar no `npm test` do dia a dia.
+
+## Correções durante a execução
+
+- **Tarefa 1, keyframes (revisão da tarefa):** o algoritmo original de `cutKeyframes` só tirava ou movia pontos, e um corte que pegava um fade podia deixar o título invisível ou criar um fade longo; `partitionKeyframes` dava a cada camada o valor da própria curva na borda, o que fazia a divisão pular quando a curva desenhada juntava camadas diferentes. Regra adotada: na divisão, os pontos de borda levam o valor da curva desenhada (todas as camadas juntas). No corte, um corte que encosta no começo ou no fim do texto dá o mesmo resultado que aparar aquela borda (`remapKeyframes`); num corte no meio, os grupos presos às bordas seguem as regras do aparar (entrada fica, saída acompanha o fim, grupo do clipe inteiro estica) e cada camada de conteúdo ganha um degrau na emenda: um ponto com o valor que chegava em t0 e outro com o valor de t1, no mesmo instante. Os ids desses pontos são determinísticos. Limite aceito: dividir ou cortar dentro de um trecho com aceleração (easeIn, easeOut, easeInOut) recomeça a aceleração em cada lado; trechos lineares ficam exatos.
