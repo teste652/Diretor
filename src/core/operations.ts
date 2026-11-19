@@ -23,6 +23,7 @@ import {
 } from './model';
 import { cutKeyframes, partitionKeyframes, remapKeyframes, sameGroup } from './keyframes';
 import { defaultProps, evalProp, propDef, sortedKeyframes } from './properties';
+import { MAX_RANGES, type TimeRange, planRemoveRanges, trimRipple } from './ripple';
 import { EPS, MIN_DURATION, SAME_T, round } from './time';
 
 export type ClipChanges = {
@@ -106,8 +107,9 @@ export type Op =
   /**
    * Apara uma borda do clipe. `delta` é quanto a borda anda na linha do tempo
    * (positivo = para a direita). No vídeo, aparar o início mantém o clipe no
-   * lugar e puxa os vídeos seguintes (sem buraco); a animação de entrada fica
-   * no começo, a de saída no fim, e o resto acompanha o conteúdo.
+   * lugar; com ripple (o padrão), aparar vale como apagar ou abrir aquele pedaço
+   * em todas as faixas, sem buraco. A animação de entrada fica no começo, a de
+   * saída no fim, e o resto acompanha o conteúdo.
    */
   | { op: 'trimClip'; clipId: string; edge: TrimEdge; delta: number; ripple?: boolean }
   /** Divide o clipe em `at` (segundos da linha do tempo): a parte da direita vira o clipe `newId`. */
@@ -116,6 +118,8 @@ export type Op =
   | { op: 'shiftClips'; clipIds: string[]; delta: number }
   /** Tira o trecho [t0, t1] (segundos relativos ao início do clipe) de um título ou legenda. */
   | { op: 'cutTextTime'; clipId: string; t0: number; t1: number }
+  /** Macro: apaga trechos [início, fim] (segundos da linha do tempo) em todas as faixas; o que vem depois anda para trás. */
+  | { op: 'removeRanges'; ranges: TimeRange[] }
   | { op: 'updateTrack'; trackId: string; set: { hidden?: boolean; locked?: boolean } }
   | { op: 'renameProject'; name: string }
   | { op: 'setCanvas'; width: number; height: number; fps?: number }
@@ -172,6 +176,7 @@ const OP_KEYS: Record<Op['op'], string[]> = {
   splitClip: ['clipId', 'at', 'newId'],
   shiftClips: ['clipIds', 'delta'],
   cutTextTime: ['clipId', 't0', 't1'],
+  removeRanges: ['ranges'],
   updateTrack: ['trackId', 'set'],
   renameProject: ['name'],
   setCanvas: ['width', 'height', 'fps'],
@@ -184,6 +189,29 @@ function err(index: number, op: string, code: OpError['code'], message: string):
 
 function trackLocked(p: Project, clip: Clip): boolean {
   return !!findTrack(p, clip.trackId)?.locked;
+}
+
+/**
+ * Primeira faixa travada que um plano de corte mudaria: os clipes que já existem
+ * e que as operações nomeiam. Ids novos (pedaços que o plano ainda vai criar) não
+ * contam. Sem nada travado, null.
+ */
+export function lockedTrackError(p: Project, ops: Op[]): string | null {
+  const clips = new Map(p.clips.map((c) => [c.id, c]));
+  for (const o of ops) {
+    const ids =
+      o.op === 'shiftClips'
+        ? o.clipIds
+        : o.op === 'splitClip' || o.op === 'removeClip' || o.op === 'cutTextTime' || o.op === 'updateClip' || o.op === 'trimClip'
+          ? [o.clipId]
+          : [];
+    for (const id of ids) {
+      const c = clips.get(id);
+      const track = c && findTrack(p, c.trackId);
+      if (track?.locked) return `A faixa "${track.name}" está travada e mudaria junto com o corte. Destrave a faixa para continuar.`;
+    }
+  }
+  return null;
 }
 
 /** Intervalo de uma animação pronta, com os mesmos padrões na validação e na expansão. */
@@ -348,6 +376,10 @@ export function validateOp(p: Project, o: Op, index = 0): OpError[] {
       const lim = trimLimits(p, c, o.edge);
       if (o.delta < lim.min - EPS || o.delta > lim.max + EPS)
         push('out_of_range', `Para aparar ${o.edge === 'start' ? 'o início' : 'o fim'}, delta vai de ${lim.min.toFixed(3)} a ${lim.max.toFixed(3)}s.`);
+      if (!e.length && o.ripple !== false && c.kind === 'video') {
+        const locked = lockedTrackError(p, trimRipple(p, c, o.edge, o.delta));
+        if (locked) push('locked', locked);
+      }
       break;
     }
     case 'splitClip': {
@@ -397,6 +429,30 @@ export function validateOp(p: Project, o: Op, index = 0): OpError[] {
         break;
       }
       if (c.duration - round(o.t1 - o.t0) < MIN_DURATION - EPS) push('out_of_range', `O texto ficaria com menos de ${MIN_DURATION}s; remova o clipe.`);
+      break;
+    }
+    case 'removeRanges': {
+      const ranges: unknown = o.ranges;
+      if (!Array.isArray(ranges) || !ranges.length) {
+        push('invalid_param', 'ranges deve ser uma lista de trechos [início, fim] em segundos.');
+        break;
+      }
+      if (ranges.length > MAX_RANGES) {
+        push(
+          'invalid_param',
+          `Até ${MAX_RANGES} trechos por removeRanges (vieram ${ranges.length}). Envie várias removeRanges na mesma etapa, começando pelos trechos do fim do vídeo.`,
+        );
+        break;
+      }
+      const bad = ranges.findIndex((r) => !Array.isArray(r) || r.length !== 2 || !isNum(r[0]) || !isNum(r[1]) || r[0] < 0 || r[0] >= r[1]);
+      if (bad >= 0) {
+        push('invalid_param', `Trecho ${bad + 1}: use [início, fim] em segundos, com 0 ≤ início < fim.`);
+        break;
+      }
+      const plan = planRemoveRanges(p, o.ranges);
+      const locked = lockedTrackError(p, plan);
+      if (locked) push('locked', locked);
+      else if (!plan.length) push('out_of_range', 'Nada para apagar nesses trechos.');
       break;
     }
     case 'setProperty':
@@ -527,16 +583,12 @@ export function expandOp(p: Project, o: Op): Op[] {
     const existing = near[near.length - 1];
     return [{ ...o, keyframeId: existing?.id ?? newId('kf') }];
   }
+  if (o.op === 'removeRanges') return planRemoveRanges(p, o.ranges);
   if (o.op === 'trimClip') {
     const c = findClip(p, o.clipId)!;
     if (o.ripple === false || c.kind !== 'video') return [{ ...o, ripple: false }];
-    // Vídeo: a borda que mexe no fim do clipe empurra/puxa os vídeos seguintes da faixa.
-    const endShift = o.edge === 'start' ? -o.delta : o.delta;
-    const oldEnd = c.start + c.duration;
-    const ripple: Op[] = p.clips
-      .filter((x) => x.id !== c.id && x.trackId === c.trackId && x.start >= oldEnd - 1e-3 && Math.abs(endShift) > EPS)
-      .map((x) => ({ op: 'updateClip', clipId: x.id, set: { start: round(Math.max(0, x.start + endShift)) } }));
-    return [{ ...o, ripple: false }, ...ripple];
+    // Vídeo: aparar vale como apagar (ou abrir) o pedaço em todas as faixas; o ripple sai do mesmo planejador.
+    return [{ ...o, ripple: false }, ...trimRipple(p, c, o.edge, o.delta)];
   }
   if (o.op !== 'animate') return [o];
   const c = findClip(p, o.clipId)!;
@@ -820,6 +872,8 @@ function applyPrimitive(p: Project, o: Op): void {
       return;
     case 'animate':
       throw new Error('animate deve ser expandida antes de aplicar');
+    case 'removeRanges':
+      throw new Error('removeRanges deve ser expandida antes de aplicar');
   }
 }
 
@@ -888,6 +942,8 @@ export function describeOp(o: Op): string {
       return 'Mover clipes';
     case 'cutTextTime':
       return 'Encurtar texto';
+    case 'removeRanges':
+      return o.ranges.length === 1 ? 'Apagar trecho' : `Apagar ${o.ranges.length} trechos`;
     case 'removeClip':
       return 'Remover clipe';
     case 'setProperty':
