@@ -63,7 +63,7 @@ Comandos: `npx vitest run <arquivo>` roda um arquivo de teste; `npm test` roda t
 
 ---
 
-### Tarefa 1: Tempo e keyframes em módulos próprios
+### Task 1: Tempo e keyframes em módulos próprios
 
 **Arquivos:**
 - Criar: `src/core/time.ts`, `src/core/keyframes.ts`
@@ -139,7 +139,7 @@ describe('keyframes ao dividir e cortar', () => {
 
 ---
 
-### Tarefa 2: Primitivas `splitClip`, `shiftClips` e `cutTextTime`
+### Task 2: Primitivas `splitClip`, `shiftClips` e `cutTextTime`
 
 **Arquivos:**
 - Modificar: `src/core/operations.ts` (união `Op` `:84-125`, `OP_KEYS` `:158-173`, `validateOp` `:214+`, `expandOp` `:462+`, `applyPrimitive` `:616+`, `touchedClipIds` `:825`, `describeOp` `:835`)
@@ -260,7 +260,7 @@ describe('pedaços', () => {
 
 ---
 
-### Tarefa 3: `removeRanges` e o ripple do aparar
+### Task 3: `removeRanges` e o ripple do aparar
 
 **Arquivos:**
 - Criar: `src/core/ripple.ts`
@@ -450,7 +450,7 @@ describe('aparar vídeo com ripple vale para todas as faixas', () => {
 
 ---
 
-### Tarefa 4: Sessão: rota para o rascunho, `draftInfo` memorizado, emendas e agulha
+### Task 4: Sessão: rota para o rascunho, `draftInfo` memorizado, emendas e agulha
 
 **Arquivos:**
 - Modificar: `src/core/pieces.ts`, `src/core/session.ts:240-283` (`draftInfo`) e `:316-324` (`shouldRouteToDraft`), `src/renderer/ChatPanel.tsx:471`
@@ -552,7 +552,7 @@ describe('cortes e rascunhos', () => {
 
 ---
 
-### Tarefa 5: A IA aprende a dividir e a apagar trechos
+### Task 5: A IA aprende a dividir e a apagar trechos
 
 **Arquivos:**
 - Modificar: `src/mcp/server.ts:53-63` (`OPS_HELP`)
@@ -588,7 +588,7 @@ it('a ajuda das operações ensina a dividir e a apagar trechos', async () => {
 
 ---
 
-### Tarefa 6: Som da exportação com cortes
+### Task 6: Som da exportação com cortes
 
 **Arquivos:**
 - Criar: `src/core/exportAudio.ts`
@@ -698,7 +698,7 @@ E, com o ffmpeg de verdade (`describe('som com cortes (ffmpeg)')`, cada teste co
 
 ---
 
-### Tarefa 7: Arquivo de filtro no main, limpeza e aviso de som demorado
+### Task 7: Arquivo de filtro no main, limpeza e aviso de som demorado
 
 **Arquivos:**
 - Modificar: `src/main/main.ts:249-262` (`ExportJob`), `:295-307` (`abortExport`), `:314-358` (`export:start`), `:384-431` (`export:finish`); `src/renderer/App.tsx` (janela de exportação, perto da linha 190); `scripts/e2e.mjs:743-746`
@@ -722,7 +722,7 @@ E, com o ffmpeg de verdade (`describe('som com cortes (ffmpeg)')`, cada teste co
 
 ---
 
-### Tarefa 8: Prévia e exportação com até 3 vídeos por mídia
+### Task 8: Prévia e exportação com até 3 vídeos por mídia
 
 **Arquivos:**
 - Criar: `src/renderer/videoSlots.ts`
@@ -871,7 +871,7 @@ check(
 
 ---
 
-### Tarefa 9: Dividir, marcar trecho e apagar pela interface; Antes/Depois
+### Task 9: Dividir, marcar trecho e apagar pela interface; Antes/Depois
 
 **Arquivos:**
 - Criar: `src/renderer/timelineLogic.ts`
@@ -961,7 +961,7 @@ await discardOpen();
 
 ---
 
-### Tarefa 10: Linha do tempo leve com milhares de pedaços e vídeos de horas
+### Task 10: Linha do tempo leve com milhares de pedaços e vídeos de horas
 
 **Arquivos:**
 - Modificar: `src/renderer/Timeline.tsx` (componente inteiro: `usePlayback` sai, zoom `:72-79` e `:183`, régua `:116-118` e `:219-231`, `geom` `:120-141`, `ClipBlock` `:313+`), `src/renderer/timelineLogic.ts`, `src/renderer/styles.css`
@@ -1039,7 +1039,7 @@ check('300 pedaços: aplica e a linha do tempo desenha só os visíveis', applyE
 
 ---
 
-### Tarefa 11: Exportar 300 pedaços no app e verificação completa
+### Task 11: Exportar 300 pedaços no app e verificação completa
 
 **Arquivos:**
 - Modificar: `scripts/e2e.mjs` (seção "Entrega 1")
