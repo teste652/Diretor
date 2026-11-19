@@ -11,15 +11,16 @@ export const sameGroup = (a: string | undefined, b: string | undefined) => (a ??
  * ocupam o clipe inteiro esticam; grupos presos ao fim (saída) acompanham o fim;
  * grupos presos ao começo (entrada) ficam; o resto acompanha o conteúdo
  * (`contentShift`). Pontos que saem do clipe viram um ponto na borda com o
- * valor que a animação tinha ali.
+ * valor que a animação tinha ali. Com `only`, só essas propriedades mudam (os
+ * grupos continuam medidos no clipe inteiro).
  */
-export function remapKeyframes(c: Clip, newDur: number, contentShift: number): void {
+export function remapKeyframes(c: Clip, newDur: number, contentShift: number, only?: ReadonlySet<string>): void {
   const D = c.duration;
   if (Math.abs(newDur - D) < EPS && Math.abs(contentShift) < EPS) return;
   const groups = new Map(keyframeGroups(c).map((g) => [g.group, g]));
   const snap = (t: number) => (Math.abs(t) < SAME_T ? 0 : Math.abs(t - newDur) < SAME_T ? newDur : round(t));
-  for (const ap of Object.values(c.props)) {
-    if (!ap.keyframes.length) continue;
+  for (const [name, ap] of Object.entries(c.props)) {
+    if (!ap.keyframes.length || (only && !only.has(name))) continue;
     const mapped = ap.keyframes.map((k) => {
       const g = k.group ? groups.get(k.group) : undefined;
       const atStart = !!g && g.start <= SAME_T;
@@ -123,24 +124,24 @@ export function cutKeyframes(c: Clip, t0: number, t1: number): Record<string, An
   const D = c.duration;
   const d = round(t1 - t0);
   const nd = round(D - d);
-  const copia = structuredClone(c);
-  if (t0 <= EPS || t1 >= D - EPS) {
-    remapKeyframes(copia, nd, t0 <= EPS ? -d : 0);
-    return copia.props;
-  }
-  remapKeyframes(copia, nd, 0);
-  const groups = new Map(keyframeGroups(c).map((g) => [g.group, g]));
+  // Cópia rasa com as propriedades clonadas: remapKeyframes só lê a duração e as propriedades.
   const out = cloneProps(c.props);
-  for (const [name, ap] of Object.entries(c.props)) {
-    if (!ap.keyframes.length) continue;
-    const anchored = ap.keyframes.every((k) => {
+  if (t0 <= EPS || t1 >= D - EPS) {
+    remapKeyframes({ ...c, props: out }, nd, t0 <= EPS ? -d : 0);
+    return out;
+  }
+  const groups = new Map(keyframeGroups(c).map((g) => [g.group, g]));
+  const isAnchored = (ap: AnimProp) =>
+    ap.keyframes.length > 0 &&
+    ap.keyframes.every((k) => {
       const g = k.group ? groups.get(k.group) : undefined;
       return !!g && (g.start <= SAME_T || g.end >= D - SAME_T);
     });
-    if (anchored) {
-      out[name].keyframes = copia.props[name].keyframes;
-      continue;
-    }
+  // Propriedades só de animações presas às bordas: seguem o aparar do fim (só elas são remapeadas).
+  const anchored = new Set(Object.keys(c.props).filter((name) => isAnchored(c.props[name])));
+  if (anchored.size) remapKeyframes({ ...c, props: out }, nd, 0, anchored);
+  for (const [name, ap] of Object.entries(c.props)) {
+    if (!ap.keyframes.length || anchored.has(name)) continue;
     const s = sortedKeyframes(ap.keyframes);
     const kept: Keyframe[] = [];
     const moved: Keyframe[] = [];

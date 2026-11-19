@@ -109,8 +109,9 @@ function effectiveCut([a, b]: TimeRange, s: number, fim: number): TimeRange {
 
 /**
  * Apaga os trechos em todas as faixas (menos `exclude`), só com primitivas.
- * Fase 1: o vídeo que um trecho toca é dividido e perde o pedaço; título e
- * legenda são encurtados (ou saem, se sobraria pouco). Fase 2: cada clipe que
+ * Fase 1: o vídeo que um trecho toca é dividido e perde o pedaço (um pedaço
+ * menor que o mínimo sai aparando o vizinho que fica); título e legenda são
+ * encurtados (ou saem, se sobraria pouco). Fase 2: cada clipe que
  * fica anda uma vez só, para onde vai parar o primeiro instante que ele ainda
  * mostra; os que andam o mesmo tanto vão juntos num shiftClips.
  */
@@ -132,31 +133,50 @@ export function planRemoveRanges(p: Project, ranges: TimeRange[], opts: RippleOp
     }
     if (c.kind === 'video') {
       // Da direita para a esquerda: o id original continua sendo o pedaço mais à esquerda.
+      // Um pedaço a tirar menor que o mínimo nunca é criado (o splitClip o recusaria):
+      // o vizinho que fica é aparado (trimClip sem ripple; os keyframes seguem o aparar).
       let fim = e;
-      let alive = true;
-      for (let i = i1 - 1; i >= i0 && alive; i--) {
+      /** Primeiro instante que o id original ainda mostra; null quando ele sai. */
+      let first: number | null = s;
+      for (let i = i1 - 1; i >= i0; i--) {
         const [a, b] = effectiveCut(R[i], s, fim);
         if (a <= s && b >= fim) {
           ops.push({ op: 'removeClip', clipId: c.id });
-          alive = false;
-        } else if (a <= s) {
-          const y = newId('vid');
-          ops.push({ op: 'splitClip', clipId: c.id, at: b, newId: y }, { op: 'removeClip', clipId: c.id });
-          kept.push({ id: y, start: b, first: b });
-          alive = false;
-        } else if (b >= fim) {
-          const x = newId('vid');
-          ops.push({ op: 'splitClip', clipId: c.id, at: a, newId: x }, { op: 'removeClip', clipId: x });
-          fim = a;
+          first = null;
+          break;
+        }
+        if (a <= s) {
+          // O trecho leva o começo do clipe: é o último (o mais à esquerda) que toca nele.
+          if (short(b - s)) {
+            ops.push({ op: 'trimClip', clipId: c.id, edge: 'start', delta: round(b - s), ripple: false });
+            first = b;
+          } else {
+            const y = newId('vid');
+            ops.push({ op: 'splitClip', clipId: c.id, at: b, newId: y }, { op: 'removeClip', clipId: c.id });
+            kept.push({ id: y, start: b, first: b });
+            first = null;
+          }
+          break;
+        }
+        if (b >= fim) {
+          if (short(fim - a)) ops.push({ op: 'trimClip', clipId: c.id, edge: 'end', delta: -round(fim - a), ripple: false });
+          else {
+            const x = newId('vid');
+            ops.push({ op: 'splitClip', clipId: c.id, at: a, newId: x }, { op: 'removeClip', clipId: x });
+          }
         } else {
           const y = newId('vid');
-          const x = newId('vid');
-          ops.push({ op: 'splitClip', clipId: c.id, at: b, newId: y }, { op: 'splitClip', clipId: c.id, at: a, newId: x }, { op: 'removeClip', clipId: x });
+          ops.push({ op: 'splitClip', clipId: c.id, at: b, newId: y });
+          if (short(b - a)) ops.push({ op: 'trimClip', clipId: c.id, edge: 'end', delta: -round(b - a), ripple: false });
+          else {
+            const x = newId('vid');
+            ops.push({ op: 'splitClip', clipId: c.id, at: a, newId: x }, { op: 'removeClip', clipId: x });
+          }
           kept.push({ id: y, start: b, first: b });
-          fim = a;
         }
+        fim = a;
       }
-      if (alive) kept.push({ id: c.id, start: s, first: s });
+      if (first !== null) kept.push({ id: c.id, start: s, first });
       continue;
     }
     // Título e legenda: os cortes valem no clipe inteiro; um cutTextTime por trecho, da direita para a esquerda.

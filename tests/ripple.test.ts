@@ -18,6 +18,14 @@ const withTail = () =>
     { op: 'addClip', clip: { kind: 'caption', id: 'c2', text: 'depois', start: 5.5, duration: 1 } },
     { op: 'addClip', clip: { kind: 'title', id: 't2', text: 'fim', start: 6.5, duration: 1 } },
   ]);
+/** Aplica removeRanges e devolve também a mensagem do erro ('' quando aplicou). */
+const tryCut = (p: Project, ranges: TimeRange[]) => {
+  try {
+    return { ...applyOps(p, [{ op: 'removeRanges', ranges }]), error: '' };
+  } catch (e) {
+    return { project: p, applied: [] as Op[], error: (e as Error).message };
+  }
+};
 
 describe('apagar trechos', () => {
   it('apagar [2,3]: o vídeo perde o trecho, tudo depois anda 1 s e o texto em cima é cortado', () => {
@@ -116,6 +124,52 @@ describe('apagar trechos', () => {
       expect(evalClipProp(clip(project, 'tL'), 'x', after)).toBeCloseTo(evalClipProp(clip(p0, 'tL'), 'x', before), 6);
     }
     expect(run(p0, applied)).toEqual(project);
+  });
+});
+
+describe('pedaço a tirar menor que o mínimo: o vizinho que fica é aparado', () => {
+  it('299 trechos de 20 ms num vídeo de 30 s: 300 pedaços e 30 − 299 × 0,02 s', () => {
+    const p0 = run(createProject(), [
+      { op: 'addMedia', media: { id: 'm30', path: 'C:/v/trinta.mp4', name: 'trinta.mp4', duration: 30, width: 1280, height: 720, hasAudio: true } },
+      { op: 'addClip', clip: { kind: 'video', id: 'v30', mediaId: 'm30', start: 0, duration: 30 } },
+    ]);
+    const ranges: TimeRange[] = Array.from({ length: 299 }, (_, i) => [round(0.1 * (i + 1) - 0.02), round(0.1 * (i + 1))]);
+    const { project, applied, error } = tryCut(p0, ranges);
+    expect(error).not.toMatch(/splitClip/);
+    expect(error).toBe('');
+    expect(project.clips.filter((c) => c.kind === 'video')).toHaveLength(300);
+    // Pedaço k: 0,08 s (o último, 0,1 s), encostado no anterior; no arquivo começa em 0,1·k.
+    expect(vids(project)).toEqual(Array.from({ length: 300 }, (_, k) => [round(0.08 * k), round(0.08 * k + (k < 299 ? 0.08 : 0.1)), round(0.1 * k)]));
+    expect(projectDuration(project)).toBeCloseTo(30 - 299 * 0.02, 6);
+    expect(run(p0, applied)).toEqual(project);
+  });
+
+  it('um quadro no meio de v1 [3; 3,033]', () => {
+    const { project: p, error } = tryCut(base(), [[3, 3.033]]);
+    expect(error).not.toMatch(/splitClip/);
+    expect(error).toBe('');
+    expect(vids(p)).toEqual([[0, 3, 0], [3, 5.967, 3.033], [5.967, 8.967, 6]]);
+    expect([span(p, 'v1'), span(p, 't1'), span(p, 'c1')]).toEqual([[0, 3], [0, 3], [0, 1.2]]);
+    expect(projectDuration(p)).toBeCloseTo(8.967, 6);
+  });
+
+  it('um quadro depois da emenda do Ctrl+B: dividir v1 em 2 e apagar [1; 2,033]', () => {
+    const split = run(base(), [{ op: 'splitClip', clipId: 'v1', at: 2, newId: 'v1b' }]);
+    const { project: p, error } = tryCut(split, [[1, 2.033]]);
+    expect(error).not.toMatch(/splitClip/);
+    expect(error).toBe('');
+    expect(vids(p)).toEqual([[0, 1, 0], [1, 4.967, 2.033], [4.967, 7.967, 6]]);
+    expect([span(p, 'v1'), span(p, 'v1b'), span(p, 't1'), span(p, 'c1')]).toEqual([[0, 1], [1, 4.967], [0, 1.967], [0, 1]]);
+    expect(projectDuration(p)).toBeCloseTo(7.967, 6);
+  });
+
+  it('20 ms depois do fim de v1: apagar [5,98; 7]', () => {
+    const { project: p, error } = tryCut(base(), [[5.98, 7]]);
+    expect(error).not.toMatch(/splitClip/);
+    expect(error).toBe('');
+    expect(vids(p)).toEqual([[0, 5.98, 0], [5.98, 7.98, 7]]);
+    expect([span(p, 'v1'), span(p, 't1'), span(p, 'c1')]).toEqual([[0, 5.98], [0, 3], [0, 1.2]]);
+    expect(projectDuration(p)).toBeCloseTo(7.98, 6);
   });
 });
 
