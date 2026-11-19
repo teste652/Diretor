@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { findClip } from '../src/core/model';
+import { type Project, findClip } from '../src/core/model';
 import { draftSeams, isContiguous, mapPlayhead } from '../src/core/pieces';
 import { base, run, videos } from './fixtures';
 
@@ -38,4 +38,34 @@ describe('agulha no Antes/Depois', () => {
     expect(mapPlayhead(antes, depois, 2.5)).toBeCloseTo(2, 6);
     expect(mapPlayhead(antes, depois, 9.5)).toBeCloseTo(8, 6);
   });
+});
+
+describe('agulha na borda do corte: várias mídias, pedaços fora de ordem e conteúdo repetido', () => {
+  const cut = (antes: Project, ranges: [number, number][]) => run(antes, [{ op: 'removeRanges', ranges }]);
+  const needle = (antes: Project, ranges: [number, number][], t: number) => mapPlayhead(antes, cut(antes, ranges), t);
+  it('outra mídia logo depois do corte: para na borda, não no próximo pedaço da mesma mídia', () =>
+    expect(needle(videos([['A', 0, 2, 0], ['X', 2, 2, 0, 'm2'], ['B', 4, 2, 3]]), [[1, 2]], 1.5)).toBeCloseTo(1, 6));
+  it('duas tomadas com o corte na junção', () => {
+    const antes = videos([['A', 0, 10, 0], ['B', 10, 10, 0, 'm2']]);
+    const depois = cut(antes, [[8, 12]]);
+    expect(mapPlayhead(antes, depois, 9)).toBeCloseTo(8, 6);
+    expect(mapPlayhead(antes, depois, 11)).toBeCloseTo(8, 6);
+    expect(mapPlayhead(antes, depois, 13)).toBeCloseTo(9, 6);
+    expect(mapPlayhead(depois, antes, 9)).toBeCloseTo(13, 6);
+  });
+  it('pedaços fora da ordem do arquivo', () => expect(needle(videos([['A', 0, 2, 5], ['B', 2, 2, 0]]), [[1, 2]], 1.5)).toBeCloseTo(1, 6));
+  it('conteúdo repetido: a agulha fica no pedaço que foi cortado', () => {
+    const antes = videos([['A', 0, 4, 0], ['B', 4, 2, 1]]);
+    const depois = cut(antes, [[1.5, 2.5]]);
+    expect(mapPlayhead(antes, depois, 1.6)).toBeCloseTo(1.5, 6);
+    expect(mapPlayhead(depois, antes, 2)).toBeCloseTo(3, 6);
+  });
+  it('a tomada do meio inteira cortada', () =>
+    expect(needle(videos([['A', 0, 2, 0], ['B', 2, 2, 0, 'm2'], ['C', 4, 2, 2]]), [[2, 4]], 3)).toBeCloseTo(2, 6));
+  it('corte no começo e no fim da linha do tempo', () => {
+    expect(needle(base(), [[0, 1]], 0.5)).toBeCloseTo(0, 6);
+    expect(needle(base(), [[8, 9]], 8.5)).toBeCloseTo(8, 6);
+  });
+  it('corte que entra num buraco volta para a borda de antes dele', () =>
+    expect(needle(videos([['A', 0, 4, 0], ['B', 5, 3, 4]]), [[3, 4.5]], 3.5)).toBeCloseTo(3, 6));
 });

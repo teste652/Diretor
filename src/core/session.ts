@@ -28,17 +28,20 @@ export interface DraftInfo {
   ripple: boolean;
 }
 
-/** Há emenda a até SAME_T de `t` (as emendas vêm ordenadas por `at`). */
-function hasSeamAt(seams: Seam[], t: number): boolean {
-  let lo = 0;
-  let hi = seams.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (seams[mid].at < t - SAME_T) lo = mid + 1;
-    else hi = mid;
+/** Há emenda com `at` entre lo e hi (as emendas vêm ordenadas por `at`). */
+function hasSeamIn(seams: Seam[], lo: number, hi: number): boolean {
+  let a = 0;
+  let b = seams.length;
+  while (a < b) {
+    const mid = (a + b) >> 1;
+    if (seams[mid].at < lo) a = mid + 1;
+    else b = mid;
   }
-  return lo < seams.length && seams[lo].at <= t + SAME_T;
+  return a < seams.length && seams[a].at <= hi;
 }
+
+/** Há emenda a até SAME_T de `t`. */
+const hasSeamAt = (seams: Seam[], t: number) => hasSeamIn(seams, t - SAME_T, t + SAME_T);
 
 const emptyDraftInfo = (): DraftInfo => ({
   clipIds: new Set(),
@@ -317,24 +320,38 @@ export class EditorSession {
     out.seams = draftSeams(this.project, view);
     out.ripple = out.seams.length > 0 || all.some((o) => o.op === 'shiftClips');
     const ranges = new Map<string, { start: number; end: number }>();
-    // Faixa do rascunho: onde estão os pontos/mudanças, não o clipe inteiro. Num corte, quem
-    // marca o lugar é o chip da emenda: dividir, encurtar texto e aparar o vídeo na borda de
-    // uma emenda (o corte de um pedaço curto) não contam.
+    const mark = (id: string, s: number, e: number) => {
+      const r = ranges.get(id);
+      ranges.set(id, r ? { start: Math.min(r.start, s), end: Math.max(r.end, e) } : { start: s, end: e });
+    };
+    // Faixa do rascunho: onde estão os pontos/mudanças, não o clipe inteiro. Uma op só fica fora
+    // dela onde o chip de uma emenda marca o lugar: a divisão com emenda na borda dividida, o texto
+    // encurtado com emenda dentro dele e o vídeo aparado com emenda na borda aparada. Sem emenda
+    // (corte no começo ou no fim da linha do tempo, ou num trecho só de texto), a faixa marca os pedaços.
     const keyframeOnly = all.every((o) => ['setKeyframe', 'clearKeyframes', 'retimeGroup', 'removeKeyframe'].includes(o.op));
     for (const o of all) {
+      if (o.op === 'splitClip') {
+        // A borda é o começo do pedaço da direita. O fim do da esquerda só vale sem ele: esse fim anda
+        // quando o mesmo clipe é dividido de novo (um corte divide da direita para a esquerda).
+        const left = inView.get(o.clipId);
+        const right = o.newId === undefined ? undefined : inView.get(o.newId);
+        const edge = right ? right.start : left ? left.start + left.duration : undefined;
+        if (edge === undefined || hasSeamAt(out.seams, edge)) continue;
+        for (const c of [left, right]) if (c) mark(c.id, c.start, c.start + c.duration);
+        continue;
+      }
       if (!('clipId' in o) && o.op !== 'addClip') continue;
-      if (o.op === 'splitClip' || o.op === 'cutTextTime') continue;
       if (keyframeOnly && (o.op === 'clearKeyframes' || o.op === 'removeKeyframe')) continue;
       const id = o.op === 'addClip' ? o.clip.id! : (o as { clipId: string }).clipId;
       const c = inView.get(id);
       if (!c) continue;
       let s = c.start;
       let e = c.start + c.duration;
+      if (o.op === 'cutTextTime' && hasSeamIn(out.seams, s - SAME_T, e + SAME_T)) continue;
       if (o.op === 'trimClip' && c.kind === 'video' && hasSeamAt(out.seams, o.edge === 'start' ? s : e)) continue;
       if (o.op === 'setKeyframe') s = e = c.start + o.t;
       if (o.op === 'retimeGroup') (s = c.start + o.start), (e = c.start + o.start + o.duration);
-      const r = ranges.get(id);
-      ranges.set(id, r ? { start: Math.min(r.start, s), end: Math.max(r.end, e) } : { start: s, end: e });
+      mark(id, s, e);
     }
     for (const [clipId, r] of ranges) out.range.push({ clipId, ...r });
     return out;

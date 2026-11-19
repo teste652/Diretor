@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { EditorSession } from '../src/core/session';
+import type { Op } from '../src/core/operations';
+import { type DraftInfo, EditorSession } from '../src/core/session';
 import { findClip, parseProject, type TitleClip } from '../src/core/model';
 import { handleBridge } from '../src/core/api';
 import { evalClipProp, keyframeGroups } from '../src/core/properties';
@@ -683,5 +684,63 @@ describe('cortes e rascunhos', () => {
     s.discardStep();
     expect(s.activeStep).toBeUndefined();
     expect(s.draftInfo).toBe(empty);
+  });
+
+  /** Propõe uma etapa só com estas ops e devolve o draftInfo dela. */
+  const proposeStep = (s: EditorSession, ops: Op[]) => {
+    expect(s.propose({ requestId: 'faixa', baseRevision: s.project.revision, title: 'Corte', steps: [{ label: 'Corte', ops }] }).ok).toBe(true);
+    return s.draftInfo;
+  };
+  /** A faixa do rascunho em ordem de início (e de id, no empate). */
+  const sorted = (range: DraftInfo['range']) => [...range].sort((a, b) => a.start - b.start || (a.clipId < b.clipId ? -1 : 1));
+
+  it('corte no fim, sem emenda: a faixa do rascunho marca o vídeo e o título que encurtaram', () => {
+    const d = proposeStep(setup(), [{ op: 'removeRanges', ranges: [[5, 6]] }]);
+    expect(d.seams).toEqual([]);
+    expect(d.ripple).toBe(false);
+    expect(sorted(d.range)).toEqual(sorted([{ clipId: 'v1', start: 0, end: 5 }, { clipId: 't1', start: 0, end: 5 }]));
+  });
+
+  it('corte no começo, sem emenda: a faixa marca o pedaço que ficou e o título', () => {
+    const s = setup();
+    const d = proposeStep(s, [{ op: 'removeRanges', ranges: [[0, 1]] }]);
+    expect(d.seams).toEqual([]);
+    expect(d.ripple).toBe(true);
+    const vids = s.view.clips.filter((c) => c.kind === 'video');
+    expect(vids).toHaveLength(1);
+    expect(sorted(d.range)).toEqual(sorted([{ clipId: vids[0].id, start: 0, end: 5 }, { clipId: 't1', start: 0, end: 5 }]));
+  });
+
+  it('corte no meio do vídeo: a emenda marca o lugar e nada vai para a faixa', () => {
+    expect(proposeStep(setup(), [{ op: 'removeRanges', ranges: [[3, 3.5]] }]).range).toEqual([]);
+  });
+
+  it('corte num trecho só de título: sem emenda, a faixa marca o título', () => {
+    const s = new EditorSession();
+    s.dispatch([
+      { op: 'addMedia', media: { id: 'm1', path: 'C:/v/clip.mp4', name: 'clip.mp4', duration: 10, width: 1280, height: 720, hasAudio: true } },
+      { op: 'addClip', clip: { kind: 'video', id: 'v1', mediaId: 'm1', start: 3, duration: 6 } },
+      { op: 'addClip', clip: { kind: 'title', id: 't1', text: 'ABERTURA', start: 0, duration: 3 } },
+    ]);
+    const d = proposeStep(s, [{ op: 'removeRanges', ranges: [[1, 2]] }]);
+    expect(d.seams).toEqual([]);
+    expect(d.ripple).toBe(true);
+    expect(d.range).toEqual([{ clipId: 't1', start: 0, end: 2 }]);
+  });
+
+  it('dividir sem cortar: a faixa marca os dois pedaços', () => {
+    const s = setup();
+    const d = proposeStep(s, [{ op: 'splitClip', clipId: 'v1', at: 3 }]);
+    expect(d.seams).toEqual([]);
+    const piece = s.view.clips.find((c) => c.kind === 'video' && c.id !== 'v1')!;
+    expect(sorted(d.range)).toEqual([{ clipId: 'v1', start: 0, end: 3 }, { clipId: piece.id, start: 3, end: 6 }]);
+  });
+
+  it('corte com emenda e divisão na mesma etapa: só a divisão sem emenda vai para a faixa', () => {
+    const s = setup();
+    const d = proposeStep(s, [{ op: 'removeRanges', ranges: [[4, 4.5]] }, { op: 'splitClip', clipId: 'v1', at: 1 }]);
+    expect(d.seams).toEqual([{ at: 4, removed: 0.5 }]);
+    const piece = s.view.clips.find((c) => c.kind === 'video' && c.start === 1)!;
+    expect(sorted(d.range)).toEqual([{ clipId: 'v1', start: 0, end: 1 }, { clipId: piece.id, start: 1, end: 4 }]);
   });
 });
