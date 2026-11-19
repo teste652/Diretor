@@ -2,6 +2,7 @@
 
 - **Estado:** proposta, esperando a aprovação do usuário.
 - **Data:** 19/11/2026, sobre o Diretor 0.1.24 (`main` em 470a840).
+- **Checagem de quem constrói:** feita em 19/11/2026. As respostas entraram no texto (respirações com cortar e abaixar na entrega 6, ordem, correções de palavras, áreas do TikTok e medição de velocidade); as perguntas que só o usuário responde estão marcadas como suposições em "Decisões tomadas pelo Claude".
 - **Pesquisa de apoio:** `docs/pesquisa/bloco-1/` (em inglês). No fim de cada arquivo há uma checagem independente; onde ela corrige o texto, vale a correção. Este design já resolve os conflitos entre as pesquisas (seção "Correções e conflitos resolvidos").
 
 A Parte 1 é o que o usuário aprova, em linguagem simples. A Parte 2 é para quem vai construir.
@@ -23,9 +24,9 @@ A Parte 1 é o que o usuário aprova, em linguagem simples. A Parte 2 é para qu
 2. **Legendas com o visual que quiser.** Fonte (umas 10 fontes grátis já vêm no Diretor, e as fontes instaladas no PC também aparecem), cor do texto, cor e grossura do contorno, sombra, caixa atrás, tamanho, posição e MAIÚSCULAS. Estilos prontos para começar: Amarelo com borda, Karaokê (a palavra falada acende), Palavra em destaque, Branco com caixa, Impacto e Clássico. Mudar o estilo muda todas as legendas, a não ser que se peça só uma.
 3. **Som igual na prévia e no vídeo final.** Um motor de áudio novo toca a prévia e monta a exportação do mesmo jeito. Cortes não dão estalo, e a faixa Áudio mostra a forma de onda, que ajuda a cortar nos silêncios.
 4. **Legendas automáticas.** Marca-se o trecho (ou nada, para o vídeo todo) e clica-se em Gerar legendas, ou pede-se ao Claude ("legenda de 0:10 até 0:45"). O Diretor escuta a fala no próprio PC, sem mandar o áudio para a internet, e entrega as legendas como rascunho para aceitar ou descartar. Na primeira vez, pede licença para baixar o reconhecimento de fala (uns 575 MB, uma vez só).
-5. **Tirar as respirações.** O botão Limpar fala acha as respirações e pausas e marca cada uma na faixa Áudio. O usuário confere, desmarca o que quiser manter e aplica. O padrão é cortar essas pausas, o que deixa o vídeo mais curto e dinâmico; na entrega 7 entra a opção de só abaixar o som da respiração, sem cortar. Tudo vira um rascunho, e um Ctrl+Z desfaz.
+5. **Tirar as respirações.** O botão Limpar fala acha as respirações e as pausas e marca cada uma na faixa Áudio. O usuário confere, desmarca o que quiser manter e aplica. O padrão é cortar as pausas: o vídeo fica mais curto e dinâmico, e a imagem dá um pulinho em cada corte. A respiração que fica numa pausa curta demais para cortar é abaixada até quase sumir. Também dá para escolher só abaixar o som das respirações, sem cortar nada, e o vídeo fica do mesmo tamanho. Tudo vira um rascunho, e um Ctrl+Z desfaz.
 6. **Volume de verdade.** Volume em dB, até +12 dB (mais alto que o original), com pontos de animação, entrada e saída suaves (fade) e a opção de abaixar ou silenciar só um trecho, sem cortar a imagem.
-7. **Corrigir palavras.** Uma aba Transcrição mostra o texto falado, destaca as palavras em que o reconhecimento ficou em dúvida e deixa corrigir com um clique.
+7. **Corrigir palavras.** Uma aba Transcrição mostra o texto das legendas, palavra por palavra, destaca as palavras em que o reconhecimento ficou em dúvida e deixa corrigir com um clique. A correção continua valendo quando o usuário gera as legendas de novo ou troca o estilo.
 
 O Claude (e o Codex) conseguem fazer tudo isso a pedido, sempre como rascunho.
 
@@ -38,9 +39,9 @@ Nada de tela nova: entram botões na barra da linha do tempo, um bloco "Áudio" 
 | Diretor   Abrir  Salvar                                                  [Exportar MP4]   |
 +------------------------------+-----------------------------------------+------------------+
 | Mídia | Propriedades | Transcrição | Prévia               [Antes|Depois] | Claude | Codex   |
-| Legenda selecionada          |   +---------------------------------+   | Rascunho:        |
-|  Estilo  [Amarelo com borda] |   |                                 |   |  Limpar fala     |
-|  Fonte   Montserrat Black    |   |       NÃO VAI ACREDITAR         |   |  37 pausas       |
+| Legenda selecionada          |   +---------------------------------+   | Limpar fala      |
+|  Estilo  [Amarelo com borda] |   |                                 |   |  21 respirações  |
+|  Fonte   Montserrat Black    |   |       NÃO VAI ACREDITAR         |   |  16 pausas       |
 |  Cor ■   Contorno ■  ─o───   |   +---------------------------------+   |  vídeo −0:31     |
 |  Sombra  Caixa  MAIÚSCULAS   |    > 0:12 / 3:10                        | [Aceitar][Descartar]
 +------------------------------+-----------------------------------------+------------------+
@@ -62,19 +63,20 @@ Cada item chega numa atualização automática do Diretor. O usuário testa e pe
 3. Forma de onda na faixa Áudio.
 4. Legendas automáticas.
 5. Motor de áudio novo: prévia igual ao vídeo final e cortes sem estalo.
-6. Tirar as respirações (cortando as pausas).
-7. Volume em dB, entrada e saída suaves e abaixar ou silenciar trecho, incluindo "só abaixar a respiração".
+6. Tirar as respirações: cortar as pausas ou só abaixar o som da respiração.
+7. Volume em dB, entrada e saída suaves e abaixar ou silenciar um trecho.
 8. Aba Transcrição para corrigir palavras.
 
-Se o usuário preferir tirar as respirações antes das legendas automáticas, as entregas 5 e 6 podem vir antes da 4 (a 6 depende da 5).
+Outra ordem possível, se o usuário preferir as respirações antes das legendas automáticas: 1, 2, 3, 5, 6, 4, 7, 8. Aí as respirações chegam na 5ª atualização em vez da 6ª, e as legendas automáticas na 6ª em vez da 4ª, porque tirar respirações precisa do motor de áudio novo (5) e as legendas automáticas não. A entrega das respirações fica maior, porque leva junto peças que hoje chegam com as legendas automáticas, mas continua sem o download de 575 MB.
 
 ### Decisões tomadas pelo Claude (o usuário pode mudar qualquer uma)
 
-- **Tipo de vídeo:** o plano supõe vídeo em pé para Reels, TikTok e Shorts, porque o usuário ainda não respondeu. O formato do projeto já segue o primeiro vídeo importado, e os estilos de legenda se ajustam sozinhos ao formato.
+- **Tipo de vídeo:** o plano supõe vídeo em pé para Reels, TikTok e Shorts, porque o usuário ainda não respondeu. O formato do projeto já segue o primeiro vídeo importado, e os estilos de legenda se ajustam sozinhos ao formato. No vídeo em pé, as legendas ficam um pouco mais estreitas para não passar por baixo dos botões do TikTok; se o usuário não publica no TikTok, essa margem sai.
 - **Estilo padrão das legendas:** Amarelo com borda, o exemplo do próprio usuário, com até 3 palavras por vez.
-- **Respirações:** o padrão é cortar as pausas, no ritmo "Dinâmico". Só abaixar o som é a alternativa.
-- **Reconhecimento de fala:** o mais preciso para português que roda no PC, com download único de 575 MB. Um mais rápido e menos preciso pode vir depois, se ficar lento no computador do usuário.
-- **Gerar legendas num trecho que já tem legendas** troca as antigas pelas novas. Como é rascunho, dá para descartar.
+- **Respirações:** o padrão é cortar as pausas, no ritmo "Dinâmico", porque o pedido foi "tirar as partes que a pessoa respira". Cortar deixa o vídeo mais curto, mas a imagem pula em cada corte (o zoom que disfarça isso vem no bloco 2). A respiração que não dá para cortar fica bem baixinha. A alternativa é só abaixar o som das respirações: o vídeo fica do mesmo tamanho e a imagem não pula. O ritmo "Acelerado" corta mais. As pausas e as respirações mais claras já vêm marcadas; as duvidosas vêm desmarcadas.
+- **Ordem:** as legendas automáticas (entrega 4) vêm antes das respirações (entrega 6). Elas não precisam do motor de áudio novo, então chegam duas atualizações mais cedo, e as peças que as duas usam (o programa de fala no Windows, as tarefas com barra de progresso e os rascunhos do próprio Diretor) são testadas antes nas legendas, onde um defeito atrapalha menos. A outra ordem adianta as respirações em uma atualização (ver "Ordem das entregas").
+- **Reconhecimento de fala:** o mais preciso para português que roda no PC, com download único de 575 MB. A entrega 4 mostra quanto tempo levou no computador do usuário; se ficar lento, entra a opção "Mais rápido": um reconhecimento menor, do mesmo programa, com uns 260 MB a mais para baixar, que erra mais palavras.
+- **Gerar legendas num trecho que já tem legendas** refaz as legendas desse trecho no estilo escolhido, aproveitando o texto que já está nelas, com as correções; só as partes sem legenda são escutadas. Assim, para passar de Amarelo (até 3 palavras) para Clássico (duas linhas), basta gerar de novo com o Clássico, sem esperar nova transcrição. Para escutar um trecho do zero, o usuário apaga antes as legendas dele. Como é rascunho, dá para descartar.
 - **Aparar um vídeo** passa a funcionar como apagar aquele pedaço: as legendas e os títulos em cima da parte aparada saem junto, e os que vêm depois andam junto. Hoje só os vídeos andam, e as legendas perdem a sincronia.
 - **Títulos** também ganham contorno e as fontes novas.
 - **Cópia do áudio:** o Diretor guarda uma cópia do áudio de cada vídeo para trabalhar rápido (uns 700 MB por hora de vídeo) e apaga as mais antigas sozinho, nunca as do projeto aberto.
@@ -91,10 +93,12 @@ Se o usuário preferir tirar as respirações antes das legendas automáticas, a
 ### Limites que o usuário vai notar
 
 - As legendas automáticas precisam baixar 575 MB na primeira vez.
-- Transcrever leva tempo. A estimativa inicial é de um minuto de espera por minuto de fala num notebook comum, e mais num computador fraco; a medição de verdade vem na entrega 4.
+- Transcrever leva tempo: de menos de um minuto a uns três minutos de espera por minuto de fala, conforme o computador. A entrega 4 mede no PC do usuário e mostra o tempo.
 - O reconhecimento erra algumas palavras, principalmente nomes. Elas aparecem destacadas para conferir.
 - A palavra que acende no Karaokê pode adiantar ou atrasar um pouco (por volta de 0,1 s).
 - A detecção de respiração também erra às vezes. Por isso tudo passa pela revisão antes de aplicar.
+- Cortar pausas faz a imagem pular em cada corte; o zoom que disfarça isso fica para o bloco 2.
+- Se a gravação tiver música, TV ou outra pessoa falando junto da voz, o Diretor avisa e não marca nada sozinho, porque cortar ou abaixar mexe nesse som também.
 - Emojis seguem o desenho do Windows instalado.
 
 ---
@@ -118,7 +122,7 @@ O usuário faz vídeos falados (supostamente verticais, para Reels, TikTok e Sho
 
 ### Fora do bloco 1
 
-Faixas de áudio separadas e `linkId`; "Melhorar voz" (afftdn/arnndn); normalização de loudness; SRT/VTT; emoji e palavras-chave automáticos; animações por palavra (bounce, slideUp, reveal) e `regroupCaptions`; contorno vazado; motor rápido (Parakeet via sherpa-onnx); dicionário de nomes no reconhecimento; zoom alternado nos cortes; cor, transições, rastreamento e máscaras.
+Faixas de áudio separadas e `linkId`; "Melhorar voz" (afftdn/arnndn); normalização de loudness; SRT/VTT; emoji e palavras-chave automáticos; animações por palavra (bounce, slideUp, reveal) e a operação `regroupCaptions` (no bloco 1, reagrupar é gerar de novo sobre legendas que já têm palavras; ver D7); contorno vazado; motor rápido (Parakeet via sherpa-onnx); dicionário de nomes no reconhecimento e substituições automáticas em trechos legendados depois; zoom alternado nos cortes; cor, transições, rastreamento e máscaras.
 
 ### Anti-metas (falha mesmo que "funcione")
 
@@ -159,7 +163,9 @@ Para as legendas também foram descartados ASS/libass (dois renderizadores difer
 
 - `parseProject` ganha uma cadeia `migrate(v → v+1)`. Aceita da versão 1 até a atual. Arquivo mais novo é recusado com "Este projeto foi salvo por uma versão mais nova do Diretor. Atualize o Diretor para abrir."
 - **v2 (entrega 2):** legendas com `CaptionStyle` em unidades relativas, `CaptionClip.words?` e `preset` com os ids novos; títulos com `stroke`.
-- **v3 (entrega 7):** volume em dB como propriedade, `fadeIn`, `fadeOut`, `ducks` e `Track.muted`.
+- **v3 (entrega 6):** `ducks` nos clipes de vídeo.
+- **v4 (entrega 7):** volume em dB como propriedade, `fadeIn`, `fadeOut` e `Track.muted`. A entrega 8 não muda o arquivo.
+- Os números são fixos porque a entrega 7 depende da 6, nas duas ordens possíveis.
 - Cada migração tem teste de ida (v1 → atual) e de recusa (atual + 1).
 
 #### D2. Dividir e apagar trecho (entrega 1)
@@ -191,21 +197,24 @@ Para as legendas também foram descartados ASS/libass (dois renderizadores difer
   - (a) pedaços contíguos não ganham fade, então a divisão é perfeita;
   - (b) outros cortes ganham crossfade equal-power de 10 ms usando material de fora da borda; sem esse material, 5 ms de saída e 5 ms de entrada;
   - (c) borda encostada em silêncio ganha micro-fade de 3 ms;
-  - (d) soft clip no master acima de −1 dBFS.
+  - (d) soft clip no master acima de −1 dBFS;
+  - (e) ganho = volume × rampas dos trechos abaixados (em dB; −60 = silêncio) × mudo, como em `motor-de-audio.md` item 5(e). A entrega 5 já calcula as rampas; os `ducks` chegam na 6.
 - **Prévia:** um Worker no renderer lê PCM com `fetch` + Range no `media://audio`, mistura e manda blocos por um MessagePort para um AudioWorklet. Worker e worklet são carregados com `?worker&url` do Vite: `?url` num `.ts` entrega TypeScript cru, e Blob URL é barrado pela CSP, que não muda.
 - **Relógio:** passa a ser o do AudioContext (`getOutputTimestamp` + `outputLatency`). Os `<video>` ficam mudos e seguem o relógio: busca se a diferença passar de 80 ms, ajuste de `playbackRate` entre 20 e 80 ms. O controle de volume da prévia continua sendo só monitor.
 - **Exportação:** o main compila o plano a partir do projeto que já recebe em `export:start`, mistura em blocos de 1 s (cedendo com `setImmediate`) num `f32le` temporário ao lado do `.part`, e o ffmpeg recebe `-f f32le -ar 48000 -ac 2 -i <tmp>` e codifica o AAC uma vez só. Sem `utilityProcess` no bloco 1. A limpeza cobre o temporário em cancelar, fechar, travar e sair, como já acontece com o `.part`.
 - **Removido na mesma entrega:** a exportação provisória de D2 e a mixagem pelos elementos.
 - **Paridade:** o PCM tirado do worklet é igual bit a bit ao da exportação (mesmo V8). Comparações que passam pelo ffmpeg (AAC) usam tolerância de SNR, nunca md5.
 
-#### D5. Volume, fades e trechos (entrega 7)
+#### D5. Trechos abaixados (entrega 6), volume e fades (entrega 7)
 
-- **`volume`** vira propriedade do registro `PROPS`: dB, −60 a +12, keyframes interpolados em dB. `status` e `compactClip` passam a ler o registro em vez de `['x','y','scale','opacity']` fixo.
-- **`muted`** continua no clipe. Entram `fadeIn` e `fadeOut` (em segundos, no máximo metade da duração) e `ducks: [{s, e, gainDb, fadeMs, tag}]`, guardados em **segundos da fonte**: aparar, dividir e apagar trecho não precisam remapeá-los, e as marcas de respiração (também em segundos da fonte) entram direto. `Track.muted` é o mudo da faixa.
-- **Operações:** `duckRanges {ranges, gainDb, fadeMs, tag}` (idempotente por tag: trechos da mesma tag que se sobrepõem são trocados) e `clearAudioRanges {clipIds?, tag?}`. Volume se muda com `setProperty` ou `setKeyframe`. Mandar `volume` em `updateClip` dá erro explicando a mudança.
-- **Migração v2 → v3:** `volume dB = 20·log10(v)`, e v = 0 vira −60 dB, que o mixer trata como silêncio.
-- **Interface:** bloco "Áudio" em Propriedades (Volume em dB com botão de keyframe, Fade de entrada e saída, Mudo, lista de trechos abaixados); na faixa Áudio, alças de fade nos cantos, blocos dos trechos abaixados e uma linha de volume opcional; o botão de mudo da faixa vira o mudo de verdade; com um trecho marcado, "Abaixar" e "Silenciar".
-- A opção "abaixar as respirações" de D8 entra aqui.
+- **Entrega 6 (v3):** `ducks: [{s, e, gainDb, fadeMs, tag}]` no clipe de vídeo, guardados em **segundos da fonte**: aparar, dividir e apagar trecho não precisam remapeá-los, e as marcas de respiração (também em segundos da fonte) entram direto.
+  - Operações `duckRanges {clipId, ranges, gainDb, fadeMs, tag}` (segundos da fonte daquele clipe; idempotente por tag: trechos da mesma tag que se sobrepõem são trocados; nunca `all: true` entre mídias) e `clearAudioRanges {clipIds?, tag?}`.
+  - Na faixa Áudio, blocos dos trechos abaixados; no `get_context`, um resumo deles. As listas de chaves, o describeOp, o OPS_HELP, o compactClip e os testes mudam junto.
+- **Entrega 7 (v4):** `volume` vira propriedade do registro `PROPS`: dB, −60 a +12, keyframes interpolados em dB. `status` e `compactClip` passam a ler o registro em vez de `['x','y','scale','opacity']` fixo.
+  - `muted` continua no clipe. Entram `fadeIn` e `fadeOut` (em segundos, no máximo metade da duração) e `Track.muted`, o mudo da faixa.
+  - Volume se muda com `setProperty` ou `setKeyframe`. Mandar `volume` em `updateClip` dá erro explicando a mudança.
+- **Migração v3 → v4:** `volume dB = 20·log10(v)`, e v = 0 vira −60 dB, que o mixer trata como silêncio.
+- **Interface (entrega 7):** bloco "Áudio" em Propriedades (Volume em dB com botão de keyframe, Fade de entrada e saída, Mudo, lista de trechos abaixados); na faixa Áudio, alças de fade nos cantos e uma linha de volume opcional; o botão de mudo da faixa vira o mudo de verdade; com um trecho marcado, "Abaixar" e "Silenciar".
 
 #### D6. Legendas: estilo, desenho e fontes (entrega 2)
 
@@ -219,7 +228,7 @@ Para as legendas também foram descartados ASS/libass (dois renderizadores difer
   - Contorno com `lineJoin` e `lineCap` `round` e `lineWidth` igual a 2 vezes o contorno visível.
   - Opacidade menor que 1 desenha numa camada reaproveitada, criada com o mesmo `willReadFrequently` do destino.
   - Layout em cache (LRU) pela chave de estilo, texto, tamanho do quadro e época das fontes.
-- **Presets:** `amarelo` (padrão), `karaoke`, `palavraCaixa`, `caixa`, `impacto` e `classico`, com os valores de `legendas.md` §2. No vertical, nenhuma linha pode entrar na coluna de botões do TikTok à direita (x > 780 a partir de y = 840 num quadro de 1080×1920). A largura máxima e o centro padrão do retrato são ajustados para isso, e a sobreposição de áreas seguras avisa quando uma linha cruza a coluna.
+- **Presets:** `amarelo` (padrão), `karaoke`, `palavraCaixa`, `caixa`, `impacto` e `classico`, com os valores de `legendas.md` §2. No vertical, nenhuma linha pode entrar na coluna de botões do TikTok à direita (x > 780 a partir de y = 840 num quadro de 1080×1920). A largura máxima e o centro padrão do retrato são ajustados para isso, e a sobreposição de áreas seguras avisa quando uma linha cruza a coluna. A regra vale só em 9:16, mede a linha com o contorno (borda direita abaixo de 780 px a partir de y = 840 em 1080×1920), vem ligada e é desligada se o usuário não publica no TikTok. Não usar a alternativa da pesquisa "centro em 45% com largura até 61%", que chega a ~815 px. Amarelo é o padrão em todos os formatos.
 - **Destaque da palavra** (cor, caixa, escala, progressivo) é desenhado desde a entrega 2, mas só aparece quando a legenda tem `words`, o que vem na entrega 4. Sem `words`, a legenda é desenhada inteira.
 - **Operações:** `setCaptionStyle {clipIds: 'all' | ids, preset?, patch?}`, `setCaptionWords {clipId, words}` e `markWords {clipId, idx, k}`. `updateClip set.text` realinha `words` por LCS. `trimClip`, `splitClip`, `cutTextTime` e `removeRanges` levam as palavras junto. "Aplicar a todas as legendas" vem ligado.
 - **Títulos:** `TextStyle` ganha `stroke {color, width}` em em, as fontes novas e o mesmo desenho em duas passadas. O tamanho continua em px.
@@ -236,46 +245,55 @@ Para as legendas também foram descartados ASS/libass (dois renderizadores difer
 - **Modelos:**
   - o VAD `ggml-silero-v6.2.0.bin` (0,86 MB) vai no instalador, para a detecção de respirações funcionar sem o download grande;
   - o de fala, `ggml-large-v3-turbo-q5_0.bin` (574 MB), é baixado no primeiro uso, depois de um cartão pedindo licença, com `net.fetch` (respeita proxy), retomada por Range de um `.part`, SHA-256 calculado durante o download, conferência de espaço livre, renomeação atômica, cancelar e uma cópia nas releases do próprio repositório como segunda URL;
-  - antes de fixar, comparar q5_0, q5_k e q8_0 em acerto (WER) e velocidade, porque a evidência de "sem perda" era do Q5_K_M.
+  - antes de fixar, comparar q5_0, q5_k e q8_0 em acerto (WER) e velocidade, porque a evidência de "sem perda" era do Q5_K_M. Acerto em FLEURS-pt e nos 15 clipes informais da tech4humans (se a licença permitir); velocidade relativa no CI.
 - **Pipeline de um job (main):**
   1. trecho da linha do tempo → trechos da fonte dos clipes audíveis (não mudos, volume acima de −60 dB depois da entrega 7, faixa não muda);
   2. áudio do cache D3 → 16 kHz mono;
-  3. VAD → segmentos. A saída do exe é em **centésimos de segundo**, e um teste do CI fixa o formato contra o binário embutido;
+  3. VAD → segmentos com os parâmetros da fala (`-vspd 250 -vsd 300 -vp 200 -vmsd 25`, conferidos no `--help` do exe embutido), rodando na pasta do job com caminhos relativos ASCII (o exe do VAD também lê argv em ANSI). A saída do exe é em **centésimos de segundo**, e um teste do CI fixa o formato contra o binário embutido. Esses segmentos servem só para a transcrição; as respirações têm passada própria (D8);
   4. `speech.wav` = segmentos unidos por 0,4 s de silêncio, mais a tabela de mapeamento, em lotes de até uns 5 min de fala;
-  5. `whisper-cli` com `cwd` numa pasta do job dentro de `userData/stt` e caminhos relativos ASCII. Quando algum argumento tem acento (o prompt, por exemplo), todos vão num arquivo de resposta UTF-8 com fim de linha LF, passado como único argumento (`whisper-cli.exe @args.txt`). Flags: `-l pt -nfa -dtw large.v3.turbo -ojf -sns -np -pp -t <núcleos físicos, até 8>`. Nunca `--vad` e nunca `-p` maior que 1. O prompt é uma frase curta em pt-BR com pontuação e, com `-mc 64 --carry-initial-prompt`, tem de caber em uns 63 tokens. Medir `-bs 1 -bo 1` contra o beam 5 padrão em velocidade e acerto antes de escolher;
+  5. `whisper-cli` com `cwd` numa pasta do job dentro de `userData/stt` e caminhos relativos ASCII. Quando algum argumento tem acento (o prompt, por exemplo), todos vão num arquivo de resposta UTF-8 com fim de linha LF, passado como único argumento (`whisper-cli.exe @args.txt`). Flags: `-l pt -nfa -dtw large.v3.turbo -ojf -sns -np -pp -t <núcleos físicos, até 8>`. Nunca `--vad` e nunca `-p` maior que 1. O prompt é uma frase curta em pt-BR com pontuação e, com `-mc 64 --carry-initial-prompt`, tem de caber em uns 63 tokens. Medir `-bs 1 -bo 1` contra o beam 5 padrão em velocidade e acerto antes de escolher: o vencedor vira o padrão de todos, não uma opção do usuário;
   6. tokens com tempo DTW → palavras com confiança → de volta ao tempo da fonte pela tabela;
   7. filtros de alucinação: texto fora da fala do VAD é descartado, repetições em laço são desfeitas e frases conhecidas ("Legendas pela comunidade Amara.org" e parecidas) são barradas;
-  8. a transcrição fica em cache por mídia, em tempo da fonte (`userData/stt/cache/<srcKey>/`). Editar o projeto durante um job longo não o invalida.
+  8. a transcrição fica em cache por mídia, em tempo da fonte (`userData/stt/cache/<srcKey>/`). Editar o projeto durante um job longo não o invalida. O cache registra quais trechos da fonte já foram transcritos, e gerar de novo só transcreve o que falta. Ele segue o LRU de D3 (nunca a mídia do projeto aberto).
 - **Paginação** (`src/core/captions/chunker.ts`) segue as regras de cada preset (`legendas.md` §2): quebra na pontuação e em pausas (0,35 s nos estilos curtos, 0,6 s no Clássico); nunca termina uma página em palavra de função ("a", "de", "que", "pra"…); a página dura do início da primeira palavra até 0,15 s depois da última, sem passar o começo da próxima. No Clássico, 42 caracteres por linha e 17 caracteres por segundo (o construtor pode usar 20, o limite de SDH).
-- **Resultado:** um rascunho local que remove as legendas que se sobrepõem ao trecho e adiciona as novas, com `words` e o preset padrão.
-- **Progresso** vem de `progress = N%` no stderr. A estimativa de tempo vem do primeiro lote, não de uma calibração curta (um clipe de 20 s ainda paga uma janela inteira de 30 s e a carga do modelo).
+- **Resultado:** um rascunho local que troca as legendas que encostam no trecho.
+  - As palavras vêm primeiro das legendas que já têm `words` (texto, tempos, `c` e `k`, só as de dentro do clipe). A transcrição (do cache, transcrevendo só o que falta) preenche só as partes da linha do tempo que essas legendas não cobrem, e uma palavra do cache cujo meio cai dentro de uma delas é descartada.
+  - Legendas sem `words` são trocadas como antes.
+  - Tudo é paginado com o preset escolhido na janela (Amarelo por padrão). O modelo só é pedido se alguma parte precisar ser transcrita. O cartão diz que o texto existente foi mantido.
+  - Reagrupar (por exemplo, de Amarelo para Clássico) é este mesmo caminho sem nada para transcrever. Para escutar de novo do zero, o usuário apaga antes as legendas do trecho.
+- **Progresso** vem de `progress = N%` no stderr. A estimativa de tempo vem do primeiro lote, não de uma calibração curta (um clipe de 20 s ainda paga uma janela inteira de 30 s e a carga do modelo). O tempo medido (sem a carga do modelo) aparece no cartão do resultado e fica salvo para a estimativa do próximo job. Se passar dos limites do passo E de `fala-para-texto.md`, um ajuste da entrega 4 acrescenta "Mais rápido": `ggml-small` q8_0 no mesmo `whisper-cli` (264 MB, SHA-256 fixado, cartão de licença próprio, `-dtw small`), o plano B da própria pesquisa ("Fallback").
 - **Testes:** `DIRETOR_WHISPER_CLI` e `DIRETOR_WHISPER_VAD` apontam para `scripts/stt-simulada.mjs` no Linux e no e2e, como já se faz com o ffmpeg e as CLIs da IA.
 
-#### D8. Respirações e pausas (entrega 6; "abaixar" na 7)
+#### D8. Respirações e pausas (entrega 6)
 
-- **Detecção** é um job no main com os segmentos de fala do VAD (os mesmos de D7, em cache) e o classificador DSP em TypeScript de `respiracoes.md` ("Concrete plan" itens 3 a 5), em `src/core/speech/`. Como o exe do VAD só devolve segmentos, sem probabilidade por janela, o classificador trabalha com a máscara binária: as referências de nível vêm de dentro (fala) e de fora (não fala) dos segmentos, e o refinamento das bordas usa só sinais acústicos (periodicidade e nível). Nada de onnxruntime no bloco 1.
-- **Marcas** (respiração, pausa, estalo, incerto) ficam no cache (`userData/audio-cache/<srcKey>/marks.json`) e num store do renderer, nunca no `Project`. Só o resultado aplicado (cortes ou trechos abaixados) entra no projeto.
+- **Detecção** é um job no main com uma passada própria do exe do VAD com parâmetros de respiração (folga até 30 ms, silêncio mínimo ~100 ms, fala mínima ~100 ms; conferir no `--help`), guardada em `audio-cache/<srcKey>/` à parte dos segmentos de D7, cuja folga de 200 ms esconderia as pausas curtas, e o classificador DSP em TypeScript de `respiracoes.md` ("Concrete plan" itens 3 a 5), em `src/core/speech/`. Como o exe do VAD só devolve segmentos, sem probabilidade por janela, o classificador trabalha com a máscara binária: as referências de nível vêm de dentro (fala) e de fora (não fala) dos segmentos, e o refinamento das bordas usa só sinais acústicos (periodicidade e nível). Nada de onnxruntime no bloco 1. Bordas e folgas vêm da borda acústica da fala, sem precisar de transcrição; nenhum corte cobre quadros com voz; com transcrição, nenhum corte entra numa palavra.
+- **Marcas** (respiração, pausa, estalo, incerto, e "música/ruído" por mídia quando o ruído de fundo é alto e estável ou tonal: aviso e nada marcado) ficam no cache (`userData/audio-cache/<srcKey>/marks.json`) e num store do renderer, nunca no `Project`. Só o resultado aplicado (cortes ou trechos abaixados) entra no projeto.
 - **Revisão:**
+  - um item por vão: "Respiração" se o vão tem respiração (nota ≥ 0,4), senão "Pausa" (só se o vão passa da pausa mínima; no modo Abaixar, só respirações);
   - pílulas (respiração) e colchetes com a duração (pausa) na faixa Áudio;
-  - barra "Respiração 3 de 37  [<] [>]  Ouvir (Espaço)  Manter/Aplicar (Enter)  Sair (Esc)";
+  - barra "Respiração 3 de 41" ou "Pausa 5 de 41"  [<] [>]  Ouvir (Espaço)  Manter/Aplicar (Enter)  Sair (Esc); cada item diz o que aplicar faz (cortar ou abaixar);
   - os atalhos globais (Espaço, Delete, setas) são interceptados enquanto a revisão está aberta;
-  - itens com nota alta vêm marcados; os duvidosos vêm desmarcados.
+  - vêm marcados os cortes de pausa e as respirações com nota ≥ 0,7; vêm desmarcadas as de 0,4 a 0,7, todo "incerto" e tudo numa mídia com "música/ruído"; "estalo" só aparece na faixa;
+  - resumo "N respirações e M pausas · vídeo −X s", com X somado dos cortes já unidos;
+  - o Antes/Depois (D2) também vale para o rascunho que só abaixa.
 - **Aplicar** gera um único rascunho local.
   - **Cortar (padrão):** `removeRanges` calculado das marcas no momento de preparar a etapa, passando por `sourceTime`.
-    - Sobra 100 a 150 ms depois do fim da palavra anterior e 50 a 100 ms antes da próxima. Essa folga protege as vogais finais desvozeadas do pt-BR e o /s/ final.
-    - A janela mantida é posta sobre quadros silenciosos.
-    - Ritmo: Natural (pausa mínima 0,6 s, sobra 0,3 s), Dinâmico (0,4 s e 0,2 s; padrão) e Acelerado (0,25 s e 0,12 s).
+    - Só se corta vão com pelo menos a pausa mínima do ritmo, e o corte deixa a sobra do ritmo; assim, nenhum corte é menor que pausa mínima − sobra (0,3, 0,2 ou 0,1 s).
+    - Fica pelo menos 100 ms depois do fim acústico da fala e 50 ms antes da próxima; a sobra se divide 60/40: depois = máx(100 ms; 0,6·sobra), antes = máx(50 ms; sobra − depois). Essa folga protege as vogais finais desvozeadas do pt-BR e o /s/ final.
+    - Cada borda do corte vai para o ponto mais baixo em ±10 ms, sem invadir as folgas.
+    - Ritmo: Natural (pausa mínima 0,6 s, sobra 0,3 s), Dinâmico (0,4 s e 0,2 s; padrão) e Acelerado (0,25 s e 0,15 s). As folgas valem mais que o ritmo.
     - Com transcrição, os tempos das palavras ajudam a achar os vãos, mas as bordas seguem a evidência acústica.
-    - Nenhum corte deixa um pedaço com menos de 0,4 s.
-  - **Abaixar (entrega 7):** `duckRanges` com a tag `breath`, −20 dB (Leve −12, Forte −30), rampas de 25 ms, nunca abaixo do ruído de fundo.
+    - Nenhum corte deixa um pedaço com menos de 0,4 s: pula-se o corte menor, e a respiração dele é abaixada.
+    - A respiração que sobra na parte mantida, a de um vão menor que a pausa mínima e a de um corte pulado entram como `duckRanges` com a tag `breath` no mesmo rascunho (como no passo 6b de `respiracoes.md`).
+  - **Abaixar:** nada é cortado; as respirações marcadas vão em `duckRanges` com a tag `breath`, −20 dB (Leve −12, Forte −30), rampas de 25 ms, nunca abaixo do ruído de fundo.
 - **IA:**
   - `analyze_audio` inicia o job e devolve um `jobId`;
   - `get_job` espera o resultado;
-  - `get_analysis('marks')` traz as marcas em páginas;
-  - a macro `cleanSpeech {analysisId, modo: 'cortar' | 'abaixar', ritmo?, forca?}` é resolvida em primitivas quando a etapa é preparada: a sessão passa as marcas para o `applyOps`, e a IA nunca lista centenas de trechos.
+  - `get_analysis('marks')` traz os itens (tipo, ação, motivo) em segundos da linha do tempo, em páginas, com a revisão;
+  - a macro `cleanSpeech {analysisId, modo: 'cortar' | 'abaixar', ritmo?, forca?}` usa as decisões da revisão guardadas nas marcas e é resolvida numa etapa quando ela é preparada: `clearAudioRanges {tag: 'breath'}`, depois `duckRanges` por `clipId` (segundos da fonte, antes dos cortes), depois `removeRanges`. A sessão passa as marcas para o `applyOps`, e a IA nunca lista centenas de trechos.
 - **Nota legal** herdada da pesquisa: a patente Dolby US10825464 cobre classificação de respiração combinada com nivelamento automático de ganho. Não há nivelamento automático junto da cadeia de respiração no bloco 1, e qualquer normalização futura fica fora dela até ser revista.
 
-#### D9. Rascunhos locais, jobs e downloads (entrega 4, usados depois)
+#### D9. Rascunhos locais, jobs e downloads (entrega 4, ou 6 se as respirações vierem antes; usados depois)
 
 - **Propostas** ganham `origin: 'ai' | 'diretor'`. Rascunhos do próprio Diretor (legendas, limpar fala) aparecem no painel direito com a origem "Diretor" e têm "Refazer" local, sem passar pelo `chat.ownerOf`. Se já há uma proposta da IA aberta, o Diretor pergunta se troca.
 - **Gerenciador de jobs** no main: iniciar, progresso, cancelar e resultado; deduplicação por chave; aborto em `did-start-loading`, `render-process-gone`, `closed` e `will-quit`, como `abortAllExports`; pastas temporárias limpas.
@@ -285,10 +303,10 @@ Para as legendas também foram descartados ASS/libass (dois renderizadores difer
 #### D10. IA (MCP) e modo econômico
 
 - **Ferramentas novas:**
-  - `generate_captions {t0?, t1?, preset?}` → `jobId`;
+  - `generate_captions {t0?, t1?, preset?}` → `jobId`; sobre trecho com legendas, reaproveita as palavras delas, e é também como a IA reagrupa, com `{preset}`;
   - `analyze_audio {t0?, t1?}` → `jobId`;
   - `get_job {jobId, wait ≤ 45}`, com a mesma exceção de espera longa do `get_proposal` em `bridgeTimeoutMs` e `callTimeoutMs`;
-  - `get_analysis {kind: 'transcript' | 'marks', cursor?}`.
+  - `get_analysis {kind: 'transcript' | 'marks', range?, cursor?, limit ≤ 100}`. "transcript" devolve as palavras das legendas da linha do tempo `{clipId, i, t, início, c}` e a revisão; a IA corrige com `setCaptionWords` ou `updateClip set.text`. O OPS_HELP e as INSTRUCTIONS dizem o mesmo.
   - A lista exata de ferramentas em `tests/mcp.test.ts` muda junto. As descrições são curtas; a ajuda longa fica no `editor_status` e no OPS_HELP.
 - **Operações novas no OPS_HELP (pt-BR):** splitClip, removeRanges, setCaptionStyle, setCaptionWords, markWords, duckRanges, clearAudioRanges e cleanSpeech; volume em dB como propriedade. `assistant.ts INSTRUCTIONS` muda junto.
 - **get_context:**
@@ -308,8 +326,11 @@ Segue o esboço da Parte 1 e "One screen" de `mapa-do-codigo.md`:
 - **Propriedades:**
   - de uma legenda: galeria de estilos com miniaturas desenhadas pelo próprio `drawCaption`, mais Fonte, Tamanho, Cor, Contorno, Sombra, Caixa, MAIÚSCULAS, Espaçamento, Posição (Centro, Abaixo do centro, Embaixo, e arrastar na prévia), Destaque da palavra e Animação de entrada (nenhuma, surgir ou pop);
   - de um vídeo: o bloco Áudio.
-- **Prévia:** botão "Áreas do TikTok/Reels/Shorts", só uma sobreposição na tela, nunca exportada. A área do Shorts vem do modelo oficial de anúncio vertical do Google e é marcada como aproximada.
-- **Aba Transcrição** (entrega 8): palavras em chips; as de baixa confiança sublinhadas; clique leva até a palavra; duplo clique edita; Tab vai para a próxima duvidosa; "Substituir em tudo".
+- **Prévia:** botão "Áreas do TikTok/Reels/Shorts", só uma sobreposição na tela, nunca exportada. A área do Shorts vem do modelo oficial de anúncio vertical do Google e é marcada como aproximada. A sobreposição mostra a interseção das áreas do TikTok, Reels e Shorts até o usuário dizer onde publica; depois, as plataformas dele.
+- **Aba Transcrição** (entrega 8): mostra as palavras das legendas da linha do tempo, em ordem (`mapa-do-codigo.md` F4c), sem precisar do cache; palavras em chips; as de baixa confiança sublinhadas; clique leva até a palavra; duplo clique edita; Tab vai para a próxima duvidosa; "Substituir em tudo".
+  - Editar é `setCaptionWords` ou `updateClip` naquela legenda: uma entrada no histórico, ou um ajuste se ela está num rascunho aberto.
+  - "Substituir em tudo" é um lote só, fica desligado com um rascunho de legendas aberto (o `shouldRouteToDraft` levaria o lote inteiro para o rascunho) e não vale para trechos legendados depois.
+  - As correções ficam só nas legendas: não há tabela de correções no `Project` nem escrita no cache. Uma correção dentro de uma legenda apagada se perde (o Ctrl+Z traz de volta).
 
 #### D12. Empacotamento e testes
 
@@ -325,21 +346,36 @@ Cada entrega é um PR, mesclado quando o CI do Windows passa (autorização do u
 | # | Entrega | Pesquisa (fatia) | Depende de | Aceite (além dos testes unitários) |
 |---|---|---|---|---|
 | E1 | Dividir e apagar trecho | S1 | — | Ctrl+B divide; Shift+Delete apaga o trecho em todas as faixas e as legendas continuam sincronizadas; a reprodução passa pelas emendas sem tela preta; exportar 300 pedaços funciona no Windows; uma divisão sem corte sai perfeita no áudio exportado. |
-| E2 | Visual das legendas | S2 + `legendas.md` | — | Os 6 presets saem iguais na prévia e no MP4 (diff com tolerância); contorno ajustável; fontes embutidas e do computador; arrastar a posição; projeto v1 abre com o mesmo visual; arquivo v3 é recusado. |
+| E2 | Visual das legendas | S2 + `legendas.md` | — | Os 6 presets saem iguais na prévia e no MP4 (diff com tolerância); contorno ajustável; fontes embutidas e do computador; arrastar a posição; projeto v1 abre com o mesmo visual; arquivo v3 é recusado; imagem testada em 1080×1920 e 1920×1080; com a regra do TikTok ligada, nenhuma linha, com contorno, cruza a coluna. |
 | E3 | Forma de onda | S3 | — | Forma de onda aparece depois de importar, com progresso; o LRU respeita o projeto aberto; `media://audio` recusa caminhos fora do cache. |
-| E4 | Legendas automáticas | S5a | E2, E3 (E1 para as palavras seguirem divisões) | Licença e download com retomada e cancelar; transcrever um trecho; rascunho com palavras; Karaokê acende a palavra certa; o Claude dispara pelo MCP; cancelar no meio não deixa processo nem arquivo; o `whisper-cli.exe` abre num Windows sem VC++ (conferência de importações). |
+| E4 | Legendas automáticas | S5a | E2, E3 (E1 para as palavras seguirem divisões) | Licença e download com retomada e cancelar; transcrever um trecho; rascunho com palavras; Karaokê acende a palavra certa; o Claude dispara pelo MCP; cancelar no meio não deixa processo nem arquivo; o `whisper-cli.exe` abre num Windows sem VC++ (conferência de importações); o tempo medido aparece no cartão; gerar de novo num trecho com legendas mantém o texto delas (inclusive o editado em Propriedades) e refaz as páginas; gerar com Clássico sobre legendas Amarelo refaz as páginas sem transcrever e sem o modelo. |
 | E5 | Motor de áudio | S4a | E1, E3 | PCM do worklet igual ao da exportação; sem estalo nas emendas; exportação com 600 pedaços no Windows; a prévia não deriva em 10 minutos de reprodução. |
-| E6 | Tirar as respirações | S6a/S6b (detecção, revisão e corte) | E1, E4 (VAD, jobs, rascunhos locais), E5 | Marcas na faixa; revisão completa; rascunho de corte com as folgas; um Ctrl+Z desfaz; legendas andam junto; resumo do tempo economizado. |
-| E7 | Volume, fades e trechos | S4b + "abaixar" de S6a | E5, E6 | +12 dB audível na prévia e no MP4; fades; abaixar e silenciar trecho; abaixar respirações; migração v2 → v3. |
-| E8 | Transcrição | S5b | E4 | Chips, sublinhado das duvidosas, clique leva à palavra, editar, Substituir em tudo; o Claude corrige pelo `get_analysis`. |
+| E6 | Tirar as respirações (cortar e abaixar) | S6a + S6b (detecção, revisão, abaixar e cortar) | E1, E4 (VAD, jobs, rascunhos locais, `get_job`), E5 | Marcas na faixa; um item por vão; vãos de respiração de 0,30, 0,38 e 0,6 s tratados pela regra em cada ritmo; nenhum corte menor que pausa mínima − sobra; nenhuma parte mantida abaixo de 100/50 ms em nenhum ritmo; o −X s do resumo igual ao encurtamento; palavra curta dentro de pausa nunca cortada; "incerto" nunca marcado; fixture com música avisa e não marca nada; modo Abaixar não muda a duração e baixa ~20 dB nas marcas no MP4; um Ctrl+Z desfaz; legendas andam junto; migração v2 → v3; arquivo v4 recusado. Antes de publicar, um job de medição separado, com o modelo de verdade: limpar fala pública pt-BR e transcrever de novo não perde palavra. |
+| E7 | Volume, fades e trechos | S4b | E5, E6 | +12 dB audível na prévia e no MP4; fades; abaixar e silenciar trecho; migração v3 → v4; arquivo v5 recusado. |
+| E8 | Transcrição | S5b | E4 | Chips, sublinhado das duvidosas, clique leva à palavra, editar, Substituir em tudo; uma palavra corrigida na aba continua corrigida depois de gerar de novo no mesmo trecho e de gerar com o Clássico; a aba mostra o mesmo texto da prévia; o Claude corrige com `setCaptionWords` a partir do `get_analysis("transcript")`. |
+
+**Se o usuário pedir as respirações antes** (ordem 1, 2, 3, 5, 6, 4, 7, 8), a E6 depende só de E1 e E5 e leva junto:
+
+- `fetch-stt` com o exe do VAD, as DLLs do whisper/ggml e o `ggml-silero` no instalador;
+- as quatro DLLs do VC++ (com `vcomp140`), a conferência de importações no after-pack, o passo do CI e `vendor/` no `.gitignore`;
+- o gerenciador de jobs e a pasta do job com caminhos ASCII;
+- rascunhos locais (origem "diretor", Refazer local);
+- `get_job` e `get_analysis` com a exceção de espera longa (hoje só o `get_proposal` tem) e a lista de `tests/mcp.test.ts`;
+- o `DIRETOR_WHISPER_VAD` falso e o teste dos centésimos;
+- Licenças (whisper.cpp, Silero) e o orçamento de memória do histórico.
+
+O aceite da E6 ganha "o `whisper-vad-speech-segments.exe` abre num Windows sem VC++". Não vão para a E6: o `whisper-cli`, o modelo de 574 MB, o gerenciador de download e o cartão de licença.
 
 ### Riscos
 
-- **DLLs no Windows limpo** (D7): é o que mais quebra na primeira instalação. Mitigação: conferência de importações e um teste manual numa máquina sem VC++.
-- **Velocidade da transcrição** em CPU fraca: beam 5 e `-nfa` não foram medidos juntos. Mitigação: medir na E4, mostrar a estimativa, e o motor rápido fica como plano B.
+- **DLLs no Windows limpo** (D7): é o que mais quebra na primeira instalação, e vale para a entrega que trouxer o exe primeiro (4, ou 6 se as respirações vierem antes). Mitigação: conferência de importações e um teste manual numa máquina sem VC++.
+- **Velocidade da transcrição** em CPU fraca: beam 5 e `-nfa` não foram medidos juntos. Mitigação: medir na E4 e mostrar o tempo; o plano B é o `ggml-small` no mesmo motor (Parakeet fica fora do bloco 1).
 - **Antivírus** pode barrar um `whisper-cli.exe` sem assinatura, como pode barrar o próprio Diretor hoje.
 - **Relógio da prévia** com vídeo escravo do áudio: emendas e deriva. Mitigação: o pool por mídia com pré-busca vem antes (E1), e há métricas de deriva no e2e.
-- **Falsos positivos de respiração** em pt-BR. Mitigação: folgas, revisão obrigatória e itens duvidosos desmarcados.
+- **Falsos positivos de respiração** em pt-BR. Mitigação: folgas mínimas na borda acústica, nenhum corte sobre voz, revisão obrigatória, duvidosos desmarcados e ajuste pelo que o usuário relatar ao testar a E6.
+- **Música ou outra voz no mesmo áudio:** cortar picota e abaixar abaixa junto. Mitigação: marca "música/ruído", aviso e nada marcado.
+- **Imagem pulando** em 9 a 17 respirações por minuto, sem o zoom que só vem no bloco 2. Mitigação: só vãos com pelo menos a pausa mínima são cortados; o resto é abaixado.
+- **A amostra do usuário pode não chegar.** Mitigação: fixtures, fala pública e o retorno dele ao testar.
 - **Disco:** cerca de 700 MB por hora de cache de áudio. Mitigação: LRU.
 - **Fontes:** a prévia na GPU e a exportação na CPU podem diferir em subpixel. Mitigação: layout puro e testes com tolerância.
 - **Áreas seguras** são medições de terceiros e mudam quando as plataformas mudam.
@@ -348,9 +384,10 @@ Cada entrega é um PR, mesclado quando o CI do Windows passa (autorização do u
 ### Deixado para quem constrói
 
 - Detalhes visuais seguindo o tema atual, ícones e a disposição exata dos controles.
-- Limiares do classificador de respiração dentro das folgas acima, ajustados com fixtures sintéticas e gravações rotuladas.
+- Limiares do classificador de respiração dentro das folgas acima, ajustados com fixtures sintéticas (inclusive finais de vogal desvozeada e /s/), fala pública pt-BR (só para conferir que nenhum corte come palavra; não há rótulo de respiração), as gravações do usuário se ele mandar e o que ele relatar ao testar a entrega 6. Nunca pedir ao usuário que marque respirações.
+- Parâmetros do VAD das respirações (folga até 30 ms, silêncio mínimo ~100 ms, fala mínima ~100 ms), conferidos no `--help`.
 - Limite do LRU e orçamento de memória do histórico.
-- Beam, quantização e texto do prompt, depois de medir.
+- Beam, quantização e texto do prompt, depois de medir em FLEURS-pt e tech4humans (acerto) e no CI (velocidade relativa).
 - Como entregar as DLLs: cópia de um redistribuível 14.51 ou mais novo, ou compilação estática.
 - 17 ou 20 caracteres por segundo no Clássico.
 - O texto exato das mensagens, em pt-BR e sem jargão.
@@ -363,10 +400,16 @@ As pesquisas foram feitas em paralelo e às vezes se contradizem. Este design de
 - **Trechos em segundos da fonte** `{s, e, gainDb, fadeMs, tag}`, não relativos ao clipe.
 - **Nomes de operação:** `splitClip`, `removeRanges`, `duckRanges`, `clearAudioRanges` e `cleanSpeech` (não `removeRange`, `setGainRegions` nem `get_audio_analysis`).
 - **Ferramentas MCP** seguem um padrão só de job: `jobId` + `get_job` + `get_analysis` paginado.
-- **VAD:** o exe do whisper.cpp para fala e respirações. Nem onnxruntime-node nem sherpa-onnx no bloco 1, o que evita DLLs duplicadas, o runtime VC++ do onnxruntime e o download na instalação.
+- **VAD:** o exe do whisper.cpp para fala e respirações, com parâmetros diferentes: a folga de 200 ms da fala esconde as pausas curtas. Nem onnxruntime-node nem sherpa-onnx no bloco 1, o que evita DLLs duplicadas, o runtime VC++ do onnxruntime e o download na instalação.
 - **Exportação de áudio:** mixer no main, sem `utilityProcess`, com um temporário `f32le` como entrada única do ffmpeg.
 - **Respirações:** só no motor novo. Nada de envelope por GainNode na prévia nem expressões `volume=eval=frame` no ffmpeg.
 - **Marcas fora do `Project`** (cache), não em `project.audioMarks`.
+- **Respirações: cortar é o padrão**, contra a pesquisa (que recomendava abaixar). É a leitura do pedido "tirar as partes que a pessoa respira", e o usuário pode trocar. Abaixar vem na mesma entrega 6 (como na pesquisa, que abaixa antes de cortar) e cobre o que o corte não tira (`respiracoes.md`, passo 6b).
+- **Acelerado mantém 0,15 s**, não 0,12 s: as folgas valem mais que o ritmo.
+- **Itens marcados sozinhos:** a avaliação com 20 a 30 min rotulados (pesquisa, passo 12) não é possível. No lugar dela: fixtures, conferência de palavras em fala pública e o retorno do usuário.
+- **"Música/ruído" volta** (pesquisa, passo 5): aviso e nada marcado.
+- **Aba Transcrição** mostra as palavras das legendas (mapa F4c), não o cache (mapa l. 249). As correções ficam só nas legendas, e gerar de novo as reaproveita; não há tabela de correções no `Project`.
+- **Plano B de velocidade:** `ggml-small` no mesmo motor (pesquisa, "Fallback"), não a busca gulosa, que é escolhida por medição como padrão de todos.
 - **Correções da checagem já aplicadas acima:**
   - `vcomp140.dll` e redistribuível 14.51 ou mais novo;
   - arquivo de resposta UTF-8 para argumentos com acento;
