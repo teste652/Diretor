@@ -9,7 +9,6 @@ import {
   type ClipKind,
   type Easing,
   EASINGS,
-  type Keyframe,
   type MediaItem,
   type Project,
   type TextStyle,
@@ -22,8 +21,8 @@ import {
   newId,
   trackForKind,
 } from './model';
-import { clampKeyframes, remapKeyframes, sameGroup } from './keyframes';
-import { defaultProps, evalProp, keyframeGroups, propDef, sortedKeyframes } from './properties';
+import { remapKeyframes, sameGroup } from './keyframes';
+import { defaultProps, evalProp, propDef, sortedKeyframes } from './properties';
 import { EPS, MIN_DURATION, SAME_T, round } from './time';
 
 export type ClipChanges = {
