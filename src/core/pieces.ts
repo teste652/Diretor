@@ -135,14 +135,18 @@ export function draftSeams(project: Project, view: Project): Seam[] {
  *   vai para a imagem dele: a do de mesmo id ou, senão, a mais perto de `t`
  *   (empate: a do que começa antes). O de mesmo id mostra o ponto com
  *   tolerância de 1 amostra nas duas pontas; o de outro id, só no intervalo
- *   meio-aberto [in − 1 amostra, fim − 1 amostra), como `isActiveAt`: encostar
- *   no fim dele no arquivo não basta.
+ *   meio-aberto [in, fim) do arquivo, com a folga de `isActiveAt` (1e-9 s) e
+ *   não a de 1 amostra: encostar nele pela ponta do arquivo não basta.
  * - Senão o instante foi cortado. Na sequência de vídeos de `from` sem buraco em
  *   volta da agulha, o último instante até `t` que ainda aparece em `to` (o fim
  *   do pedaço que ficou conta) dá a borda do corte; se não há, o primeiro depois
  *   de `t`. Aqui um de outro id só conta se tem mais de 1 amostra em comum com o
  *   trecho procurado. No mesmo instante, vale o de mesmo id e depois a imagem
  *   mais perto.
+ * - A agulha segue o vídeo, não só o conteúdo: se o que está sob ela não existe
+ *   na outra versão (o rascunho tirou ou inseriu), ela vai para a borda onde ele
+ *   saiu ou entrou. Assim Depois→Antes numa cópia que o rascunho inseriu vai para
+ *   a borda da inserção.
  * - Limite aceito: quando o mesmo trecho do arquivo aparece duas vezes e as duas
  *   cópias são divididas, um pedaço novo da outra cópia ainda pode ganhar (nada
  *   diz de que clipe cada pedaço novo veio).
@@ -177,7 +181,8 @@ export function mapPlayhead(from: Project, to: Project, t: number): number {
   /**
    * O instante u de [uLo, uHi] mais tarde ('latest') ou mais cedo ('earliest') em que o conteúdo de `v`
    * aparece em `to`; 'exact' procura só o ponto uLo = uHi. Um de outro id não vale por encostar numa ponta
-   * do arquivo: no ponto, precisa mostrá-lo no meio-aberto; num trecho, ter mais de 1 amostra dele.
+   * do arquivo: no ponto, precisa mostrá-lo no meio-aberto com a folga de isActiveAt (1e-9 s, não 1 amostra,
+   * para o último instante de um pedaço não ir para o vizinho do arquivo); num trecho, ter mais de 1 amostra dele.
    */
   const search = (v: VideoClip, uLo: number, uHi: number, mode: 'exact' | 'latest' | 'earliest', best?: Hit): Hit | undefined => {
     const latest = mode !== 'earliest';
@@ -186,7 +191,7 @@ export function mapPlayhead(from: Project, to: Project, t: number): number {
     for (const { c: q } of touching(v.mediaId, lo, hi)) {
       if (!admitted(q, v)) continue;
       const qEnd = q.in + q.duration;
-      if (q.id !== v.id && (mode === 'exact' ? !(q.in - SAMPLE <= lo && lo < qEnd - SAMPLE) : overlap(q.in, qEnd, lo, hi) <= SAMPLE)) continue;
+      if (q.id !== v.id && (mode === 'exact' ? !(q.in - 1e-9 <= lo && lo < qEnd - 1e-9) : overlap(q.in, qEnd, lo, hi) <= SAMPLE)) continue;
       const src = latest ? Math.max(lo, Math.min(qEnd, hi)) : Math.min(hi, Math.max(q.in, lo));
       const hit = { u: v.start + (src - v.in), image: q.start + (src - q.in), same: q.id === v.id, start: q.start };
       if (!best || beats(hit, best, latest)) best = hit;

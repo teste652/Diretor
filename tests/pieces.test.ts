@@ -114,7 +114,7 @@ describe('agulha: sem prender na ponta de outro pedaço nem em cópias', () => {
     expect(mapPlayhead(depois, antes, 5)).toBeCloseTo(6, 6);
   });
 
-  it('propriedade, com conteúdo único: Antes→Depois bate com mapTime e Depois→Antes com o pedaço que mostra o instante', () => {
+  it('propriedade, com conteúdo único: na grade e nas pontas dos pedaços, Antes→Depois bate com mapTime e Depois→Antes com o pedaço que mostra o instante', () => {
     // Sorteio fixo (LCG), feito exato em 32 bits: em double, seed * 1103515245 passa de 2^53, perde os bits
     // baixos e a sequência entra em ciclo depois de uns 16 mil sorteios.
     let seed = 12345;
@@ -125,6 +125,7 @@ describe('agulha: sem prender na ponta de outro pedaço nem em cópias', () => {
     const bad: string[] = [];
     let drafts = 0;
     let instants = 0;
+    let probes = 0;
     for (let n = 0; n < 300; n++) {
       // m1 e m2 (20 s cada) em pedaços seguidos de 0,3 a 3,3 s no grid de 1 ms: nenhum instante do arquivo se repete.
       const chunks: { m: 'm1' | 'm2'; in: number; d: number }[] = [];
@@ -156,27 +157,69 @@ describe('agulha: sem prender na ponta de outro pedaço nem em cópias', () => {
       }
       drafts++;
       const R = normalizeRanges(antes, ranges);
-      for (let k = 0, t = 0.0137; t < end; t = 0.0137 + ++k * 0.0731) {
+      const shown = depois.clips.reduce((e, c) => Math.max(e, c.start + c.duration), 0);
+      /** Antes→Depois em t contra mapTime. */
+      const toDepois = (t: number) => {
         const want = mapTime(R, t);
         const got = mapPlayhead(antes, depois, t);
-        instants++;
-        if (!(Math.abs(got - want) <= 0.002)) bad.push(`Antes→Depois t=${t.toFixed(4)}: ${got} em vez de ${want} | ${where}`);
-      }
-      const shown = depois.clips.reduce((e, c) => Math.max(e, c.start + c.duration), 0);
-      for (let k = 0, t = 0.0137; t < shown; t = 0.0137 + ++k * 0.0731) {
+        if (!(Math.abs(got - want) <= 0.002)) bad.push(`Antes→Depois t=${t}: ${got} em vez de ${want} | ${where}`);
+      };
+      /** Depois→Antes em t contra o vídeo de Antes que mostra o mesmo instante do arquivo; falso se não há vídeo em t. */
+      const toAntes = (t: number) => {
         const p = depois.clips.find((c): c is VideoClip => c.kind === 'video' && isActiveAt(c, t));
-        if (!p) continue;
-        // Instante do arquivo sem o ruído da soma (para a borda exata entre dois pedaços cair no da direita).
-        const src = Math.round((p.in + (t - p.start)) * 1e9) / 1e9;
-        const q = antes.clips.find((c): c is VideoClip => c.kind === 'video' && c.mediaId === p.mediaId && c.in <= src && src < c.in + c.duration);
+        if (!p) return false;
+        const src = p.in + (t - p.start);
+        // Meio-aberto com a folga de isActiveAt: na borda exata entre dois pedaços do arquivo vale o da direita, mesmo com o ruído da soma.
+        const q = antes.clips.find((c): c is VideoClip => c.kind === 'video' && c.mediaId === p.mediaId && c.in - 1e-9 <= src && src < c.in + c.duration - 1e-9);
         const got = mapPlayhead(depois, antes, t);
+        if (!q) bad.push(`Depois→Antes t=${t}: nenhum pedaço de Antes mostra ${src} | ${where}`);
+        else if (!(Math.abs(got - (q.start + (src - q.in))) <= 0.002)) bad.push(`Depois→Antes t=${t}: ${got} em vez de ${q.start + (src - q.in)} | ${where}`);
+        return true;
+      };
+      for (let k = 0, t = 0.0137; t < end; t = 0.0137 + ++k * 0.0731) {
+        toDepois(t);
         instants++;
-        if (!q) bad.push(`Depois→Antes t=${t.toFixed(4)}: nenhum pedaço de Antes mostra ${src} | ${where}`);
-        else if (!(Math.abs(got - (q.start + (src - q.in))) <= 0.002)) bad.push(`Depois→Antes t=${t.toFixed(4)}: ${got} em vez de ${q.start + (src - q.in)} | ${where}`);
       }
+      for (let k = 0, t = 0.0137; t < shown; t = 0.0137 + ++k * 0.0731) if (toAntes(t)) instants++;
+      // Sondas onde a grade não chega: o último instante de cada pedaço (que encosta no vizinho do arquivo) e logo depois do começo.
+      const probesOf = (version: Project) => version.clips.filter((c) => c.kind === 'video').flatMap((c) => [c.start + c.duration - 1e-5, c.start + 1e-5, c.start + c.duration - 3e-6]);
+      for (const t of probesOf(antes)) {
+        if (t < 0 || t >= end) continue;
+        toDepois(t);
+        probes++;
+      }
+      for (const t of probesOf(depois)) if (t >= 0 && t < shown && toAntes(t)) probes++;
     }
-    expect(bad.slice(0, 5), `${bad.length} de ${instants} instantes errados`).toEqual([]);
+    expect(bad.slice(0, 5), `${bad.length} errados em ${instants} instantes da grade e ${probes} sondas`).toEqual([]);
     expect(drafts).toBe(300);
     expect(instants).toBeGreaterThan(20000);
+    expect(probes).toBeGreaterThan(5000);
+  });
+});
+
+describe('agulha no último instante de um pedaço: não pula para o vizinho no arquivo', () => {
+  const cut = (antes: Project, ranges: [number, number][]) => run(antes, [{ op: 'removeRanges', ranges }]);
+  it('pedaços fora da ordem do arquivo: o último instante não vai para o começo do vizinho', () => {
+    const antes = videos([['W', 0, 5, 5], ['V', 5, 5, 0]]);
+    const depois = cut(antes, [[5, 6]]);
+    expect(mapPlayhead(antes, depois, 9.99999)).toBeCloseTo(8.99999, 6);
+    expect(mapPlayhead(depois, antes, 8.99999)).toBeCloseTo(9.99999, 6);
+  });
+  it('pedaço tirado inteiro: o último instante dele vai para a borda do corte', () => {
+    const antes = videos([['W', 0, 5, 5], ['V', 5, 5, 0], ['X', 10, 5, 10]]);
+    expect(mapPlayhead(antes, cut(antes, [[5, 10]]), 9.99999)).toBeCloseTo(5, 6);
+  });
+  it('plano de corte de outra mídia, corte no meio da tomada: Depois→Antes não vai para o fim do plano de corte', () => {
+    const antes = videos([['I1', 0, 10, 0], ['X', 10, 5, 0, 'm2'], ['I2', 15, 5, 10]]);
+    expect(mapPlayhead(cut(antes, [[3, 4]]), antes, 8.99999)).toBeCloseTo(9.99999, 6);
+  });
+  it('plano de corte de outra mídia, começo da tomada cortado: Antes→Depois não vai para o fim do plano de corte', () => {
+    const antes = videos([['I1', 0, 10, 0], ['X', 10, 5, 0, 'm2'], ['I2', 15, 5, 10]]);
+    expect(mapPlayhead(antes, cut(antes, [[0, 1]]), 9.99999)).toBeCloseTo(8.99999, 6);
+  });
+  it('instante de um quadro a 59,94 qps no último instante do pedaço', () => {
+    const antes = videos([['W', 0, 5, 5], ['V', 5, 0.322, 4.678]]);
+    const t = (319 * 1001) / 60000;
+    expect(mapPlayhead(antes, cut(antes, [[5, 5.1]]), t)).toBeCloseTo(t - 0.1, 6);
   });
 });
