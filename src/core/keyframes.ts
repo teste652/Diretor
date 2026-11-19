@@ -160,7 +160,7 @@ export function cutKeyframes(c: Clip, t0: number, t1: number): Record<string, An
     const E = s.filter((k) => k.t <= tR + EPS).at(-1)?.ease ?? 'linear';
     const vals = [...(p ? [p.v] : []), ...W.map((k) => k.v), ...(q ? [q.v] : [])];
     const flat = vals.length > 0 && Math.max(...vals) - Math.min(...vals) <= EPS;
-    const taken = new Set<string>([...kept, ...moved].map((k) => k.id));
+    const taken = new Set<string>(s.map((k) => k.id));
     const novoId = (base: string) => {
       let id = base;
       for (let n = 2; taken.has(id); n++) id = `${base}~${n}`;

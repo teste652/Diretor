@@ -11,7 +11,7 @@ function clip(...ops: O[]): Clip {
   return findClip(p, 't')!;
 }
 const kf = (prop: string, t: number, v: number, ease: 'linear' | 'hold', extra: { group?: string; keyframeId?: string } = {}): O => ({
-  op: 'setKeyframe', clipId: 't', prop, t, v, ease, ...extra,
+  op: 'setKeyframe', clipId: 't', prop, t, v, ease, keyframeId: `h-${prop}-${t}`, ...extra,
 });
 const anima = (preset: string, duration: number, ease?: 'linear'): O => ({ op: 'animate', clipId: 't', preset: preset as never, duration, ...(ease ? { ease } : {}) });
 
@@ -72,6 +72,8 @@ describe('keyframes ao dividir', () => {
 
   it('salto exatamente na emenda', () => {
     const c = clip(anima('fadeIn', 2, 'linear'), kf('opacity', 1.5, 0.75, 'linear'), kf('opacity', 2, 0.2, 'linear'), kf('opacity', 3, 0.2, 'linear'));
+    expect(valor(c.props, 'opacity', 2 - 1e-9)).toBeCloseTo(1, 6);
+    expect(valor(c.props, 'opacity', 2)).toBeCloseTo(0.2, 6);
     confereDivisao(c, 'opacity', 2, [1.6, 1.8, 1.99], [0, 0.5, 1]);
   });
 
@@ -180,6 +182,21 @@ describe('keyframes ao cortar', () => {
     expect(props.x.keyframes).toHaveLength(4);
     const unico = cutKeyframes(c0, 1.5, 2.7);
     for (const t of [0, 1, 1.4, 1.5, 1.6, 2]) expect(valor(props, 'x', t)).toBeCloseTo(valor(unico, 'x', t), 6);
+  });
+
+  it('ids das emendas continuam únicos depois de editar o ponto e cortar de novo', () => {
+    const c0 = clip(kf('x', 1, 0, 'linear'), kf('x', 3, 400, 'linear'));
+    const c1 = { ...c0, props: cutKeyframes(c0, 1.5, 1.8), duration: 3.7 };
+    // O Inspetor edita o ponto que a prévia mostra em 1,5 (o "R"), o que descarta o "L".
+    const p = projetoCom(c1);
+    const editado = findClip(applyOps(p, [{ op: 'setKeyframe', clipId: 't', prop: 'x', t: 1.5, v: 300, keyframeId: 'x@1500>' }]).project, 't')!;
+    const props = cutKeyframes(editado, 1.5, 1.8);
+    ordenado(props);
+    const ids = props.x.keyframes.map((k) => k.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toContain('x@1500>~2');
+    for (const x of [0, 1, 1.4, 1.49]) expect(valor(props, 'x', x)).toBeCloseTo(valor(editado.props, 'x', x), 4);
+    for (const x of [1.5, 1.6, 2]) expect(valor(props, 'x', x)).toBeCloseTo(valor(editado.props, 'x', x + 0.3), 4);
   });
 
   it('o mesmo corte duas vezes dá o mesmo resultado; nada é alterado', () => {
