@@ -128,24 +128,43 @@ export function draftSeams(project: Project, view: Project): Seam[] {
  * foi cortado.
  * - Um vídeo Q de `to` vale para o conteúdo de um vídeo V de `from` quando é da
  *   mesma mídia e, além disso, tem o mesmo id, ou é um pedaço novo (id que
- *   `from` não tem), ou V não existe em `to`. Assim outra cópia do mesmo trecho
- *   não puxa a agulha.
- * - Se algum que vale para o vídeo sob a agulha mostra aquele ponto (tolerância
- *   de 1 amostra), a agulha vai para a imagem dele: a do de mesmo id ou, senão,
- *   a mais perto de `t` (empate: a do que começa antes).
+ *   `from` não tem), ou V não existe em `to` e o clipe de Q em `from` não é
+ *   cópia do trecho de V (tem no máximo 1 amostra em comum com ele). Assim uma
+ *   cópia do mesmo trecho que já estava em `from` não puxa a agulha.
+ * - Se algum que vale para o vídeo sob a agulha mostra aquele ponto, a agulha
+ *   vai para a imagem dele: a do de mesmo id ou, senão, a mais perto de `t`
+ *   (empate: a do que começa antes). O de mesmo id mostra o ponto com
+ *   tolerância de 1 amostra nas duas pontas; o de outro id, só no intervalo
+ *   meio-aberto [in − 1 amostra, fim − 1 amostra), como `isActiveAt`: encostar
+ *   no fim dele no arquivo não basta.
  * - Senão o instante foi cortado. Na sequência de vídeos de `from` sem buraco em
  *   volta da agulha, o último instante até `t` que ainda aparece em `to` (o fim
  *   do pedaço que ficou conta) dá a borda do corte; se não há, o primeiro depois
- *   de `t`. No mesmo instante, vale o de mesmo id e depois a imagem mais perto.
+ *   de `t`. Aqui um de outro id só conta se tem mais de 1 amostra em comum com o
+ *   trecho procurado. No mesmo instante, vale o de mesmo id e depois a imagem
+ *   mais perto.
+ * - Limite aceito: quando o mesmo trecho do arquivo aparece duas vezes e as duas
+ *   cópias são divididas, um pedaço novo da outra cópia ainda pode ganhar (nada
+ *   diz de que clipe cada pedaço novo veio).
  * - Sem vídeo sob a agulha, ou sem nada disso, `t` só fica dentro de `to`.
  */
 export function mapPlayhead(from: Project, to: Project, t: number): number {
   const limited = () => Math.min(Math.max(t, 0), projectDuration(to));
   const p = from.clips.find((c): c is VideoClip => isVideo(c) && isActiveAt(c, t));
   if (!p) return limited();
-  const fromIds = new Set(from.clips.map((c) => c.id));
+  const fromById = new Map(from.clips.map((c) => [c.id, c]));
   const toIds = new Set(to.clips.map((c) => c.id));
   const touching = fileIndex(to.clips);
+  /** Quanto os trechos [a0, a1] e [b0, b1] do arquivo têm em comum (≤ 0 se nada). */
+  const overlap = (a0: number, a1: number, b0: number, b1: number) => Math.min(a1, b1) - Math.max(a0, b0);
+  /** Q vale para o conteúdo de V: mesmo id, pedaço novo, ou V saiu de `to` e o clipe de Q em `from` não é cópia do trecho de V. */
+  const admitted = (q: VideoClip, v: VideoClip) => {
+    if (q.id === v.id) return true;
+    const f = fromById.get(q.id);
+    if (!f) return true;
+    if (toIds.has(v.id)) return false;
+    return !(isVideo(f) && f.mediaId === v.mediaId && overlap(f.in, f.in + f.duration, v.in, v.in + v.duration) > SAMPLE);
+  };
   type Hit = { u: number; image: number; same: boolean; start: number };
   // No mesmo instante u: mesmo id primeiro, depois a imagem mais perto de u, depois o que começa antes.
   const beats = (a: Hit, b: Hit, latest: boolean) => {
@@ -155,19 +174,26 @@ export function mapPlayhead(from: Project, to: Project, t: number): number {
     const db = Math.abs(b.image - b.u);
     return Math.abs(da - db) > EPS ? da < db : a.start < b.start;
   };
-  /** O instante u de [uLo, uHi] mais tarde (ou mais cedo) em que o conteúdo de `v` aparece em `to`. */
-  const search = (v: VideoClip, uLo: number, uHi: number, latest: boolean, best?: Hit): Hit | undefined => {
+  /**
+   * O instante u de [uLo, uHi] mais tarde ('latest') ou mais cedo ('earliest') em que o conteúdo de `v`
+   * aparece em `to`; 'exact' procura só o ponto uLo = uHi. Um de outro id não vale por encostar numa ponta
+   * do arquivo: no ponto, precisa mostrá-lo no meio-aberto; num trecho, ter mais de 1 amostra dele.
+   */
+  const search = (v: VideoClip, uLo: number, uHi: number, mode: 'exact' | 'latest' | 'earliest', best?: Hit): Hit | undefined => {
+    const latest = mode !== 'earliest';
     const lo = v.in + (uLo - v.start);
     const hi = v.in + (uHi - v.start);
     for (const { c: q } of touching(v.mediaId, lo, hi)) {
-      if (q.id !== v.id && fromIds.has(q.id) && toIds.has(v.id)) continue;
-      const src = latest ? Math.max(lo, Math.min(q.in + q.duration, hi)) : Math.min(hi, Math.max(q.in, lo));
+      if (!admitted(q, v)) continue;
+      const qEnd = q.in + q.duration;
+      if (q.id !== v.id && (mode === 'exact' ? !(q.in - SAMPLE <= lo && lo < qEnd - SAMPLE) : overlap(q.in, qEnd, lo, hi) <= SAMPLE)) continue;
+      const src = latest ? Math.max(lo, Math.min(qEnd, hi)) : Math.min(hi, Math.max(q.in, lo));
       const hit = { u: v.start + (src - v.in), image: q.start + (src - q.in), same: q.id === v.id, start: q.start };
       if (!best || beats(hit, best, latest)) best = hit;
     }
     return best;
   };
-  const exact = search(p, t, t, true);
+  const exact = search(p, t, t, 'exact');
   if (exact) return exact.image;
   // Instante cortado: a sequência sem buraco de vídeos de `from` em volta da agulha (i0 a i1).
   const vids = from.clips.filter(isVideo).sort((x, y) => x.start - y.start);
@@ -181,11 +207,11 @@ export function mapPlayhead(from: Project, to: Project, t: number): number {
   const maxEnd: number[] = [];
   vids.forEach((v, i) => (maxEnd[i] = Math.max(i ? maxEnd[i - 1] : -Infinity, end(v))));
   let best: Hit | undefined;
-  for (let i = at; i >= i0 && !(best && maxEnd[i] < best.u - EPS); i--) best = search(vids[i], vids[i].start, Math.min(end(vids[i]), t), true, best);
+  for (let i = at; i >= i0 && !(best && maxEnd[i] < best.u - EPS); i--) best = search(vids[i], vids[i].start, Math.min(end(vids[i]), t), 'latest', best);
   if (best) return best.image;
   // Para a frente: os vídeos começam em ordem, então um que começa depois do achado não melhora.
   for (let i = at; i <= i1 && !(best && vids[i].start > best.u + EPS); i++) {
-    if (end(vids[i]) >= t) best = search(vids[i], Math.max(vids[i].start, t), end(vids[i]), false, best);
+    if (end(vids[i]) >= t) best = search(vids[i], Math.max(vids[i].start, t), end(vids[i]), 'earliest', best);
   }
   return best ? best.image : limited();
 }
