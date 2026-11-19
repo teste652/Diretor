@@ -21,7 +21,7 @@ import {
   newId,
   trackForKind,
 } from './model';
-import { remapKeyframes, sameGroup } from './keyframes';
+import { cutKeyframes, partitionKeyframes, remapKeyframes, sameGroup } from './keyframes';
 import { defaultProps, evalProp, propDef, sortedKeyframes } from './properties';
 import { EPS, MIN_DURATION, SAME_T, round } from './time';
 
@@ -110,6 +110,12 @@ export type Op =
    * no começo, a de saída no fim, e o resto acompanha o conteúdo.
    */
   | { op: 'trimClip'; clipId: string; edge: TrimEdge; delta: number; ripple?: boolean }
+  /** Divide o clipe em `at` (segundos da linha do tempo): a parte da direita vira o clipe `newId`. */
+  | { op: 'splitClip'; clipId: string; at: number; newId?: string }
+  /** Move vários clipes de uma vez (`delta` em segundos); nenhum começa antes do zero. */
+  | { op: 'shiftClips'; clipIds: string[]; delta: number }
+  /** Tira o trecho [t0, t1] (segundos relativos ao início do clipe) de um título ou legenda. */
+  | { op: 'cutTextTime'; clipId: string; t0: number; t1: number }
   | { op: 'updateTrack'; trackId: string; set: { hidden?: boolean; locked?: boolean } }
   | { op: 'renameProject'; name: string }
   | { op: 'setCanvas'; width: number; height: number; fps?: number }
@@ -163,6 +169,9 @@ const OP_KEYS: Record<Op['op'], string[]> = {
   clearKeyframes: ['clipId', 'prop', 'group'],
   retimeGroup: ['clipId', 'group', 'start', 'duration'],
   trimClip: ['clipId', 'edge', 'delta', 'ripple'],
+  splitClip: ['clipId', 'at', 'newId'],
+  shiftClips: ['clipIds', 'delta'],
+  cutTextTime: ['clipId', 't0', 't1'],
   updateTrack: ['trackId', 'set'],
   renameProject: ['name'],
   setCanvas: ['width', 'height', 'fps'],
@@ -341,6 +350,55 @@ export function validateOp(p: Project, o: Op, index = 0): OpError[] {
         push('out_of_range', `Para aparar ${o.edge === 'start' ? 'o início' : 'o fim'}, delta vai de ${lim.min.toFixed(3)} a ${lim.max.toFixed(3)}s.`);
       break;
     }
+    case 'splitClip': {
+      const c = need(o.clipId);
+      if (!c) break;
+      if (!isNum(o.at)) push('invalid_param', 'at deve ser um número (segundos da linha do tempo).');
+      else {
+        const lo = c.start + MIN_DURATION;
+        const hi = c.start + c.duration - MIN_DURATION;
+        const at = round(o.at);
+        if (at < lo - EPS || at > hi + EPS)
+          push('out_of_range', `Para dividir, at fica entre ${lo.toFixed(3)} e ${hi.toFixed(3)}s (pelo menos ${MIN_DURATION}s de cada lado).`);
+      }
+      if (o.newId !== undefined && (!isStr(o.newId) || !o.newId.trim())) push('invalid_param', 'newId deve ser um texto.');
+      else if (o.newId && findClip(p, o.newId)) push('invalid_param', `Já existe um clipe "${o.newId}".`);
+      break;
+    }
+    case 'shiftClips': {
+      const ids = o.clipIds;
+      if (!Array.isArray(ids) || !ids.length || ids.some((id) => !isStr(id) || !id)) {
+        push('invalid_param', 'clipIds deve ser uma lista de ids.');
+        break;
+      }
+      if (new Set(ids).size < ids.length) {
+        push('invalid_param', 'clipIds tem ids repetidos.');
+        break;
+      }
+      if (!isNum(o.delta)) {
+        push('invalid_param', 'delta deve ser um número (segundos).');
+        break;
+      }
+      for (const id of ids) {
+        const c = need(id);
+        if (c && c.start + o.delta < -EPS) push('out_of_range', `O clipe "${id}" começaria antes do zero.`);
+      }
+      break;
+    }
+    case 'cutTextTime': {
+      const c = need(o.clipId);
+      if (!c) break;
+      if (c.kind === 'video') {
+        push('invalid_param', 'cutTextTime vale só para título e legenda.');
+        break;
+      }
+      if (!isNum(o.t0) || !isNum(o.t1) || o.t0 < -EPS || o.t1 > c.duration + EPS || o.t1 - o.t0 <= EPS) {
+        push('out_of_range', `t0 e t1 (relativos ao clipe) ficam entre 0 e ${c.duration.toFixed(3)}s, com t0 < t1.`);
+        break;
+      }
+      if (c.duration - round(o.t1 - o.t0) < MIN_DURATION - EPS) push('out_of_range', `O texto ficaria com menos de ${MIN_DURATION}s; remova o clipe.`);
+      break;
+    }
     case 'setProperty':
     case 'setKeyframe':
     case 'removeKeyframe':
@@ -457,6 +515,10 @@ export function clampTrimDelta(p: Project, c: Clip, edge: TrimEdge, delta: numbe
 export function expandOp(p: Project, o: Op): Op[] {
   if (o.op === 'addClip' && !o.clip.id) {
     return [{ ...o, clip: { ...o.clip, id: newId(o.clip.kind === 'video' ? 'vid' : o.clip.kind === 'title' ? 'ttl' : 'cap') } }];
+  }
+  if (o.op === 'splitClip' && !o.newId) {
+    const kind = findClip(p, o.clipId)!.kind;
+    return [{ ...o, newId: newId(kind === 'video' ? 'vid' : kind === 'title' ? 'ttl' : 'cap') }];
   }
   if (o.op === 'setKeyframe' && !o.keyframeId) {
     // Edita o ponto que já está nesse instante (do mesmo grupo, se o grupo foi informado).
@@ -652,6 +714,36 @@ function applyPrimitive(p: Project, o: Op): void {
       else c.start = round(c.start + d);
       return;
     }
+    case 'splitClip': {
+      const i = p.clips.findIndex((x) => x.id === o.clipId);
+      const c = p.clips[i];
+      const L = round(round(o.at) - c.start);
+      const R = round(c.duration - L);
+      const { left, right } = partitionKeyframes(c, L);
+      // Clone inteiro: todos os campos do clipe (inclusive os que vierem depois) passam às duas partes.
+      const piece = structuredClone(c);
+      piece.id = o.newId!;
+      piece.start = round(c.start + L);
+      piece.duration = R;
+      piece.props = right;
+      // in = c.in + L, sem arredondar: o arquivo continua exatamente onde o original para.
+      if (piece.kind === 'video') piece.in += L;
+      c.duration = L;
+      c.props = left;
+      p.clips.splice(i + 1, 0, piece);
+      return;
+    }
+    case 'shiftClips': {
+      const ids = new Set(o.clipIds);
+      for (const c of p.clips) if (ids.has(c.id)) c.start = Math.max(0, round(c.start + o.delta));
+      return;
+    }
+    case 'cutTextTime': {
+      const c = findClip(p, o.clipId)!;
+      c.props = cutKeyframes(c, o.t0, o.t1);
+      c.duration = round(c.duration - round(o.t1 - o.t0));
+      return;
+    }
     case 'removeClip':
       p.clips = p.clips.filter((c) => c.id !== o.clipId);
       return;
@@ -773,6 +865,8 @@ export function touchedClipIds(ops: Op[]): string[] {
   for (const o of ops) {
     if ('clipId' in o) ids.add(o.clipId);
     if (o.op === 'addClip' && o.clip.id) ids.add(o.clip.id);
+    if (o.op === 'splitClip' && o.newId) ids.add(o.newId);
+    if (o.op === 'shiftClips') for (const id of o.clipIds) ids.add(id);
   }
   return [...ids];
 }
@@ -788,6 +882,12 @@ export function describeOp(o: Op): string {
       return 'Editar clipe';
     case 'trimClip':
       return o.edge === 'start' ? 'Aparar início' : 'Aparar fim';
+    case 'splitClip':
+      return 'Dividir clipe';
+    case 'shiftClips':
+      return 'Mover clipes';
+    case 'cutTextTime':
+      return 'Encurtar texto';
     case 'removeClip':
       return 'Remover clipe';
     case 'setProperty':
