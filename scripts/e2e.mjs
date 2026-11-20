@@ -930,6 +930,20 @@ await ev(() => {
 const inDom = await ev(() => document.querySelectorAll('[data-clip]').length);
 check('300 pedaços: aplica e a linha do tempo desenha só os visíveis', applyE1.ok && applyE1.n === 300 && inDom < 120, `aplicar ${applyE1.ms.toFixed(0)} ms, prévia pronta em ${settleMs} ms, ${inDom} blocos desenhados`);
 
+// Exportar os 300 pedaços no app: 30 s menos 299 cortes de 20 ms dão 24,02 s.
+const pedOut = join(out, 'pedacos-exportado.mp4');
+const tExp = Date.now();
+const pedExp = await ev((p) => window.__diretor.exportProject(window.__diretor.session.project, { outPath: p }), pedOut);
+const pedProbe = spawnSync(FFMPEG, ['-hide_banner', '-i', pedOut], { encoding: 'utf8' }).stderr;
+const pd = /Duration: (\d+):(\d+):([\d.]+)/.exec(pedProbe);
+const pedSecs = pd ? Number(pd[1]) * 3600 + Number(pd[2]) * 60 + Number(pd[3]) : 0;
+const pedSil = String(spawnSync(FFMPEG, ['-hide_banner', '-nostats', '-i', pedOut, '-af', 'silencedetect=n=-40dB:d=0.05', '-f', 'null', '-']).stderr);
+check(
+  'exporta 300 pedaços: duração certa, som contínuo e nenhum temporário sobrando',
+  pedExp.ok && Math.abs(pedSecs - 24.02) < 0.1 && /Audio:/.test(pedProbe) && !/silence_start/.test(pedSil) && leftovers().length === 0,
+  `${((Date.now() - tExp) / 1000).toFixed(1)} s; ${pedSecs} s; ${pedExp.error ?? ''}`,
+);
+
 // A exportação interrompida do fim precisa de vídeo: volta ao projeto dos cortes.
 await ev((p) => window.__diretor.session.load(p, null), cortesProject);
 
