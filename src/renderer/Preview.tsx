@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { type Clip, type Project, type VideoClip, findClip, projectDuration } from '../core/model';
 import type { Op } from '../core/operations';
-import { mapPlayhead } from '../core/pieces';
 import { evalClipProp } from '../core/properties';
 import { hitTest, isActiveAt, layoutText, renderFrame, sourceTime, videoRect, visibleClipsAt } from '../core/render';
-import { compare, fmtTime, frameAt, playback, session, shownProject, useCompare, usePlayback, useSession } from './store';
+import { fmtTime, frameAt, playback, session, setCompare, shownProject, useCompare, usePlayback, useSession } from './store';
 import { Icon, run, showToast } from './ui';
 import { SEEK_EPSILON, VideoPool, seekExact } from './video';
 import { nextToPrefetch } from './videoSlots';
@@ -23,14 +22,6 @@ export async function previewSettled(): Promise<void> {
   await nextFrame();
   await lastSync;
   await nextFrame();
-}
-
-/** Antes/Depois: troca o projeto da prévia e leva a agulha ao mesmo ponto do arquivo no outro. */
-function setCompare(before: boolean) {
-  if (before === compare.get()) return;
-  const from = shownProject();
-  compare.set(before);
-  playback.seek(mapPlayhead(from, shownProject(), playback.get().time));
 }
 
 export function Preview() {

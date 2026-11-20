@@ -29,5 +29,6 @@ describe('marcas, alvos do Ctrl+B e chips', () => {
   });
   it('chip da emenda', () => {
     expect([0.4, 4, 12, 75].map(fmtRemoved)).toEqual(['\u22120,4 s', '\u22124,0 s', '\u22120:12', '\u22121:15']);
+    expect([0.033, 0.004].map(fmtRemoved)).toEqual(['\u22120,03 s', '\u22120,01 s']);
   });
 });

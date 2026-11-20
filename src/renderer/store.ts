@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import type { Project } from '../core/model';
+import { mapPlayhead } from '../core/pieces';
 import { EditorSession } from '../core/session';
 import type { Marks } from './timelineLogic';
 
@@ -86,8 +87,18 @@ export function useMarks(): Marks {
   return useSyncExternalStore(marks.subscribe, marks.get);
 }
 
+// Outro projeto carregado (abrir ou novo): as marcas eram tempos do anterior e saem, como a seleção.
+let seenLoads = session.loads;
+session.subscribe(() => {
+  if (session.loads === seenLoads) return;
+  seenLoads = session.loads;
+  marks.set({ in: null, out: null });
+});
+
 // Antes/Depois: com um rascunho que corta ou empurra clipes, a prévia pode mostrar o projeto gravado.
 let comparing = false;
+/** O projeto que o "Antes" mostra: guardado ao ligar (não muda com o rascunho aberto) e solto ao desligar. */
+let antes: Project | null = null;
 const compareListeners = new Set<() => void>();
 
 export const compare = {
@@ -95,6 +106,7 @@ export const compare = {
   set(v: boolean) {
     if (v === comparing) return;
     comparing = v;
+    antes = v ? session.project : null;
     for (const fn of compareListeners) fn();
   },
   subscribe(fn: () => void) {
@@ -112,10 +124,22 @@ export function shownProject(): Project {
   return compare.get() && session.draftInfo.ripple ? session.project : session.view;
 }
 
-// Rascunho aceito ou descartado, outra etapa ou sem corte: a prévia volta ao "Depois". Entre uma etapa e a
-// seguinte a sessão sempre avisa uma vez sem etapa em rascunho, então a próxima nunca abre no "Antes".
+/** Antes/Depois: troca o projeto da prévia e leva a agulha ao mesmo ponto do vídeo no outro. */
+export function setCompare(before: boolean): void {
+  if (before === compare.get()) return;
+  const from = shownProject();
+  compare.set(before);
+  playback.seek(mapPlayhead(from, shownProject(), playback.get().time));
+}
+
+// Rascunho aceito ou descartado, outra etapa ou sem corte: a prévia volta ao "Depois" e a agulha vai do projeto que
+// o "Antes" mostrava para o mesmo ponto do vídeo na view (no descarte a view é esse projeto, e ela fica onde está).
+// Entre uma etapa e a seguinte a sessão sempre avisa uma vez sem etapa em rascunho, então a próxima nunca abre no "Antes".
 session.subscribe(() => {
-  if (comparing && !session.draftInfo.ripple) compare.set(false);
+  if (!comparing || session.draftInfo.ripple) return;
+  const from = antes;
+  compare.set(false);
+  if (from) playback.seek(mapPlayhead(from, session.view, playback.get().time));
 });
 
 export function fmtTime(t: number, fps?: number): string {

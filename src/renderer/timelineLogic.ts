@@ -35,10 +35,12 @@ export function splitTargets(view: Project, selection: string[], t: number): str
 }
 
 /**
- * Chip de uma emenda do rascunho: quanto o corte tirou. Abaixo de 10 s com uma casa ("−0,4 s"), para
- * os cortes curtos não sumirem; daí para cima, "−m:ss". O que arredonda para 10,0 s já sai como "−0:10".
+ * Chip de uma emenda do rascunho: quanto o corte tirou. Abaixo de 0,05 s com duas casas e no mínimo 0,01
+ * ("−0,03 s"); abaixo de 10 s com uma casa ("−0,4 s"); daí para cima, "−m:ss". Nenhum corte aparece como zero,
+ * para os cortes curtos (de respiração, de um quadro) não sumirem. O que arredonda para 10,0 s sai como "−0:10".
  */
 export function fmtRemoved(sec: number): string {
+  if (sec < 0.05) return `\u22120,${String(Math.max(1, Math.round(sec * 100))).padStart(2, '0')} s`;
   const tenths = Math.round(sec * 10);
   if (tenths < 100) return `\u2212${Math.floor(tenths / 10)},${tenths % 10} s`;
   const whole = Math.round(sec);

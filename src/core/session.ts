@@ -210,6 +210,8 @@ export class EditorSession {
   hint: { text: string; at: number } | null = null;
   /** Aumenta a cada mudança de estado (para a interface re-renderizar). */
   version = 0;
+  /** Aumenta a cada projeto carregado (abrir ou novo): a interface limpa o que valia só no anterior. */
+  loads = 0;
 
   private listeners = new Set<() => void>();
   private waiters: { id: string; since: number; resolve: (why?: WaitResult) => void }[] = [];
@@ -598,6 +600,7 @@ export class EditorSession {
     this.viewCache = null;
     this.contextRequest = null;
     this.notes = this.notes.filter((n) => n.delivered);
+    this.loads++;
     this.emit();
     this.wakeAll();
   }

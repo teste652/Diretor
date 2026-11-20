@@ -866,7 +866,46 @@ const tcBefore = await page.textContent('[data-testid=timecode]');
 await page.click('[data-testid=ab-after]');
 const tcAfter = await page.textContent('[data-testid=timecode]');
 check('Antes/Depois troca a prévia entre o projeto e o rascunho', /\/ 0:05\.50/.test(tcBefore) && /\/ 0:05\.00/.test(tcAfter), `${tcBefore} | ${tcAfter}`);
+// Ctrl+B no "Antes": volta para o "Depois" no mesmo ponto do vídeo e divide ali. Em 2,5 s do "Antes" (B, arquivo em
+// 2,5 s) a agulha vai para 2 s do rascunho, onde B começa em 1,5 s com in 2.
+await page.click('[data-testid=ab-before]');
+await ev(() => window.__diretor.playback.seek(2.5));
+await page.keyboard.press('Control+B');
+const tcSplit = await page.textContent('[data-testid=timecode]');
+const splitAt2 = await ev(() => window.__diretor.session.view.clips.some((c) => c.kind === 'video' && Math.abs(c.start - 2) <= 0.001 && Math.abs(c.in - 2.5) <= 0.001));
+check('Ctrl+B no "Antes" volta para "Depois" e divide no mesmo ponto do vídeo', /\/ 0:05\.00/.test(tcSplit) && splitAt2, `${tcSplit}; pedaço em 2 s com in 2,5: ${splitAt2}`);
 await discardOpen();
+
+// Aceitar no "Antes": a prévia volta para o "Depois" com a agulha no mesmo ponto do vídeo (2,5 s do "Antes" → 2 s).
+const ctxE1b = await tool('get_context');
+await tool('propose_edit', { requestId: 'e2e-corte-aceitar', baseRevision: ctxE1b.revision, title: 'Tirar um trecho', steps: [{ label: 'Corte', ops: [{ op: 'removeRanges', ranges: [[1, 1.5]] }] }] });
+await page.waitForSelector('.seam-chip');
+await page.click('[data-testid=ab-before]');
+await ev(() => window.__diretor.playback.seek(2.5));
+await page.click('[data-testid=accept]');
+await page.waitForFunction(() => !window.__diretor.session.openProposal, null, { timeout: 10_000 });
+const afterAccept = await ev(() => ({
+  t: window.__diretor.playback.get().time,
+  tc: document.querySelector('[data-testid=timecode]').textContent,
+  antes: !!document.querySelector('[data-testid=ab-before]'),
+}));
+check('aceitar no "Antes" leva a agulha ao mesmo ponto do vídeo', Math.abs(afterAccept.t - 2) <= 0.001 && /\/ 0:05\.00/.test(afterAccept.tc) && !afterAccept.antes, JSON.stringify(afterAccept));
+
+// Marcas I e O são tempos deste projeto: abrir outro as apaga.
+await ev(() => window.__diretor.playback.seek(3));
+await page.keyboard.press('i');
+await ev(() => window.__diretor.playback.seek(3.5));
+await page.keyboard.press('o');
+const marksOn = await ev(() => !document.querySelector('[data-testid=delete-range]').disabled);
+const cortesProject = await ev(() => window.__diretor.session.project);
+await freshProject('Marcas');
+const marksGone = await ev(() => ({
+  disabled: document.querySelector('[data-testid=delete-range]').disabled,
+  shown: document.querySelectorAll('.range-band, .mark-in, .mark-out').length,
+}));
+check('abrir outro projeto apaga as marcas I e O', marksOn && marksGone.disabled && marksGone.shown === 0, JSON.stringify({ ligado: marksOn, ...marksGone }));
+// A exportação interrompida do fim precisa de vídeo: volta ao projeto dos cortes.
+await ev((p) => window.__diretor.session.load(p, null), cortesProject);
 
 writeFileSync(join(out, 'resultado.json'), JSON.stringify(results, null, 2));
 await client.close();

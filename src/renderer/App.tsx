@@ -5,7 +5,7 @@ import { ChatPanel } from './ChatPanel';
 import { cancelExport, exportProject, isExporting } from './exporter';
 import { LeftPanel, importPaths } from './MediaPanel';
 import { Preview, previewSettled, togglePlay } from './Preview';
-import { marks, playback, session, useSession } from './store';
+import { marks, playback, session, setCompare, useSession } from './store';
 import { addCaptionAtPlayhead, deleteMarkedRange, deleteSelectedKeyframeOrClip, splitAtPlayhead, Timeline } from './Timeline';
 import { withIn, withOut } from './timelineLogic';
 import { Icon, TextField, ToastHost, run, showToast } from './ui';
@@ -96,8 +96,9 @@ export function App() {
       // Com Shift, o trecho marcado (antes do Delete comum, que tira o clipe selecionado).
       else if (e.shiftKey && (e.key === 'Delete' || e.key === 'Backspace')) deleteMarkedRange();
       else if (e.key === 'Delete' || e.key === 'Backspace') deleteSelectedKeyframeOrClip();
-      else if (!mod && !e.altKey && key === 'i') marks.set(withIn(marks.get(), playback.get().time));
-      else if (!mod && !e.altKey && key === 'o') marks.set(withOut(marks.get(), playback.get().time));
+      // I e O marcam a agulha. No "Antes", primeiro a prévia volta para o "Depois", com a agulha no mesmo ponto do vídeo.
+      else if (!mod && !e.altKey && key === 'i') (setCompare(false), marks.set(withIn(marks.get(), playback.get().time)));
+      else if (!mod && !e.altKey && key === 'o') (setCompare(false), marks.set(withOut(marks.get(), playback.get().time)));
       else if (e.key === 'Escape') marks.set({ in: null, out: null });
       else if (e.key === 'ArrowRight') playback.seek(playback.get().time + 1 / session.view.settings.fps);
       else if (e.key === 'ArrowLeft') playback.seek(playback.get().time - 1 / session.view.settings.fps);

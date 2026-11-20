@@ -3,7 +3,7 @@ import { type Clip, type Track, newId, projectDuration } from '../core/model';
 import { type Op, clampTrimDelta } from '../core/operations';
 import { keyframeAt } from '../core/properties';
 import { snapToFrame } from '../core/time';
-import { fmtTime, marks, playback, session, useMarks, usePlayback, useSession } from './store';
+import { fmtTime, marks, playback, session, setCompare, useMarks, usePlayback, useSession } from './store';
 import { fmtRemoved, markedRange, splitTargets, withIn, withOut } from './timelineLogic';
 import { Icon, run, showToast } from './ui';
 
@@ -59,8 +59,12 @@ export function deleteSelectedKeyframeOrClip() {
   deleteSelection();
 }
 
-/** Ctrl+B e o botão Dividir: divide na agulha, no quadro mais próximo, o que `splitTargets` escolhe. */
+/**
+ * Ctrl+B e o botão Dividir: divide na agulha, no quadro mais próximo, o que `splitTargets` escolhe. No "Antes",
+ * volta primeiro para o "Depois" no mesmo ponto do vídeo: divide o rascunho onde a pessoa está olhando.
+ */
 export function splitAtPlayhead(): void {
+  setCompare(false);
   const view = session.view;
   const t = snapToFrame(playback.get().time, view.settings.fps);
   const ids = splitTargets(view, session.selection.clipIds, t);
@@ -68,8 +72,12 @@ export function splitAtPlayhead(): void {
   run(ids.map((clipId): Op => ({ op: 'splitClip', clipId, at: t })), 'Dividir');
 }
 
-/** Shift+Delete e o botão Apagar trecho: tira o trecho marcado de todas as faixas e leva a agulha ao começo dele. */
+/**
+ * Shift+Delete e o botão Apagar trecho: tira o trecho marcado de todas as faixas e leva a agulha ao começo dele.
+ * No "Antes", volta primeiro para o "Depois" (as marcas e a agulha passam a valer no rascunho).
+ */
 export function deleteMarkedRange(): void {
+  setCompare(false);
   const r = markedRange(marks.get());
   if (!r) return showToast('Marque o trecho na régua (Shift+arrastar, ou I e O) para apagar.');
   if (!run([{ op: 'removeRanges', ranges: [r] }], 'Apagar trecho')) return;
