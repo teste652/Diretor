@@ -1,5 +1,7 @@
 import { useSyncExternalStore } from 'react';
+import type { Project } from '../core/model';
 import { EditorSession } from '../core/session';
+import type { Marks } from './timelineLogic';
 
 export const session = new EditorSession();
 
@@ -63,6 +65,58 @@ export const playback = {
 export function usePlayback(): ClockState {
   return useSyncExternalStore(playback.subscribe, playback.get);
 }
+
+// Marcas I e O da régua: o trecho que "Apagar trecho" (Shift+Delete) tira de todas as faixas.
+let markState: Marks = { in: null, out: null };
+const markListeners = new Set<() => void>();
+
+export const marks = {
+  get: () => markState,
+  set(next: Marks) {
+    markState = next;
+    for (const fn of markListeners) fn();
+  },
+  subscribe(fn: () => void) {
+    markListeners.add(fn);
+    return () => markListeners.delete(fn);
+  },
+};
+
+export function useMarks(): Marks {
+  return useSyncExternalStore(marks.subscribe, marks.get);
+}
+
+// Antes/Depois: com um rascunho que corta ou empurra clipes, a prévia pode mostrar o projeto gravado.
+let comparing = false;
+const compareListeners = new Set<() => void>();
+
+export const compare = {
+  get: () => comparing,
+  set(v: boolean) {
+    if (v === comparing) return;
+    comparing = v;
+    for (const fn of compareListeners) fn();
+  },
+  subscribe(fn: () => void) {
+    compareListeners.add(fn);
+    return () => compareListeners.delete(fn);
+  },
+};
+
+export function useCompare(): boolean {
+  return useSyncExternalStore(compare.subscribe, compare.get);
+}
+
+/** O que a prévia mostra: no "Antes", o projeto gravado (só com rascunho que corta ou empurra); senão, a view. */
+export function shownProject(): Project {
+  return compare.get() && session.draftInfo.ripple ? session.project : session.view;
+}
+
+// Rascunho aceito ou descartado, outra etapa ou sem corte: a prévia volta ao "Depois". Entre uma etapa e a
+// seguinte a sessão sempre avisa uma vez sem etapa em rascunho, então a próxima nunca abre no "Antes".
+session.subscribe(() => {
+  if (comparing && !session.draftInfo.ripple) compare.set(false);
+});
 
 export function fmtTime(t: number, fps?: number): string {
   // Com fps, tudo sai do tempo alinhado ao quadro (senão 1,0 s apareceria como 0:00.99).

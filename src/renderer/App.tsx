@@ -5,8 +5,9 @@ import { ChatPanel } from './ChatPanel';
 import { cancelExport, exportProject, isExporting } from './exporter';
 import { LeftPanel, importPaths } from './MediaPanel';
 import { Preview, previewSettled, togglePlay } from './Preview';
-import { playback, session, useSession } from './store';
-import { addCaptionAtPlayhead, deleteSelectedKeyframeOrClip, Timeline } from './Timeline';
+import { marks, playback, session, useSession } from './store';
+import { addCaptionAtPlayhead, deleteMarkedRange, deleteSelectedKeyframeOrClip, splitAtPlayhead, Timeline } from './Timeline';
+import { withIn, withOut } from './timelineLogic';
 import { Icon, TextField, ToastHost, run, showToast } from './ui';
 
 export async function saveProject(saveAs = false, path?: string): Promise<string | null> {
@@ -91,7 +92,13 @@ export function App() {
       if (e.code === 'Space') (e.preventDefault(), togglePlay());
       else if (mod && key === 'z' && !e.shiftKey) (e.preventDefault(), session.undo());
       else if (mod && (key === 'y' || (e.shiftKey && key === 'z'))) (e.preventDefault(), session.redo());
+      else if (mod && key === 'b') (e.preventDefault(), splitAtPlayhead());
+      // Com Shift, o trecho marcado (antes do Delete comum, que tira o clipe selecionado).
+      else if (e.shiftKey && (e.key === 'Delete' || e.key === 'Backspace')) deleteMarkedRange();
       else if (e.key === 'Delete' || e.key === 'Backspace') deleteSelectedKeyframeOrClip();
+      else if (!mod && !e.altKey && key === 'i') marks.set(withIn(marks.get(), playback.get().time));
+      else if (!mod && !e.altKey && key === 'o') marks.set(withOut(marks.get(), playback.get().time));
+      else if (e.key === 'Escape') marks.set({ in: null, out: null });
       else if (e.key === 'ArrowRight') playback.seek(playback.get().time + 1 / session.view.settings.fps);
       else if (e.key === 'ArrowLeft') playback.seek(playback.get().time - 1 / session.view.settings.fps);
     };

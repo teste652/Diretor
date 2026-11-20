@@ -752,14 +752,26 @@ const e1State = () =>
 await freshProject('Cortes');
 await ev((f) => window.__diretor.importPaths([f]), src);
 await page.waitForFunction(() => window.__diretor.session.project.clips.length === 1);
-// [Tarefa 9 troca por teclado] dividir em 2 s
-await ev(() => { const s = window.__diretor.session; s.dispatch([{ op: 'splitClip', clipId: s.project.clips[0].id, at: 2 }]); });
+// Ctrl+B com a agulha colada na borda não divide, só explica; em 2 s, divide o vídeo.
+await ev(() => document.activeElement?.blur());
+await ev(() => window.__diretor.playback.seek(0.01));
+await page.keyboard.press('Control+B');
+const nearEdge = await ev(() => ({ clips: window.__diretor.session.project.clips.length, hint: document.body.innerText.includes('coloque a agulha') }));
+check('Ctrl+B perto da borda não divide e mostra a dica', nearEdge.clips === 1 && nearEdge.hint, JSON.stringify(nearEdge));
+await ev(() => window.__diretor.playback.seek(2));
+await page.keyboard.press('Control+B');
 await ev(() => window.__diretor.session.dispatch([
   { op: 'addClip', clip: { kind: 'caption', text: 'depois do corte', start: 3.6, duration: 1 } },
   { op: 'addClip', clip: { kind: 'caption', text: 'atravessa o corte', start: 2.8, duration: 0.5 } },
 ]));
-// [Tarefa 9 troca por teclado] apagar [3; 3,5]
-await ev(() => window.__diretor.session.dispatch([{ op: 'removeRanges', ranges: [[3, 3.5]] }]));
+// Marcas I em 3 s e O em 3,5 s ligam "Apagar trecho"; Shift+Delete tira o trecho de todas as faixas.
+await ev(() => window.__diretor.playback.seek(3));
+await page.keyboard.press('i');
+await ev(() => window.__diretor.playback.seek(3.5));
+await page.keyboard.press('o');
+const rangeOn = await ev(() => !document.querySelector('[data-testid=delete-range]').disabled);
+check('marcas I e O ligam "Apagar trecho"', rangeOn);
+await page.keyboard.press('Shift+Delete');
 const e1 = await e1State();
 check(
   'dividir e apagar trecho: pedaços certos e legendas sincronizadas',
@@ -842,6 +854,19 @@ check(
   `ao pular: ${fmtRect(rect1)}; depois: ${fmtRect(rect2)}`,
 );
 await ev(() => window.__diretor.session.setSelection({ clipIds: [] }));
+
+// Rascunho da IA com um corte: o chip da emenda e o Antes/Depois na prévia.
+const ctxE1 = await tool('get_context');
+const pE1 = await tool('propose_edit', { requestId: 'e2e-corte', baseRevision: ctxE1.revision, title: 'Tirar um trecho', steps: [{ label: 'Corte', ops: [{ op: 'removeRanges', ranges: [[1, 1.5]] }] }] });
+await page.waitForSelector('.seam-chip');
+const chips = await ev(() => [...document.querySelectorAll('.seam-chip')].map((e) => e.textContent.trim()));
+check('rascunho com corte mostra a emenda "−0,5 s"', pE1.status === 'active' && chips.length === 1 && chips[0] === '\u22120,5 s', JSON.stringify(chips));
+await page.click('[data-testid=ab-before]');
+const tcBefore = await page.textContent('[data-testid=timecode]');
+await page.click('[data-testid=ab-after]');
+const tcAfter = await page.textContent('[data-testid=timecode]');
+check('Antes/Depois troca a prévia entre o projeto e o rascunho', /\/ 0:05\.50/.test(tcBefore) && /\/ 0:05\.00/.test(tcAfter), `${tcBefore} | ${tcAfter}`);
+await discardOpen();
 
 writeFileSync(join(out, 'resultado.json'), JSON.stringify(results, null, 2));
 await client.close();

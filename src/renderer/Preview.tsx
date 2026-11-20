@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { type Clip, type Project, type VideoClip, findClip, projectDuration } from '../core/model';
 import type { Op } from '../core/operations';
+import { mapPlayhead } from '../core/pieces';
 import { evalClipProp } from '../core/properties';
 import { hitTest, isActiveAt, layoutText, renderFrame, sourceTime, videoRect, visibleClipsAt } from '../core/render';
-import { fmtTime, frameAt, playback, session, usePlayback, useSession } from './store';
+import { compare, fmtTime, frameAt, playback, session, shownProject, useCompare, usePlayback, useSession } from './store';
 import { Icon, run, showToast } from './ui';
 import { SEEK_EPSILON, VideoPool, seekExact } from './video';
 import { nextToPrefetch } from './videoSlots';
@@ -24,10 +25,22 @@ export async function previewSettled(): Promise<void> {
   await nextFrame();
 }
 
+/** Antes/Depois: troca o projeto da prévia e leva a agulha ao mesmo ponto do arquivo no outro. */
+function setCompare(before: boolean) {
+  if (before === compare.get()) return;
+  const from = shownProject();
+  compare.set(before);
+  playback.seek(mapPlayhead(from, shownProject(), playback.get().time));
+}
+
 export function Preview() {
   const s = useSession();
   const pb = usePlayback();
-  const view = s.view;
+  const comparing = useCompare();
+  // O projeto que a prévia mostra: a view ou, no "Antes", o projeto gravado.
+  const view = shownProject();
+  /** "Antes": a prévia mostra o projeto sem o rascunho (a mesma condição de shownProject). */
+  const before = comparing && s.draftInfo.ripple;
   const { width: W, height: H, fps } = view.settings;
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -50,7 +63,7 @@ export function Preview() {
     const pool = previewPool.current;
     if (!cv || !pool) return;
     const ctx = cv.getContext('2d')!;
-    const p = session.view;
+    const p = shownProject();
     renderFrame(ctx, p, playback.get().time, {
       getVideoFrame: (c) => pool.frame(c),
       dragOffset: drag.current ? { clipId: drag.current.clipId, dx: drag.current.dx, dy: drag.current.dy } : null,
@@ -150,7 +163,7 @@ export function Preview() {
         });
     const tick = () => {
       if (stopped) return;
-      const p = session.view;
+      const p = shownProject();
       const now = performance.now();
       if (playback.epoch() !== epoch) {
         // O usuário clicou em outro ponto durante a reprodução.
@@ -175,8 +188,8 @@ export function Preview() {
       if (framesReady(p, t)) draw();
       raf.current = requestAnimationFrame(tick);
     };
-    framesGate.current = () => framesReady(session.view, playback.get().time);
-    sync(session.view, anchor.t, true);
+    framesGate.current = () => framesReady(shownProject(), playback.get().time);
+    sync(shownProject(), anchor.t, true);
     raf.current = requestAnimationFrame(tick);
     // Janela minimizada: o rAF para, então pausa tudo (o som não passa do ponto de corte).
     const onVisibility = () => {
@@ -199,9 +212,11 @@ export function Preview() {
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
+    // No "Antes" só se olha: clicar não seleciona nem arrasta.
+    if (before) return;
     const ctx = canvasRef.current!.getContext('2d')!;
     const { x, y } = toProject(e);
-    const hit = hitTest(ctx, session.view, playback.get().time, x, y, (c) => previewPool.current!.frame(c));
+    const hit = hitTest(ctx, shownProject(), playback.get().time, x, y, (c) => previewPool.current!.frame(c));
     if (!hit) {
       session.setSelection({ clipIds: [] });
       return;
@@ -261,7 +276,17 @@ export function Preview() {
         )}
         {s.activeStep && (
           <div className="draft-flag">
-            <span className="badge">Rascunho: {s.activeStep.label}</span>
+            <span className="badge">{before ? 'Antes do rascunho' : `Rascunho: ${s.activeStep.label}`}</span>
+            {draft.ripple && (
+              <>
+                <button className={`btn small ${before ? 'on' : ''}`} aria-pressed={before} title="Ver o projeto sem o rascunho" onClick={() => setCompare(true)} data-testid="ab-before">
+                  Antes
+                </button>
+                <button className={`btn small ${before ? '' : 'on'}`} aria-pressed={!before} title="Ver o projeto com o rascunho" onClick={() => setCompare(false)} data-testid="ab-after">
+                  Depois
+                </button>
+              </>
+            )}
           </div>
         )}
         {view.clips.length === 0 && <div className="empty" style={{ position: 'absolute' }}>Adicione um MP4 em “Mídia” para começar.</div>}
@@ -295,7 +320,7 @@ export function Preview() {
 
 export function togglePlay() {
   const { playing, time } = playback.get();
-  const p = session.view;
+  const p = shownProject();
   const end = projectDuration(p);
   if (!playing && time >= end - 1.5 / p.settings.fps) playback.seek(0);
   playback.set({ playing: !playing && end > 0 });
@@ -304,7 +329,7 @@ export function togglePlay() {
 function selectionBox(c: Clip, time: number, canvas: HTMLCanvasElement, k: number) {
   if (!isActiveAt(c, time)) return null;
   const ctx = canvas.getContext('2d')!;
-  const p = session.view;
+  const p = shownProject();
   const offX = canvas.offsetLeft;
   const offY = canvas.offsetTop;
   if (c.kind === 'video') {

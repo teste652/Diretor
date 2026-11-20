@@ -2,13 +2,17 @@ import { useEffect, useRef, useState } from 'react';
 import { type Clip, type Track, newId, projectDuration } from '../core/model';
 import { type Op, clampTrimDelta } from '../core/operations';
 import { keyframeAt } from '../core/properties';
-import { fmtTime, playback, session, usePlayback, useSession } from './store';
-import { Icon, run } from './ui';
+import { snapToFrame } from '../core/time';
+import { fmtTime, marks, playback, session, useMarks, usePlayback, useSession } from './store';
+import { fmtRemoved, markedRange, splitTargets, withIn, withOut } from './timelineLogic';
+import { Icon, run, showToast } from './ui';
 
 type DragState =
   | { kind: 'move' | 'trimL' | 'trimR'; clipId: string; x0: number; dt: number }
   | { kind: 'kf'; clipId: string; t: number; x0: number; dt: number }
-  | { kind: 'scrub' };
+  | { kind: 'scrub' }
+  /** Shift+arrastar na régua: marca o trecho entre o ponto de partida (t0) e o ponteiro. */
+  | { kind: 'mark'; t0: number };
 
 const LANES: { label: string; kind: Track['kind'] | 'audio' }[] = [
   { label: 'Legendas', kind: 'captions' },
@@ -55,11 +59,31 @@ export function deleteSelectedKeyframeOrClip() {
   deleteSelection();
 }
 
+/** Ctrl+B e o botão Dividir: divide na agulha, no quadro mais próximo, o que `splitTargets` escolhe. */
+export function splitAtPlayhead(): void {
+  const view = session.view;
+  const t = snapToFrame(playback.get().time, view.settings.fps);
+  const ids = splitTargets(view, session.selection.clipIds, t);
+  if (!ids.length) return showToast('Para dividir, coloque a agulha no meio de um clipe (longe das bordas).');
+  run(ids.map((clipId): Op => ({ op: 'splitClip', clipId, at: t })), 'Dividir');
+}
+
+/** Shift+Delete e o botão Apagar trecho: tira o trecho marcado de todas as faixas e leva a agulha ao começo dele. */
+export function deleteMarkedRange(): void {
+  const r = markedRange(marks.get());
+  if (!r) return showToast('Marque o trecho na régua (Shift+arrastar, ou I e O) para apagar.');
+  if (!run([{ op: 'removeRanges', ranges: [r] }], 'Apagar trecho')) return;
+  marks.set({ in: null, out: null });
+  playback.seek(r[0]);
+}
+
 const round = (n: number) => Math.round(n * 1000) / 1000;
 
 export function Timeline() {
   const s = useSession();
   const pb = usePlayback();
+  const mk = useMarks();
+  const range = markedRange(mk);
   const view = s.view;
   const fps = view.settings.fps;
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -88,11 +112,16 @@ export function Timeline() {
     if (!drag) return;
     const move = (e: PointerEvent) => {
       if (drag.kind === 'scrub') return playback.seek(snap(timeAt(e.clientX)));
+      if (drag.kind === 'mark') {
+        // Para qualquer lado: a entrada é a menor das duas pontas.
+        const t = snap(timeAt(e.clientX));
+        return marks.set(withOut(withIn(marks.get(), Math.min(drag.t0, t)), Math.max(drag.t0, t)));
+      }
       setDrag({ ...drag, dt: snap((e.clientX - drag.x0) / pps) });
     };
     const up = () => {
       setDrag(null);
-      if (drag.kind === 'scrub' || !drag.dt) return;
+      if (drag.kind === 'scrub' || drag.kind === 'mark' || !drag.dt) return;
       const c = view.clips.find((x) => x.id === drag.clipId);
       if (!c) return;
       if (drag.kind === 'move') run([{ op: 'updateClip', clipId: c.id, set: { start: round(Math.max(0, c.start + drag.dt)) } }], 'Mover clipe');
@@ -119,11 +148,11 @@ export function Timeline() {
 
   // Prévia do arrasto igual ao resultado do trimClip: o vídeo aparado no início fica
   // no lugar (o fim acompanha) e os vídeos seguintes da faixa andam junto.
-  const dragged = drag && drag.kind !== 'scrub' && drag.kind !== 'kf' ? view.clips.find((x) => x.id === drag.clipId) : undefined;
+  const dragged = drag && drag.kind !== 'scrub' && drag.kind !== 'mark' && drag.kind !== 'kf' ? view.clips.find((x) => x.id === drag.clipId) : undefined;
   const geom = (c: Clip) => {
     let start = c.start;
     let dur = c.duration;
-    if (dragged && drag && drag.kind !== 'scrub' && drag.kind !== 'kf') {
+    if (dragged && drag && drag.kind !== 'scrub' && drag.kind !== 'mark' && drag.kind !== 'kf') {
       const edge = drag.kind === 'trimL' ? 'start' : 'end';
       const d = drag.kind === 'move' ? 0 : clampTrimDelta(view, dragged, edge, drag.dt);
       if (dragged.id === c.id) {
@@ -166,6 +195,12 @@ export function Timeline() {
           data-testid="trash"
         >
           {Icon.trash}
+        </button>
+        <button className="btn" title="Dividir na agulha (Ctrl+B)" onClick={splitAtPlayhead} data-testid="split">
+          {Icon.scissors} Dividir
+        </button>
+        <button className="btn" title="Apagar o trecho marcado em todas as faixas (Shift+Delete)" disabled={!range} onClick={deleteMarkedRange} data-testid="delete-range">
+          {Icon.cutRange} Apagar trecho
         </button>
         <button className="btn" onClick={addCaptionAtPlayhead} data-testid="add-caption">
           {Icon.plus} Adicionar legenda
@@ -219,7 +254,13 @@ export function Timeline() {
             <div
               className="ruler"
               onPointerDown={(e) => {
-                playback.seek(snap(timeAt(e.clientX)));
+                const t = snap(timeAt(e.clientX));
+                // Shift+arrastar marca o trecho (as duas marcas no quadro); sem Shift, arrasta a agulha.
+                if (e.shiftKey) {
+                  marks.set(withOut(withIn(marks.get(), t), t));
+                  return setDrag({ kind: 'mark', t0: t });
+                }
+                playback.seek(t);
                 setDrag({ kind: 'scrub' });
               }}
             >
@@ -248,7 +289,7 @@ export function Timeline() {
                         width={g.width}
                         pps={pps}
                         selected={s.selection.clipIds.includes(c.id)}
-                        isNewDraft={draft.createdClipIds.has(c.id)}
+                        isNewDraft={draft.addedClipIds.has(c.id)}
                         draftKfs={draft.keyframeIds}
                         selectedKf={s.selection.keyframe}
                         kfDrag={drag?.kind === 'kf' && drag.clipId === c.id ? drag : null}
@@ -268,7 +309,7 @@ export function Timeline() {
                   })}
                   {l.kind !== 'audio' &&
                     draft.range
-                      .filter((r) => clips.some((c) => c.id === r.clipId) && !draft.createdClipIds.has(r.clipId))
+                      .filter((r) => clips.some((c) => c.id === r.clipId) && !draft.addedClipIds.has(r.clipId))
                       .map((r) => {
                         const c = clips.find((x) => x.id === r.clipId)!;
                         const g = geom(c);
@@ -280,7 +321,9 @@ export function Timeline() {
                           </div>
                         );
                       })}
+                  {/* Com corte ou empurrão no rascunho, as posições do projeto não valem mais na view. */}
                   {l.kind !== 'audio' &&
+                    !draft.ripple &&
                     s.project.clips
                       .filter((c) => draft.removedClipIds.has(c.id) && c.trackId === tr?.id)
                       .map((c) => (
@@ -288,9 +331,23 @@ export function Timeline() {
                           <span className="label">Remoção proposta · {c.kind === 'video' ? c.name : c.text}</span>
                         </div>
                       ))}
+                  {l.kind === 'video' &&
+                    draft.seams.map((seam, i) => (
+                      <div key={`seam-${i}`} className="seam-chip" style={{ left: seam.at * pps }} title={`Corte do rascunho: ${fmtRemoved(seam.removed)}`}>
+                        {fmtRemoved(seam.removed)}
+                      </div>
+                    ))}
                 </div>
               );
             })}
+            {range ? (
+              <div className="range-band" style={{ left: range[0] * pps, width: (range[1] - range[0]) * pps }} />
+            ) : (
+              <>
+                {mk.in !== null && <div className="mark-in" style={{ left: mk.in * pps }} />}
+                {mk.out !== null && <div className="mark-out" style={{ left: mk.out * pps }} />}
+              </>
+            )}
             <div className="playhead" style={{ left: pb.time * pps }} />
           </div>
         </div>
@@ -325,15 +382,15 @@ function ClipBlock(props: {
 }) {
   const { clip: c } = props;
   // Um losango por instante (agrupa propriedades no mesmo tempo).
-  const marks = new Map<string, { t: number; prop: string; id: string; draft: boolean; sel: boolean }>();
+  const diamonds = new Map<string, { t: number; prop: string; id: string; draft: boolean; sel: boolean }>();
   for (const [prop, ap] of Object.entries(c.props)) {
     for (const k of ap.keyframes) {
       const key = k.t.toFixed(3);
-      const m = marks.get(key);
+      const m = diamonds.get(key);
       const draft = props.draftKfs.has(k.id);
       const sel = props.selectedKf?.keyframeId === k.id;
       // O losango seleciona o ponto que a prévia mostra nesse instante.
-      if (!m) marks.set(key, { t: k.t, prop, id: keyframeAt(ap, k.t)?.id ?? k.id, draft, sel });
+      if (!m) diamonds.set(key, { t: k.t, prop, id: keyframeAt(ap, k.t)?.id ?? k.id, draft, sel });
       else {
         m.draft ||= draft;
         m.sel ||= sel;
@@ -356,7 +413,7 @@ function ClipBlock(props: {
         </span>
         <div className="handle r" onPointerDown={(e) => props.onDown('trimR', e)} />
       </div>
-      {[...marks.values()].map((m) => {
+      {[...diamonds.values()].map((m) => {
         const t = props.kfDrag && Math.abs(props.kfDrag.t - m.t) < 1e-3 ? m.t + props.kfDrag.dt : m.t;
         return (
           <div
