@@ -5,7 +5,7 @@
 import { type Op, OpValidationError, USER_ONLY_OPS, applyOps, describeOp, touchedClipIds } from './operations';
 import { type Project, createProject, findClip } from './model';
 import { type Seam, draftSeams } from './pieces';
-import { SAMPLE, SAME_T } from './time';
+import { SAME_T } from './time';
 
 export type Source = 'user' | 'ai';
 
@@ -201,27 +201,25 @@ function hashString(s: string): string {
  * ids nem da ordem dos clipes, e dividir não a muda, porque nenhum tempo muda.
  */
 function timeBaseKey(p: Project): string {
+  // Em milissegundos inteiros, como os tempos que as operações gravam: assim um início antigo fora da grade (0,0666…)
+  // arredonda igual nas duas metades de uma divisão.
+  const ms = (t: number) => Math.round(t * 1000);
   // Pedaços da mesma mídia com o mesmo deslocamento (início menos in) mostram o mesmo momento no mesmo segundo: os que
   // se tocam ou se sobrepõem contam como um trecho só, inclusive uma cópia do mesmo vídeo por cima ou por baixo.
   const vids = p.clips
-    .flatMap((c) => (c.kind === 'video' ? [{ m: c.mediaId, o: c.start - c.in, s: c.start, e: c.start + c.duration, i: c.in }] : []))
-    .sort((a, b) => (a.m < b.m ? -1 : a.m > b.m ? 1 : a.o - b.o));
+    .flatMap((c) => (c.kind === 'video' ? [{ m: c.mediaId, s: ms(c.start), e: ms(c.start + c.duration), i: ms(c.in) }] : []))
+    .sort((a, b) => (a.m < b.m ? -1 : a.m > b.m ? 1 : a.s - a.i - (b.s - b.i) || a.s - b.s));
   const runs: string[] = [];
-  for (let k = 0; k < vids.length; ) {
-    let j = k + 1;
-    while (j < vids.length && vids[j].m === vids[k].m && vids[j].o - vids[j - 1].o <= SAMPLE) j++;
-    const same = vids.slice(k, j).sort((a, b) => a.s - b.s);
-    let run = { ...same[0] };
-    for (const v of same.slice(1)) {
-      if (v.s <= run.e + SAMPLE) run.e = Math.max(run.e, v.e);
-      else {
-        runs.push(`${run.m}@${run.s.toFixed(3)}+${(run.e - run.s).toFixed(3)}<${run.i.toFixed(3)}`);
-        run = { ...v };
-      }
+  let run: (typeof vids)[number] | undefined;
+  const close = () => run && runs.push(`${run.m}@${run.s}+${run.e - run.s}<${run.i}`);
+  for (const v of vids) {
+    if (run && v.m === run.m && v.s - v.i === run.s - run.i && v.s <= run.e) run.e = Math.max(run.e, v.e);
+    else {
+      close();
+      run = { ...v };
     }
-    runs.push(`${run.m}@${run.s.toFixed(3)}+${(run.e - run.s).toFixed(3)}<${run.i.toFixed(3)}`);
-    k = j;
   }
+  close();
   return hashString(runs.sort().join('|'));
 }
 
@@ -884,8 +882,8 @@ export class EditorSession {
       const s = p.steps[i];
       if (s.status !== 'waiting') continue;
       p.current = i;
-      // Os tempos de corte desta etapa eram da linha do tempo que as anteriores deixariam: uma anterior descartada
-      // ou ajustada à mão muda essa linha, e o mesmo segundo já é outro trecho do vídeo.
+      // Os tempos da linha do tempo desta etapa (cortes, divisões, o início de um clipe) eram da linha que as anteriores
+      // deixariam: uma anterior descartada ou ajustada à mão muda essa linha, e o mesmo segundo já é outro trecho do vídeo.
       if (s.timeBase !== undefined && usesTimelineTime(s.requested) && timeBaseKey(this.project) !== s.timeBase) {
         this.markStale(p, `Uma etapa anterior foi descartada ou ajustada à mão, e os tempos da etapa "${s.label}" eram da linha do tempo de antes. Peça para refazer com o contexto atual.`);
         this.emit();

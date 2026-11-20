@@ -988,13 +988,15 @@ describe('etapas de corte seguidas', () => {
       { kind: 'video', id: 'ov', mediaId: 'm1', start: 5, duration: 3, in: 10 },
       { kind: 'video', id: 'v2', mediaId: 'm1' },
     ];
-    for (const layout of [[extra[0]], [extra[1]]]) {
+    // Por cima, só o pedaço comprido passa pelos 10 s; com a cópia inteira, os dois passam.
+    for (const [layout, expected] of [[[extra[0]], 1], [[extra[1]], 2]] as const) {
       const pieces = (() => {
         const t = fixture();
         t.load(applyOps(t.project, layout.map((clip) => ({ op: 'addClip' as const, clip }))).project, null);
         proposeTwo(t, cutStep('Segundo', [[15, 16]]));
         return t.view.clips.filter((c) => c.kind === 'video' && c.start < 10 && 10 < c.start + c.duration).length;
       })();
+      expect(pieces).toBe(expected);
       // Divide cada pedaço que passa pelos 10 s, um de cada vez, numa sessão nova.
       for (let k = 0; k < pieces; k++) {
         const s = fixture();
@@ -1014,6 +1016,26 @@ describe('etapas de corte seguidas', () => {
     expect(s.dispatch([{ op: 'removeRanges', ranges: [[0.5, 1]] }])).toEqual({ ok: true, target: 'draft' });
     expect(s.acceptStep()).toBe(true);
     expect(p.status).toBe('stale');
+  });
+
+  it('num projeto antigo com início fora do milissegundo, uma divisão sua também não desatualiza', () => {
+    // Arquivos antigos guardam inícios no passo de 1/30 do campo "Início" (0,0666…), e abrem como estão.
+    const old = applyOps(createProject(), [
+      { op: 'addMedia', media: media(20) },
+      { op: 'addClip', clip: { kind: 'video', id: 'v1', mediaId: 'm1' } },
+      { op: 'addClip', clip: { kind: 'caption', id: 'alvo', text: 'alvo', start: 7, duration: 1 } },
+    ]).project;
+    const v1 = old.clips.find((c) => c.id === 'v1')!;
+    v1.start = 2 / 30;
+    v1.duration = 20 - 2 / 30;
+    const s = new EditorSession();
+    s.load(old, null);
+    const p = proposeTwo(s, cutStep('Segundo', [[15, 16]]));
+    const piece = s.view.clips.find((c) => c.kind === 'video' && c.start < 1 && 1 < c.start + c.duration)!;
+    expect(s.dispatch([{ op: 'splitClip', clipId: piece.id, at: 1 }])).toEqual({ ok: true, target: 'draft' });
+    expect(s.acceptStep()).toBe(true);
+    expect(p.status).toBe('active');
+    expect(s.activeStep?.label).toBe('Segundo');
   });
 
   it('o Claude não acrescenta nem uma etapa que não corta a um rascunho com ajustes seus', () => {
