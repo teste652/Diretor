@@ -681,23 +681,25 @@ function applyPrimitive(p: Project, o: Op): void {
     case 'addClip': {
       const s = o.clip;
       const track = trackForKind(p, s.kind)!;
+      // Tempos no milissegundo, como os que o corte e a divisão gravam: um início de 0,0666… (o passo
+      // de 1/30 do campo "Início") faria cada Ctrl+B deixar um vão de quadro preto entre os pedaços.
       const base = {
         id: s.id!,
         trackId: track.id,
-        start: s.start ?? 0,
+        start: round(s.start ?? 0),
         props: defaultProps(s.kind),
       };
       let clip: Clip;
       if (s.kind === 'video') {
         const m = p.media.find((x) => x.id === s.mediaId)!;
-        const inn = s.in ?? 0;
+        const inn = round(s.in ?? 0);
         clip = {
           ...base,
           kind: 'video',
           name: s.name ?? m.name,
           mediaId: m.id,
           in: inn,
-          duration: s.duration ?? m.duration - inn,
+          duration: round(s.duration ?? m.duration - inn),
           volume: 1,
           muted: false,
         } satisfies VideoClip;
@@ -706,7 +708,7 @@ function applyPrimitive(p: Project, o: Op): void {
           ...base,
           kind: 'title',
           name: s.name ?? 'Título',
-          duration: s.duration ?? 3,
+          duration: round(s.duration ?? 3),
           text: s.text ?? 'Título',
           style: { ...defaultTitleStyle(), ...(s.style ?? {}) },
         } satisfies TitleClip;
@@ -716,7 +718,7 @@ function applyPrimitive(p: Project, o: Op): void {
           ...base,
           kind: 'caption',
           name: s.name ?? 'Legenda',
-          duration: s.duration ?? 2,
+          duration: round(s.duration ?? 2),
           text: s.text ?? 'Nova legenda',
           preset,
           style: { ...captionStyleForPreset(preset), ...(s.style ?? {}) },
@@ -728,14 +730,16 @@ function applyPrimitive(p: Project, o: Op): void {
     case 'updateClip': {
       const c = findClip(p, o.clipId)!;
       const s = o.set;
-      const newDur = s.duration ?? c.duration;
-      const shift = c.kind === 'video' && s.in !== undefined ? -(s.in - c.in) : 0;
+      // Tempos no milissegundo (a validação confere os valores recebidos).
+      const newDur = s.duration !== undefined ? round(s.duration) : c.duration;
+      const newIn = c.kind === 'video' && s.in !== undefined ? round(s.in) : undefined;
+      const shift = c.kind === 'video' && newIn !== undefined ? -(newIn - c.in) : 0;
       remapKeyframes(c, newDur, shift);
       if (s.name !== undefined) c.name = s.name;
-      if (s.start !== undefined) c.start = s.start;
-      if (s.duration !== undefined) c.duration = s.duration;
+      if (s.start !== undefined) c.start = round(s.start);
+      c.duration = newDur;
       if (c.kind === 'video') {
-        if (s.in !== undefined) c.in = s.in;
+        if (newIn !== undefined) c.in = newIn;
         if (s.volume !== undefined) c.volume = s.volume;
         if (s.muted !== undefined) c.muted = s.muted;
       } else {

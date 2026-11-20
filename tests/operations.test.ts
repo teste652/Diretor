@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { type Clip, type Project, createProject, findClip, parseProject } from '../src/core/model';
+import { audioSegments } from '../src/core/exportAudio';
 import { type Op, OpValidationError, applyOps, clampTrimDelta } from '../src/core/operations';
 import { isContiguous } from '../src/core/pieces';
 import { evalClipProp, keyframeAt, keyframeGroups, propAtPlayhead } from '../src/core/properties';
+import { visibleClipsAt } from '../src/core/render';
+import { round } from '../src/core/time';
+import { videos } from './fixtures';
 
 function base(): Project {
   return applyOps(createProject(), [
@@ -100,7 +104,8 @@ describe('animações prontas combinadas', () => {
   });
 
   it('o último ponto nunca passa do fim do clipe por arredondamento', () => {
-    let p = run(base(), [{ op: 'updateClip', clipId: 't1', set: { duration: 2.0336 } }]);
+    // Um título de 2,0336 s vindo de um arquivo antigo (o arquivo guarda os tempos como estão).
+    let p = parseProject({ ...base(), clips: base().clips.map((c) => (c.id === 't1' ? { ...c, duration: 2.0336 } : c)) });
     p = run(p, [
       { op: 'animate', clipId: 't1', preset: 'fadeOut' },
       { op: 'animate', clipId: 't1', preset: 'slowZoom' },
@@ -345,6 +350,32 @@ describe('aparar', () => {
 });
 
 describe('dividir, mover e encurtar texto', () => {
+  it('tempos de addClip e updateClip ficam no milissegundo e o Ctrl+B continua emendado', () => {
+    // O campo "Início (s)" (passo de 1/30) grava valores como 0,0666666666666667.
+    const p0 = run(videos([['A', 0, 10, 0]]), [{ op: 'updateClip', clipId: 'A', set: { start: Number('0.0666666666666667') } }]);
+    expect(clip(p0, 'A').start).toBe(0.067);
+    const p = run(p0, [{ op: 'splitClip', clipId: 'A', at: 5 / 30, newId: 'B' }]);
+    expect(isContiguous(clip(p, 'A'), clip(p, 'B'))).toBe(true);
+    expect(visibleClipsAt(p, 5 / 30).some((c) => c.kind === 'video')).toBe(true);
+    expect(audioSegments(p)).toHaveLength(1);
+    const t = run(videos([]), [{ op: 'addClip', clip: { kind: 'title', id: 'T', text: 'T', start: 10 / 3 } }]);
+    expect(clip(t, 'T').start).toBe(3.333);
+    const v = run(videos([]), [{ op: 'addClip', clip: { kind: 'video', id: 'V', mediaId: 'm1', in: 1 / 3 } }]);
+    expect(clip(v, 'V')).toMatchObject({ in: 0.333, duration: 19.667 });
+  });
+
+  it('splitClip com newId encadeia divisões na mesma lista', () => {
+    const p = run(videos([['A', 0, 5, 0]]), [
+      { op: 'splitClip', clipId: 'A', at: 2, newId: 'B' },
+      { op: 'splitClip', clipId: 'B', at: 4, newId: 'C' },
+    ]);
+    const span = (id: string) => {
+      const c = clip(p, id);
+      return [c.start, round(c.start + c.duration), c.kind === 'video' ? c.in : null];
+    };
+    expect(['A', 'B', 'C'].map(span)).toEqual([[0, 2, 0], [2, 4, 2], [4, 5, 4]]);
+  });
+
   it('splitClip: dois pedaços contíguos, o novo logo depois do original', () => {
     const p = run(base(), [{ op: 'splitClip', clipId: 'v1', at: 2.5, newId: 'v1b' }]);
     const a = clip(p, 'v1');

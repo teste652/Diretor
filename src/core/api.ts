@@ -56,13 +56,15 @@ export function buildContext(s: EditorSession, params: ContextParams = {}): Reco
   const p: Project = s.project;
   const economy = s.settings.economy;
   const open = s.openProposal;
+  /** Rascunho aberto que corta: o contexto avisa que os tempos são os do projeto gravado (timeBase). */
+  const cutDraft = !!open && open.status === 'active' && s.draftInfo.ripple;
   const key = JSON.stringify([
     p.revision,
     s.selection.clipIds,
     s.selection.keyframe?.keyframeId ?? null,
     Math.round(s.playhead * p.settings.fps),
     economy,
-    open ? [open.id, open.status, open.redoRequested] : null,
+    open ? [open.id, open.status, open.redoRequested, cutDraft] : null,
     params.include ?? [],
     params.range ?? null,
   ]);
@@ -97,6 +99,10 @@ export function buildContext(s: EditorSession, params: ContextParams = {}): Reco
   }
   if (inc.has('media')) ctx.media = p.media.map((m) => ({ id: m.id, name: m.name, dur: r3(m.duration), audio: m.hasAudio }));
   if (open) ctx.pendingProposal = open.status === 'stale' ? { id: open.id, status: open.status, redoRequested: open.redoRequested } : { id: open.id, status: open.status };
+  // Rascunho que corta: os tempos acima são do projeto gravado, e a agulha é o ponto na tela (no rascunho).
+  if (cutDraft)
+    (ctx.pendingProposal as Record<string, unknown>).timeBase =
+      'Tempos sem os cortes do rascunho aberto (a agulha é o ponto na tela); numa etapa acrescentada com appendTo, desconte os cortes das etapas anteriores.';
 
   // As notas do usuário são palavras dele para o Claude: sempre seguem e não contam para o teto.
   const size = byteSize(ctx) - (notes ? byteSize({ userNotes: notes }) : 0);

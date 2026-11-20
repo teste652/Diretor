@@ -20,12 +20,12 @@ export async function saveProject(saveAs = false, path?: string): Promise<string
     return null;
   }
   session.markSaved(r.path);
-  showToast('Projeto salvo.');
+  showToast(session.draftEdits > 0 ? 'Projeto salvo. Seus ajustes no rascunho do Claude só entram no projeto quando você aceitar o rascunho.' : 'Projeto salvo.');
   return r.path;
 }
 
 export async function openProject(path?: string): Promise<boolean> {
-  if (session.dirty && !confirm('O projeto atual tem mudanças não salvas. Abrir outro e descartar essas mudanças?')) return false;
+  if ((session.dirty || session.draftEdits) && !confirm('O projeto atual tem mudanças não salvas. Abrir outro e descartar essas mudanças?')) return false;
   const r = await window.diretor?.openProject(path);
   if (!r) return false;
   if ('error' in r) {
@@ -44,7 +44,7 @@ export async function openProject(path?: string): Promise<boolean> {
 }
 
 function newProject() {
-  if (session.dirty && !confirm('Descartar as mudanças não salvas?')) return;
+  if ((session.dirty || session.draftEdits) && !confirm('Descartar as mudanças não salvas?')) return;
   session.load(createProject(), null);
   playback.seek(0);
 }
@@ -122,7 +122,7 @@ export function App() {
   // Fechar/recarregar com mudanças não salvas ou exportando: o processo principal pergunta antes.
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (!session.dirty && !isExporting()) return;
+      if (!session.dirty && !session.draftEdits && !isExporting()) return;
       e.preventDefault();
       e.returnValue = '';
     };
@@ -172,7 +172,9 @@ export function App() {
         <button className="btn ghost" onClick={() => void saveProject()}>
           Salvar
         </button>
-        <span className="dirty">{s.dirty ? 'não salvo' : s.filePath ? 'salvo' : ''}</span>
+        <span className="dirty" title={s.draftEdits ? 'Seus ajustes no rascunho do Claude só entram no projeto quando você aceitar o rascunho.' : undefined}>
+          {s.dirty || s.draftEdits ? 'não salvo' : s.filePath ? 'salvo' : ''}
+        </span>
         <span className="spacer" />
         <button className="btn primary" onClick={doExport} disabled={!s.project.clips.length}>
           {Icon.export} Exportar

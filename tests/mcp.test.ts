@@ -61,6 +61,10 @@ describe('servidor MCP', () => {
     expect(d).toContain('"op":"splitClip"');
     expect(d).toContain('"op":"removeRanges"');
     expect(d).toMatch(/até 500/);
+    // Dividir de novo a parte da direita na mesma etapa: o newId aparece na ajuda.
+    expect(d).toContain('{"op":"splitClip","clipId","at","newId"?}');
+    // Etapas seguidas de corte: os tempos de cada uma são os da linha do tempo que as anteriores deixam.
+    expect(d).toContain('como as etapas anteriores a deixam');
   });
 
   it('fluxo: contexto → proposta em rascunho → decisão do usuário → estado', async () => {

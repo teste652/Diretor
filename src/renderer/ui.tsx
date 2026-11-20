@@ -134,10 +134,15 @@ export function ToastHost() {
   return t ? <div className={`toast ${t.error ? 'error' : ''}`}>{t.text}</div> : null;
 }
 
-/** Envia operações pela camada única de edição e avisa se o editor recusou. */
+/**
+ * Envia operações pela camada única de edição e avisa se o editor recusou. Uma mudança que iria para o projeto
+ * com um rascunho do Claude ajustado à mão pergunta antes (o rascunho ficaria desatualizado e os ajustes, perdidos).
+ */
 export function run(ops: Op[], label?: string): boolean {
-  const r = session.dispatch(ops, label);
-  if (!r.ok) showToast(r.message, true);
+  const r = session.dispatch(ops, label, () =>
+    confirm('Esta mudança vai direto para o projeto e o rascunho do Claude fica desatualizado: os seus ajustes nele serão perdidos. Para guardá-los, cancele e aceite o rascunho antes. Continuar?'),
+  );
+  if (!r.ok && r.message) showToast(r.message, true);
   return r.ok;
 }
 

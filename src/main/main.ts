@@ -702,7 +702,7 @@ function createWindow(): void {
             cancelId: 1,
             title: 'Mudanças não salvas',
             message: 'O projeto tem mudanças que ainda não foram salvas.',
-            detail: 'Se sair agora, elas serão perdidas. Para guardar, cancele e use Salvar (Ctrl+S).',
+            detail: 'Se sair agora, elas serão perdidas. Para guardar, cancele e use Salvar (Ctrl+S). Ajustes num rascunho do Claude só ficam no projeto depois de Aceitar.',
           },
     );
     if (choice === 0) event.preventDefault();
