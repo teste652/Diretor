@@ -248,6 +248,12 @@ describe('som com cortes (montagem)', () => {
     }
     expect(() => cmd(applyOps(createProject(), ops).project)).toThrow(/arquivos demais/);
   });
+  it('cada trecho é recarimbado depois do apad', () => {
+    const p = applyOps(audioProject([{ id: 'v1', start: 0, duration: 4, in: 0, volume: 0.5 }]), [{ op: 'removeRanges', ranges: [[1, 1.5]] }]).project;
+    const { script } = cmd(p);
+    expect(script).toContain('apad=whole_len=48000,asetpts=N/SR/TB,volume=0.5[s0]');
+    expect(script).toContain('apad=whole_len=120000,asetpts=N/SR/TB,volume=0.5[s1]');
+  });
 });
 
 /** Projeto 64×64 a 30 fps com clipes de vídeo de `path` (com som); cada id de `media` vira uma mídia desse arquivo. */
@@ -263,33 +269,46 @@ function fileProject(path: string, duration: number, list: { id: string; media?:
 /** Saída do silencedetect: `silence_start` aparece se houver 50 ms ou mais abaixo de -40 dB. */
 const silence = (path: string) => String(spawnSync(FFMPEG, ['-hide_banner', '-nostats', '-i', path, '-af', 'silencedetect=n=-40dB:d=0.05', '-f', 'null', '-']).stderr);
 
+/** Silêncios do silencedetect, em s; `end` é null quando o silêncio vai até o fim e o ffmpeg não informa o fim. */
+function silences(path: string): { start: number; end: number | null }[] {
+  const log = silence(path);
+  // O ffmpeg escreve os tempos com %.6g (perto do zero, "2.08333e-05").
+  const ends = [...log.matchAll(/silence_end: (\S+)/g)].map((m) => Number(m[1]));
+  return [...log.matchAll(/silence_start: (\S+)/g)].map((m, i) => ({ start: Number(m[1]), end: ends[i] ?? null }));
+}
+
 /** Som do arquivo em mono, amostras float. */
 function pcm(path: string): Float32Array {
   const b = execFileSync(FFMPEG, ['-v', 'error', '-i', path, '-f', 'f32le', '-ac', '1', '-'], { maxBuffer: 1 << 26 });
   return Float32Array.from({ length: b.length / 4 }, (_, i) => b.readFloatLE(i * 4));
 }
 
-/** SNR = 10·log10(Σx² / Σ(x − y)²) em dB; som idêntico dá Infinity. */
-function snr(a: string, b: string): number {
-  const x = pcm(a);
-  const y = pcm(b);
-  let sig = 0;
+/** Energia Σx². */
+const energy = (x: Float32Array) => x.reduce((sum, v) => sum + v * v, 0);
+const rms = (x: Float32Array) => Math.sqrt(energy(x) / x.length);
+
+/** SNR = 10·log10(Σx² / Σ(x − y)²) em dB, para sons do mesmo tamanho; som idêntico dá Infinity. */
+function snr(x: Float32Array, y: Float32Array): number {
   let noise = 0;
-  for (let i = 0; i < Math.min(x.length, y.length); i++) {
-    sig += x[i] ** 2;
-    noise += (x[i] - y[i]) ** 2;
-  }
-  return noise === 0 ? Infinity : 10 * Math.log10(sig / noise);
+  for (let i = 0; i < x.length; i++) noise += (x[i] - y[i]) ** 2;
+  return noise === 0 ? Infinity : 10 * Math.log10(energy(x) / noise);
 }
 
 describe('som com cortes (ffmpeg)', () => {
   const src = join(dir, 'fonte30.mp4');
+  /** Imagem de 4 s e som de 2 s: o arquivo dura 4 s e tem som. */
+  const short = join(dir, 'som-curto.mp4');
   const frame = Buffer.alloc(64 * 64 * 4, 128);
   beforeAll(() => {
     execFileSync(FFMPEG, [
       '-y', '-loglevel', 'error',
       '-f', 'lavfi', '-i', 'testsrc=size=64x64:rate=30:duration=30', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=30',
       '-c:v', 'libx264', '-g', '15', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', src,
+    ]);
+    execFileSync(FFMPEG, [
+      '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', 'testsrc=size=64x64:rate=30:duration=4', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=2',
+      '-c:v', 'libx264', '-g', '15', '-pix_fmt', 'yuv420p', '-c:a', 'aac', short,
     ]);
   }, 60_000);
 
@@ -314,7 +333,11 @@ describe('som com cortes (ffmpeg)', () => {
     const y = join(dir, 'dividido.mp4');
     await exportFrames(whole, x, frame);
     await exportFrames(split, y, frame);
-    expect(snr(x, y)).toBeGreaterThanOrEqual(90);
+    const [a, b] = [pcm(x), pcm(y)];
+    expect(b.length).toBe(a.length);
+    expect(a.length).toBeGreaterThanOrEqual(2.9 * 48000);
+    expect(energy(a)).toBeGreaterThan(0);
+    expect(snr(a, b)).toBeGreaterThanOrEqual(90);
   }, 60_000);
 
   it('pedaços fora da ordem do arquivo: duração certa e som sem buraco', async () => {
@@ -326,6 +349,55 @@ describe('som com cortes (ffmpeg)', () => {
     await exportFrames(p, out, frame);
     expect(probe(out)!.duration).toBeCloseTo(2, 1);
     expect(silence(out)).not.toContain('silence_start');
+  }, 60_000);
+
+  it('pedaços fora da ordem tocam o trecho certo do arquivo', async () => {
+    // Seno de 1 kHz com amplitude 0,03·t: a altura do som diz de que instante do arquivo ele veio.
+    const ramp = join(dir, 'rampa.m4a');
+    execFileSync(FFMPEG, ['-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'aevalsrc=0.03*t*sin(2*PI*1000*t):s=48000:d=30', '-c:a', 'aac', '-b:a', '192k', ramp]);
+    const p = fileProject(ramp, 30, [
+      { id: 'a', start: 0, duration: 1, in: 20 },
+      { id: 'b', start: 1, duration: 1, in: 5 },
+    ]);
+    const out = join(dir, 'rampa-fora-da-ordem.mp4');
+    await exportFrames(p, out, frame);
+    const x = pcm(out);
+    const w = 0.5 * 48000;
+    expect(x.length).toBeGreaterThanOrEqual(4 * w);
+    // Cada janela de 0,5 s da saída e o meio do trecho do arquivo que ela toca.
+    [20.25, 20.75, 5.25, 5.75].forEach((m, i) => {
+      const want = (0.03 * m) / Math.SQRT2;
+      const got = rms(x.subarray(i * w, (i + 1) * w));
+      expect(Math.abs(got - want) / want, `janela ${i + 1}: ${got.toFixed(3)}, esperado ${want.toFixed(3)}`).toBeLessThanOrEqual(0.05);
+    });
+  }, 60_000);
+
+  it('som mais curto que a imagem: apagar um trecho deixa o silêncio no lugar', async () => {
+    // Fica [0, 1) in 0 e [1; 2,5) in 2,5 do arquivo curto (depois do fim do som dele) e [2,5; 4,5) do outro.
+    const p = applyOps(fileProject(short, 4, [{ id: 'v1', media: 'curto', start: 0, duration: 4, in: 0 }]), [
+      { op: 'addMedia', media: { id: 'longo', path: src, name: 'longo', duration: 30, width: 64, height: 64, hasAudio: true } },
+      { op: 'addClip', clip: { kind: 'video', id: 'v2', mediaId: 'longo', start: 4, duration: 2, in: 0 } },
+      { op: 'removeRanges', ranges: [[1, 2.5]] },
+    ]).project;
+    const out = join(dir, 'som-curto-corte.mp4');
+    await exportFrames(p, out, frame);
+    const s = silences(out);
+    expect(s).toHaveLength(1);
+    expect(Math.abs(s[0].start - 1)).toBeLessThanOrEqual(0.02);
+    expect(Math.abs((s[0].end ?? NaN) - 2.5)).toBeLessThanOrEqual(0.02);
+  }, 60_000);
+
+  it('som mais curto que a imagem: pedaço depois do fim do som no fim da faixa', async () => {
+    const p = fileProject(short, 4, [
+      { id: 'a', start: 0, duration: 1, in: 0 },
+      { id: 'b', start: 1, duration: 1, in: 3 },
+    ]);
+    const out = join(dir, 'som-curto-fim.mp4');
+    await exportFrames(p, out, frame);
+    const [first] = silences(out);
+    expect(first).toBeDefined();
+    expect(Math.abs(first.start - 1)).toBeLessThanOrEqual(0.02);
+    expect(first.end ?? probe(out)!.duration).toBeGreaterThanOrEqual(1.95);
   }, 60_000);
 
   it.runIf(!!(process.env.CI || process.env.DIRETOR_TESTE_LONGO))('1 hora com 300 pedaços espalhados', async () => {

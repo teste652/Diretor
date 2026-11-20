@@ -99,9 +99,12 @@ export function audioGraph(segs: AudioSegment[], totalSamples: number, firstInpu
         chains.push(`anullsrc=r=${SAMPLE_RATE}:cl=stereo,atrim=end_sample=${s.tl0 - at}[g${j}]`);
         parts.push(`[g${j}]`);
       }
-      // apad sempre com whole_len: um apad sem tamanho gera som sem fim.
+      // apad sempre com whole_len: um apad sem tamanho gera som sem fim. O asetpts depois
+      // dele remarca o tempo pela contagem de amostras: um trecho todo depois do fim do som
+      // do arquivo não recebe nada do atrim, o silêncio do apad sai sem marcação de tempo e
+      // o concat o recusa. Quando o tempo já era contínuo, remarcar não muda nada.
       const volume = s.volume !== 1 ? `,volume=${s.volume}` : '';
-      chains.push(`[i${input.k}_${reads[input.k]++}]atrim=start_sample=${s.src0}:end_sample=${s.src0 + s.n},asetpts=PTS-STARTPTS,apad=whole_len=${s.n}${volume}[s${j}]`);
+      chains.push(`[i${input.k}_${reads[input.k]++}]atrim=start_sample=${s.src0}:end_sample=${s.src0 + s.n},asetpts=PTS-STARTPTS,apad=whole_len=${s.n},asetpts=N/SR/TB${volume}[s${j}]`);
       parts.push(`[s${j}]`);
       at = s.tl0 + s.n;
       j++;
