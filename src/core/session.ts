@@ -5,7 +5,7 @@
 import { type Op, OpValidationError, USER_ONLY_OPS, applyOps, describeOp, touchedClipIds } from './operations';
 import { type Project, createProject, findClip } from './model';
 import { type Seam, draftSeams } from './pieces';
-import { SAME_T } from './time';
+import { SAMPLE, SAME_T } from './time';
 
 export type Source = 'user' | 'ai';
 
@@ -196,28 +196,48 @@ function hashString(s: string): string {
   return (h >>> 0).toString(36);
 }
 
-/** Impressão digital da linha do tempo dos vídeos (mídia, início, duração e in de cada um, sem os ids). */
+/**
+ * Impressão digital da linha do tempo dos vídeos: que momento de cada mídia aparece em cada segundo. Não depende dos
+ * ids nem da ordem dos clipes, e dividir não a muda, porque nenhum tempo muda.
+ */
 function timeBaseKey(p: Project): string {
-  // Um pedaço que continua o anterior da mesma mídia, sem vão no tempo nem no arquivo, conta como o mesmo
-  // pedaço: dividir não muda nenhum tempo.
+  // Pedaços da mesma mídia com o mesmo deslocamento (início menos in) mostram o mesmo momento no mesmo segundo: os que
+  // se tocam ou se sobrepõem contam como um trecho só, inclusive uma cópia do mesmo vídeo por cima ou por baixo.
   const vids = p.clips
-    .flatMap((c) => (c.kind === 'video' ? [{ m: c.mediaId, s: c.start, d: c.duration, i: c.in }] : []))
-    .sort((a, b) => (a.m < b.m ? -1 : a.m > b.m ? 1 : a.s - b.s || a.i - b.i));
-  const runs: typeof vids = [];
-  for (const v of vids) {
-    const last = runs.at(-1);
-    if (last && last.m === v.m && Math.abs(last.s + last.d - v.s) < 0.0005 && Math.abs(last.i + last.d - v.i) < 0.0005) last.d = v.s + v.d - last.s;
-    else runs.push({ ...v });
+    .flatMap((c) => (c.kind === 'video' ? [{ m: c.mediaId, o: c.start - c.in, s: c.start, e: c.start + c.duration, i: c.in }] : []))
+    .sort((a, b) => (a.m < b.m ? -1 : a.m > b.m ? 1 : a.o - b.o));
+  const runs: string[] = [];
+  for (let k = 0; k < vids.length; ) {
+    let j = k + 1;
+    while (j < vids.length && vids[j].m === vids[k].m && vids[j].o - vids[j - 1].o <= SAMPLE) j++;
+    const same = vids.slice(k, j).sort((a, b) => a.s - b.s);
+    let run = { ...same[0] };
+    for (const v of same.slice(1)) {
+      if (v.s <= run.e + SAMPLE) run.e = Math.max(run.e, v.e);
+      else {
+        runs.push(`${run.m}@${run.s.toFixed(3)}+${(run.e - run.s).toFixed(3)}<${run.i.toFixed(3)}`);
+        run = { ...v };
+      }
+    }
+    runs.push(`${run.m}@${run.s.toFixed(3)}+${(run.e - run.s).toFixed(3)}<${run.i.toFixed(3)}`);
+    k = j;
   }
-  return hashString(runs.map((r) => `${r.m}@${r.s.toFixed(3)}+${r.d.toFixed(3)}<${r.i.toFixed(3)}`).sort().join('|'));
+  return hashString(runs.sort().join('|'));
 }
 
 /** Resposta ao Claude quando o rascunho aberto tem ajustes seus, que ele não vê. */
 const WAIT_FOR_DECISION =
   'O usuário ajustou à mão o rascunho aberto, e você não vê esses ajustes. Não acrescente nem substitua etapas agora: espere ele aceitar ou descartar (get_proposal com waitSeconds) e leia get_context de novo antes de continuar.';
 
-/** Operações cujos tempos são da linha do tempo (e não de dentro de um clipe). */
-const usesTimelineTime = (ops: Op[]) => ops.some((o) => o?.op === 'removeRanges' || o?.op === 'splitClip');
+/** Operações com um tempo da linha do tempo (e não de dentro de um clipe): cortar, dividir, pôr ou mover um clipe num tempo. */
+const usesTimelineTime = (ops: Op[]) =>
+  ops.some(
+    (o) =>
+      o?.op === 'removeRanges' ||
+      o?.op === 'splitClip' ||
+      (o?.op === 'addClip' && o.clip?.start !== undefined) ||
+      (o?.op === 'updateClip' && o.set?.start !== undefined),
+  );
 
 export class EditorSession {
   project: Project;
@@ -705,21 +725,15 @@ export class EditorSession {
       };
     }
     const open = this.openProposal;
-    if (open && open.status === 'active' && open.id !== input.replaces) {
+    // Com ajustes seus no rascunho aberto, nem replaces vale: o Claude espera você aceitar ou descartar.
+    if (open && open.status === 'active' && (open.id !== input.replaces || this.draftEdits > 0)) {
       return {
         ok: false,
         code: 'proposal_pending',
-        message: `Há uma proposta aguardando decisão (${open.id}). Espere a decisão ou use replaces.`,
+        message: this.draftEdits > 0 ? WAIT_FOR_DECISION : `Há uma proposta aguardando decisão (${open.id}). Espere a decisão ou use replaces.`,
         details: { proposalId: open.id },
       };
     }
-    if (open && open.status === 'active' && open.id === input.replaces && this.draftEdits > 0)
-      return {
-        ok: false,
-        code: 'proposal_pending',
-        message: WAIT_FOR_DECISION,
-        details: { proposalId: open.id },
-      };
     // Simulação: todas as etapas, em ordem, precisam ser válidas.
     const targets = new Set<string>();
     const simulated = this.simulateSteps(this.project, input.steps, 0);

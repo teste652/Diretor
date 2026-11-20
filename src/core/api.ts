@@ -190,6 +190,9 @@ export function compactProposal(p: Proposal, revision: number): Record<string, u
           ? `O usuário pediu para refazer: leia get_context e chame propose_edit com replaces="${p.id}" e um requestId novo.`
           : 'O usuário mexeu no projeto e o rascunho ficou desatualizado. Não refaça por conta própria: espere com get_proposal (waitSeconds) até o usuário pedir "refazer" no editor ou no chat.'
         : 'Nada pendente.';
+  // A revisão daqui não vem com o contexto: depois de ajustes à mão que o Claude não viu, ele precisa ler de novo.
+  if (p.manualRevision !== undefined && p.status !== 'stale')
+    out.next += ` O usuário aceitou uma etapa com ajustes feitos à mão (revisão ${p.manualRevision}), que você não vê: antes de propor ou acrescentar etapas, leia get_context de novo se o seu é de antes dessa revisão.`;
   return out;
 }
 
