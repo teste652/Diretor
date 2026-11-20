@@ -41,6 +41,9 @@ export function Preview() {
   };
   const drag = useRef<{ clipId: string; sx: number; sy: number; dx: number; dy: number } | null>(null);
   const raf = useRef(0);
+  // Na reprodução, o mesmo teste do tick (cada vídeo ativo tem quadro): um elemento que termina de
+  // buscar ou carregar não faz desenhar enquanto outro vídeo ativo ainda está trocando. Parado: null.
+  const framesGate = useRef<(() => boolean) | null>(null);
 
   const draw = useCallback(() => {
     const cv = canvasRef.current;
@@ -56,7 +59,10 @@ export function Preview() {
 
   if (!previewPool.current)
     previewPool.current = new VideoPool(
-      () => requestAnimationFrame(draw),
+      () =>
+        requestAnimationFrame(() => {
+          if (!framesGate.current || framesGate.current()) draw();
+        }),
       true,
       (path, msg) => showToast(`Não consegui abrir ${path.split(/[\\/]/).pop()}: ${msg}`, true),
     );
@@ -164,6 +170,7 @@ export function Preview() {
       if (framesReady(p, t)) draw();
       raf.current = requestAnimationFrame(tick);
     };
+    framesGate.current = () => framesReady(session.view, playback.get().time);
     sync(session.view, anchor.t, true);
     raf.current = requestAnimationFrame(tick);
     // Janela minimizada: o rAF para, então pausa tudo (o som não passa do ponto de corte).
@@ -173,6 +180,7 @@ export function Preview() {
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
       stopped = true;
+      framesGate.current = null;
       cancelAnimationFrame(raf.current);
       document.removeEventListener('visibilitychange', onVisibility);
       for (const el of pool.all()) el.pause();

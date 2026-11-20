@@ -806,7 +806,8 @@ await ev(() => {
   window.__diretor.playback.set({ playing: true });
   requestAnimationFrame(tick);
 });
-await page.waitForTimeout(1600);
+// Até passar das duas emendas, por no máximo 3,2 s (o dobro de 1,6 s): o CI do Windows é mais lento.
+await page.waitForFunction(() => window.__diretor.playback.get().time > 3.1, null, { timeout: 3200 }).catch(() => undefined);
 await ev(() => window.__diretor.playback.set({ playing: false }));
 const lum = await ev(() => window.__lum);
 check(
