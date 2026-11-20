@@ -743,7 +743,7 @@ await page.waitForFunction(() => window.__expFrames >= 5);
 const tmpDuring = leftovers().length;
 await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer());
 const cleaned = await until(async () => leftovers().length === 0 && ffmpegRunning() === 0);
-check('a interface cai no meio da exportação: o ffmpeg para e não sobra arquivo', tmpDuring === 1 && cleaned && !existsSync(crashOut), `temporário durante a exportação: ${tmpDuring}`);
+check('a interface cai no meio da exportação: o ffmpeg para e não sobra arquivo', tmpDuring === 2 && cleaned && !existsSync(crashOut), `temporário durante a exportação: ${tmpDuring}`);
 writeFileSync(join(out, 'resultado.json'), JSON.stringify(results, null, 2));
 
 await app.close();

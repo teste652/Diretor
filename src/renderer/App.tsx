@@ -48,7 +48,7 @@ function newProject() {
   playback.seek(0);
 }
 
-type ExportState = { frame: number; total: number; done?: string; warning?: string; error?: string } | null;
+type ExportState = { frame: number; total: number; slowAudio?: boolean; done?: string; warning?: string; error?: string } | null;
 
 export function App() {
   const s = useSession();
@@ -136,8 +136,11 @@ export function App() {
   const doExport = async () => {
     if (s.openProposal?.status === 'active' && !confirm('Há um rascunho pendente. A exportação usa só o que já foi aceito. Continuar?')) return;
     cancel.current = { cancelled: false };
-    setExp({ frame: 0, total: 1 });
-    const r = await exportProject(session.project, { onProgress: (p) => setExp({ ...p }), signal: cancel.current });
+    const project = session.project;
+    // Até o motor de áudio novo, o som de muitos pedaços pode levar minutos a mais para ficar pronto.
+    const slowAudio = project.clips.filter((c) => c.kind === 'video').length > 300;
+    setExp({ frame: 0, total: 1, slowAudio });
+    const r = await exportProject(project, { onProgress: (p) => setExp({ ...p, slowAudio }), signal: cancel.current });
     if (r.cancelled) return setExp(null);
     setExp((e) => ({ ...(e ?? { frame: 0, total: 1 }), done: r.ok ? r.outPath : undefined, warning: r.ok ? r.warning : undefined, error: r.ok ? undefined : r.error }));
   };
@@ -189,6 +192,7 @@ export function App() {
                 <p className="hint">
                   {exp.frame >= exp.total ? 'Finalizando e gravando o MP4…' : `Quadro ${exp.frame} de ${exp.total}.`} Tudo é processado no seu computador.
                 </p>
+                {exp.slowAudio && <p className="hint">Com muitos cortes, o som pode levar alguns minutos a mais para ficar pronto.</p>}
                 <button
                   className="btn"
                   onClick={() => {
