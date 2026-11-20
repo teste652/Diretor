@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { type Clip, type Project, type VideoClip, findClip, projectDuration } from '../core/model';
 import type { Op } from '../core/operations';
 import { evalClipProp } from '../core/properties';
-import { hitTest, isActiveAt, layoutText, renderFrame, sourceTime, videoRect } from '../core/render';
+import { hitTest, isActiveAt, layoutText, renderFrame, sourceTime, videoRect, visibleClipsAt } from '../core/render';
 import { fmtTime, frameAt, playback, session, usePlayback, useSession } from './store';
 import { Icon, run, showToast } from './ui';
 import { SEEK_EPSILON, VideoPool, seekExact } from './video';
@@ -91,7 +91,9 @@ export function Preview() {
     const protect = new Set(active.map((c) => c.id));
     const els = active.map((c) => ({ c, el: pool.element(c, view, protect) })).filter((x): x is { c: VideoClip; el: HTMLVideoElement } => !!x.el);
     const settled = els.every(({ c, el }) => !!el.error || (el.readyState >= 2 && !el.seeking && Math.abs(el.currentTime - (sourceTime(c, t) + SEEK_EPSILON)) < 1e-3));
-    lastSync = Promise.all(els.map(({ c, el }) => seekExact(el, sourceTime(c, t)))).then(draw);
+    lastSync = Promise.all(els.map(({ c, el }) => seekExact(el, sourceTime(c, t)))).then(() => {
+      if (!playback.get().playing) draw();
+    });
     // Só desenha já se nenhum vídeo precisa buscar quadro: durante a busca o
     // canvas continua mostrando o quadro anterior (sem piscar preto).
     if (settled) draw();
@@ -136,13 +138,16 @@ export function Preview() {
       }
       return null;
     };
-    // Cada vídeo ativo tem quadro (ou erro). Enquanto um elemento busca ou carrega, o canvas fica com o
-    // último quadro bom em vez de piscar preto. Sem elemento (mídia fora do projeto), não há o que esperar.
+    // Cada vídeo que aparece (fora de faixa oculta, como no renderFrame) tem quadro (ou erro). Enquanto um
+    // elemento busca ou carrega, o canvas fica com o último quadro bom em vez de piscar preto; um vídeo
+    // escondido não segura os textos. Sem elemento (mídia fora do projeto), não há o que esperar.
     const framesReady = (p: typeof view, t: number) =>
-      activeVideos(p, t).every((c) => {
-        const el = pool.peek(c);
-        return !el || !!el.error || (el.readyState >= 2 && !el.seeking);
-      });
+      visibleClipsAt(p, t)
+        .filter((c): c is VideoClip => c.kind === 'video')
+        .every((c) => {
+          const el = pool.peek(c);
+          return !el || !!el.error || (el.readyState >= 2 && !el.seeking);
+        });
     const tick = () => {
       if (stopped) return;
       const p = session.view;
@@ -303,7 +308,7 @@ function selectionBox(c: Clip, time: number, canvas: HTMLCanvasElement, k: numbe
   const offX = canvas.offsetLeft;
   const offY = canvas.offsetTop;
   if (c.kind === 'video') {
-    const f = previewPool.current?.frame(c);
+    const f = previewPool.current?.frame(c) ?? previewPool.current?.videoSize(c);
     if (!f) return null;
     const r = videoRect(p, c, f, time);
     return { left: offX + r.x * k, top: offY + r.y * k, w: r.w * k, h: r.h * k };

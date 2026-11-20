@@ -816,9 +816,36 @@ check(
   `${lum.length} quadros, luz mínima ${Math.min(...lum.map(([, l]) => l)).toFixed(0)}`,
 );
 
+// Caixa de seleção ao pular para um pedaço sem elemento: em 2,5 s, B (que continua A) fica com o
+// elemento que era de A; o pulo para 1 s desenha a caixa de A antes de A ganhar um elemento.
+await ev(() => window.__diretor.playback.seek(2.5));
+await settled();
+await ev(() => {
+  const s = window.__diretor.session;
+  s.setSelection({ clipIds: [s.project.clips.find((c) => c.kind === 'video' && c.start === 0).id] });
+});
+const selRect = () =>
+  ev(() => {
+    const r = document.querySelector('.sel-box')?.getBoundingClientRect();
+    return r ? { x: r.x, y: r.y, width: r.width, height: r.height } : null;
+  });
+await ev(() => window.__diretor.playback.seek(1));
+await settled();
+const rect1 = await selRect();
+await ev(() => window.__diretor.playback.seek(1.1));
+await settled();
+const rect2 = await selRect(); // agora A tem o próprio elemento: a caixa vem do quadro dele
+const fmtRect = (r) => (r ? `${r.x.toFixed(1)}, ${r.y.toFixed(1)}, ${r.width.toFixed(1)} × ${r.height.toFixed(1)}` : 'nenhuma');
+check(
+  'caixa de seleção aparece ao pular para um pedaço',
+  !!rect1 && rect1.width > 0 && rect1.height > 0 && !!rect2 && ['x', 'y', 'width', 'height'].every((k) => Math.abs(rect1[k] - rect2[k]) <= 1),
+  `ao pular: ${fmtRect(rect1)}; depois: ${fmtRect(rect2)}`,
+);
+await ev(() => window.__diretor.session.setSelection({ clipIds: [] }));
+
 writeFileSync(join(out, 'resultado.json'), JSON.stringify(results, null, 2));
 await client.close();
-// O projeto está salvo; garante que o aviso de "mudanças não salvas" não segure o fechamento.
+// O projeto da Entrega 1 não foi salvo: marca como sem mudanças para o aviso de "mudanças não salvas" não segurar o fechamento.
 await ev(() => {
   window.__diretor.session.dirty = false;
 });

@@ -103,6 +103,12 @@ export class VideoPool {
     return { image: el, width: el.videoWidth, height: el.videoHeight };
   }
 
+  /** Largura e altura do vídeo da mídia do clipe, de qualquer elemento dela que já leu o arquivo (o pedaço pode ainda não ter elemento). */
+  videoSize(clip: VideoClip): { width: number; height: number } | null {
+    const el = this.byMedia.get(clip.mediaId)?.find((s) => s.el.readyState >= 1 && s.el.videoWidth > 0 && s.el.videoHeight > 0)?.el;
+    return el ? { width: el.videoWidth, height: el.videoHeight } : null;
+  }
+
   dispose(): void {
     for (const slots of this.byMedia.values()) for (const s of slots) close(s.el);
     this.byMedia.clear();
