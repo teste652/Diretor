@@ -1,8 +1,14 @@
 // Montagem dos argumentos do ffmpeg. O vídeo chega como quadros RGBA já
 // compostos (pelo mesmo renderFrame da prévia); o áudio vem direto dos
-// arquivos originais, aparado e posicionado igual à linha do tempo.
+// arquivos originais, aparado e posicionado igual à linha do tempo
+// (exportAudio.ts). O grafo de filtros vai num arquivo de script, ao lado da saída.
 
-import { type Project, type VideoClip, projectDuration } from './model';
+import { audioGraph, audioSegments } from './exportAudio';
+import { type Project, projectDuration } from './model';
+import { SAMPLE_RATE } from './time';
+
+/** Teto dos argumentos: a linha de comando do Windows tem no máximo 32.767 caracteres. */
+export const MAX_ARGS_CHARS = 30_000;
 
 export function exportDuration(p: Project): number {
   return projectDuration(p);
@@ -12,40 +18,32 @@ export function frameCount(p: Project): number {
   return Math.max(1, Math.round(exportDuration(p) * p.settings.fps));
 }
 
-export function buildFfmpegArgs(p: Project, outPath: string): string[] {
+/**
+ * Argumentos do ffmpeg e o texto do script de filtros, que quem chama grava em
+ * `scriptPath` antes de rodar. Lança Error (em pt-BR) quando a linha de comando
+ * passaria de MAX_ARGS_CHARS.
+ */
+export function buildFfmpegArgs(p: Project, outPath: string, scriptPath: string): { args: string[]; script: string } {
   const { width: W, height: H, fps } = p.settings;
   const total = frameCount(p) / fps;
+  const audio = audioGraph(audioSegments(p), Math.round(total * SAMPLE_RATE), 1);
   const args = ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${W}x${H}`, '-r', fpsArg(fps), '-i', 'pipe:0'];
-  const videoTrack = p.tracks.find((t) => t.kind === 'video');
-  const audible = p.clips.filter(
-    (c): c is VideoClip =>
-      c.kind === 'video' && !c.muted && c.volume > 0 && !videoTrack?.hidden && !!p.media.find((m) => m.id === c.mediaId)?.hasAudio,
-  );
-  // RGB do canvas → YUV com a matriz BT.709 (a que o Chromium e os players usam
-  // para HD) e marcado no arquivo: as cores do MP4 ficam iguais às da prévia.
-  const filters: string[] = ['[0:v]scale=out_color_matrix=bt709:out_range=tv,format=yuv420p[vout]'];
-  audible.forEach((c, i) => {
-    const m = p.media.find((x) => x.id === c.mediaId)!;
-    args.push('-ss', c.in.toFixed(3), '-t', c.duration.toFixed(3), '-i', m.path);
-    const delay = Math.round(c.start * 1000);
-    // aresample com first_pts=0 mantém o silêncio antes da primeira amostra
-    // (áudio que começa depois do vídeo no arquivo continua sincronizado).
-    filters.push(`[${i + 1}:a]aresample=async=1:first_pts=0,volume=${c.volume},adelay=${delay}:all=1[a${i}]`);
-  });
-  args.push('-filter_complex');
-  if (audible.length) {
-    const ins = audible.map((_, i) => `[a${i}]`).join('');
-    filters.push(`${ins}amix=inputs=${audible.length}:normalize=0:duration=longest,apad[aout]`);
-    args.push(filters.join(';'), '-map', '[vout]', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k');
-  } else {
-    args.push(filters.join(';'), '-map', '[vout]');
-  }
+  for (const path of audio.inputs) args.push('-i', path);
+  args.push('-filter_complex_script', scriptPath, '-map', '[vout]');
+  if (audio.out) args.push('-map', audio.out, '-c:a', 'aac', '-b:a', '192k');
   args.push(
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
     '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv',
     '-movflags', '+faststart', '-t', total.toFixed(3), '-f', 'mp4', outPath,
   );
-  return args;
+  if (args.reduce((sum, a) => sum + a.length + 3, 0) > MAX_ARGS_CHARS)
+    throw new Error(
+      `Este projeto abre arquivos demais de uma vez para exportar (${audio.inputs.length} aberturas). Use menos vídeos diferentes ou menos trechos fora da ordem do arquivo.`,
+    );
+  // RGB do canvas → YUV com a matriz BT.709 (a que o Chromium e os players usam
+  // para HD) e marcado no arquivo: as cores do MP4 ficam iguais às da prévia.
+  const script = ['[0:v]scale=out_color_matrix=bt709:out_range=tv,format=yuv420p[vout]', ...audio.filters].join(';\n');
+  return { args, script };
 }
 
 export interface ProbeResult {

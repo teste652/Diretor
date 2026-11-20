@@ -4,8 +4,55 @@
 
 import { type Op, OpValidationError, USER_ONLY_OPS, applyOps, describeOp, touchedClipIds } from './operations';
 import { type Project, createProject, findClip } from './model';
+import { type Seam, draftSeams } from './pieces';
+import { SAME_T } from './time';
 
 export type Source = 'user' | 'ai';
+
+/** O que a etapa em rascunho muda, para a linha do tempo, a prévia e o inspetor. */
+export interface DraftInfo {
+  /** Clipes que as operações do rascunho tocam. */
+  clipIds: Set<string>;
+  /** Clipes que só existem no rascunho: os criados e os pedaços novos de uma divisão. */
+  createdClipIds: Set<string>;
+  /** Só os criados (addClip): é o que a linha do tempo pinta como "clipe novo". */
+  addedClipIds: Set<string>;
+  /** Clipes que o rascunho remove (aparecem tracejados na linha do tempo). */
+  removedClipIds: Set<string>;
+  keyframeIds: Set<string>;
+  /** Faixa "Rascunho da IA": onde estão os pontos e mudanças, não o clipe inteiro. */
+  range: { clipId: string; start: number; end: number }[];
+  /** Emendas que os cortes do rascunho deixam, com quanto foi tirado em cada uma. */
+  seams: Seam[];
+  /** O rascunho corta ou empurra clipes: as posições do projeto não valem na view. */
+  ripple: boolean;
+}
+
+/** Há emenda com `at` entre lo e hi (as emendas vêm ordenadas por `at`). */
+function hasSeamIn(seams: Seam[], lo: number, hi: number): boolean {
+  let a = 0;
+  let b = seams.length;
+  while (a < b) {
+    const mid = (a + b) >> 1;
+    if (seams[mid].at < lo) a = mid + 1;
+    else b = mid;
+  }
+  return a < seams.length && seams[a].at <= hi;
+}
+
+/** Há emenda a até SAME_T de `t`. */
+const hasSeamAt = (seams: Seam[], t: number) => hasSeamIn(seams, t - SAME_T, t + SAME_T);
+
+const emptyDraftInfo = (): DraftInfo => ({
+  clipIds: new Set(),
+  createdClipIds: new Set(),
+  addedClipIds: new Set(),
+  removedClipIds: new Set(),
+  keyframeIds: new Set(),
+  range: [],
+  seams: [],
+  ripple: false,
+});
 
 export interface HistoryEntry {
   id: string;
@@ -40,6 +87,11 @@ export interface ProposalStep {
   manualRedo: Op[][];
   status: StepStatus;
   error?: string;
+  /**
+   * Impressão digital dos vídeos da linha do tempo em que o Claude escreveu os tempos da etapa (o projeto com as
+   * etapas anteriores aplicadas). Se uma anterior for descartada ou ajustada à mão, os tempos dela não valem mais.
+   */
+  timeBase?: string;
 }
 
 export type ProposalStatus = 'active' | 'stale' | 'done' | 'cancelled' | 'superseded';
@@ -118,7 +170,7 @@ export type ProposeResult =
 let seq = 0;
 const sid = (p: string) => `${p}${Date.now().toString(36)}${(++seq).toString(36)}`;
 
-function newStep(s: ProposeInput['steps'][number]): ProposalStep {
+function newStep(s: ProposeInput['steps'][number], timeBase?: string): ProposalStep {
   return {
     id: sid('step_'),
     label: typeof s.label === 'string' && s.label.trim() ? s.label.trim().slice(0, 80) : 'Etapa',
@@ -129,6 +181,7 @@ function newStep(s: ProposeInput['steps'][number]): ProposalStep {
     manualMarks: [],
     manualRedo: [],
     status: 'waiting',
+    timeBase,
   };
 }
 
@@ -140,6 +193,16 @@ function hashString(s: string): string {
   }
   return (h >>> 0).toString(36);
 }
+
+/** Impressão digital da linha do tempo dos vídeos (mídia, início, duração e in de cada um, sem os ids). */
+function timeBaseKey(p: Project): string {
+  const parts: string[] = [];
+  for (const c of p.clips) if (c.kind === 'video') parts.push(`${c.mediaId}@${c.start.toFixed(3)}+${c.duration.toFixed(3)}<${c.in.toFixed(3)}`);
+  return hashString(parts.sort().join('|'));
+}
+
+/** Operações cujos tempos são da linha do tempo (e não de dentro de um clipe). */
+const usesTimelineTime = (ops: Op[]) => ops.some((o) => o?.op === 'removeRanges' || o?.op === 'splitClip');
 
 export class EditorSession {
   project: Project;
@@ -163,10 +226,15 @@ export class EditorSession {
   hint: { text: string; at: number } | null = null;
   /** Aumenta a cada mudança de estado (para a interface re-renderizar). */
   version = 0;
+  /** Aumenta a cada projeto carregado (abrir ou novo): a interface limpa o que valia só no anterior. */
+  loads = 0;
 
   private listeners = new Set<() => void>();
   private waiters: { id: string; since: number; resolve: (why?: WaitResult) => void }[] = [];
   private viewCache: { key: string; project: Project } | null = null;
+  private draftCache: { project: Project; view: Project; step: ProposalStep; info: DraftInfo } | null = null;
+  /** Sem etapa em rascunho, draftInfo é sempre este objeto vazio. */
+  private readonly noDraft = emptyDraftInfo();
   private activitySeq = 0;
   private noteSeq = 0;
   /** requestId → proposta e conteúdo do pedido (idempotência sem engolir pedidos novos). */
@@ -220,6 +288,11 @@ export class EditorSession {
     return s?.status === 'draft' ? s : undefined;
   }
 
+  /** Quantos ajustes seus estão na etapa em rascunho: só entram no projeto quando você aceita a etapa. */
+  get draftEdits(): number {
+    return this.activeStep?.manualMarks.length ?? 0;
+  }
+
   /** Projeto visto na prévia e na linha do tempo: gravado + rascunho atual. */
   get view(): Project {
     const p = this.openProposal;
@@ -236,47 +309,72 @@ export class EditorSession {
     }
   }
 
-  /** Ids de clipes e pontos que só existem / mudaram no rascunho. */
-  get draftInfo(): {
-    clipIds: Set<string>;
-    createdClipIds: Set<string>;
-    /** Clipes que o rascunho remove (aparecem tracejados na linha do tempo). */
-    removedClipIds: Set<string>;
-    keyframeIds: Set<string>;
-    range: { clipId: string; start: number; end: number }[];
-  } {
+  /**
+   * Ids de clipes e pontos que só existem / mudaram no rascunho, emendas e faixa
+   * do rascunho. A linha do tempo lê isto a cada quadro: só recalcula quando o
+   * projeto, a view ou a etapa ativa mudam.
+   */
+  get draftInfo(): DraftInfo {
     const step = this.activeStep;
-    const out = {
-      clipIds: new Set<string>(),
-      createdClipIds: new Set<string>(),
-      removedClipIds: new Set<string>(),
-      keyframeIds: new Set<string>(),
-      range: [] as { clipId: string; start: number; end: number }[],
-    };
-    if (!step) return out;
+    if (!step) return this.noDraft;
+    const view = this.view;
+    const cached = this.draftCache;
+    if (cached && cached.project === this.project && cached.view === view && cached.step === step) return cached.info;
+    const info = this.computeDraftInfo(step, view);
+    this.draftCache = { project: this.project, view, step, info };
+    return info;
+  }
+
+  private computeDraftInfo(step: ProposalStep, view: Project): DraftInfo {
+    const out = emptyDraftInfo();
     const all = [...step.ops, ...step.manualOps];
     for (const id of touchedClipIds(all)) out.clipIds.add(id);
+    const inView = new Map(view.clips.map((c) => [c.id, c]));
+    const inProject = new Set(this.project.clips.map((c) => c.id));
     for (const o of all) {
-      if (o.op === 'addClip' && o.clip.id) out.createdClipIds.add(o.clip.id);
+      if (o.op === 'addClip' && o.clip.id) {
+        out.createdClipIds.add(o.clip.id);
+        out.addedClipIds.add(o.clip.id);
+      }
+      if (o.op === 'splitClip' && o.newId) out.createdClipIds.add(o.newId);
       if (o.op === 'setKeyframe' && o.keyframeId) out.keyframeIds.add(o.keyframeId);
-      if (o.op === 'removeClip' && !findClip(this.view, o.clipId) && findClip(this.project, o.clipId)) out.removedClipIds.add(o.clipId);
+      if (o.op === 'removeClip' && !inView.has(o.clipId) && inProject.has(o.clipId)) out.removedClipIds.add(o.clipId);
     }
-    const view = this.view;
+    out.seams = draftSeams(this.project, view);
+    out.ripple = out.seams.length > 0 || all.some((o) => o.op === 'shiftClips');
     const ranges = new Map<string, { start: number; end: number }>();
-    // Faixa do rascunho: onde estão os pontos/mudanças, não o clipe inteiro.
+    const mark = (id: string, s: number, e: number) => {
+      const r = ranges.get(id);
+      ranges.set(id, r ? { start: Math.min(r.start, s), end: Math.max(r.end, e) } : { start: s, end: e });
+    };
+    // Faixa do rascunho: onde estão os pontos/mudanças, não o clipe inteiro. Uma op só fica fora
+    // dela onde o chip de uma emenda marca o lugar: a divisão com emenda na borda dividida, o texto
+    // encurtado com emenda dentro dele e o vídeo aparado com emenda na borda aparada. Sem emenda
+    // (corte no começo ou no fim da linha do tempo, ou num trecho só de texto), a faixa marca os pedaços.
     const keyframeOnly = all.every((o) => ['setKeyframe', 'clearKeyframes', 'retimeGroup', 'removeKeyframe'].includes(o.op));
     for (const o of all) {
+      if (o.op === 'splitClip') {
+        // A borda é o começo do pedaço da direita. O fim do da esquerda só vale sem ele: esse fim anda
+        // quando o mesmo clipe é dividido de novo (um corte divide da direita para a esquerda).
+        const left = inView.get(o.clipId);
+        const right = o.newId === undefined ? undefined : inView.get(o.newId);
+        const edge = right ? right.start : left ? left.start + left.duration : undefined;
+        if (edge === undefined || hasSeamAt(out.seams, edge)) continue;
+        for (const c of [left, right]) if (c) mark(c.id, c.start, c.start + c.duration);
+        continue;
+      }
       if (!('clipId' in o) && o.op !== 'addClip') continue;
       if (keyframeOnly && (o.op === 'clearKeyframes' || o.op === 'removeKeyframe')) continue;
       const id = o.op === 'addClip' ? o.clip.id! : (o as { clipId: string }).clipId;
-      const c = findClip(view, id);
+      const c = inView.get(id);
       if (!c) continue;
       let s = c.start;
       let e = c.start + c.duration;
+      if (o.op === 'cutTextTime' && hasSeamIn(out.seams, s - SAME_T, e + SAME_T)) continue;
+      if (o.op === 'trimClip' && c.kind === 'video' && hasSeamAt(out.seams, o.edge === 'start' ? s : e)) continue;
       if (o.op === 'setKeyframe') s = e = c.start + o.t;
       if (o.op === 'retimeGroup') (s = c.start + o.start), (e = c.start + o.start + o.duration);
-      const r = ranges.get(id);
-      ranges.set(id, r ? { start: Math.min(r.start, s), end: Math.max(r.end, e) } : { start: s, end: e });
+      mark(id, s, e);
     }
     for (const [clipId, r] of ranges) out.range.push({ clipId, ...r });
     return out;
@@ -285,19 +383,25 @@ export class EditorSession {
   // ---------- edição ----------
   /**
    * Ponto de entrada das edições manuais. Enquanto há uma etapa em rascunho,
-   * editar um clipe que o rascunho mexe (ou qualquer coisa, com o modo
-   * "ajustar" ligado) vira ajuste do rascunho: você está editando o que vê na
-   * prévia. O resto é gravado no projeto (e desatualiza o rascunho).
+   * mexer num clipe que o rascunho mexe, ou em qualquer coisa com o modo
+   * "ajustar" ligado, vira ajuste do rascunho: você está editando o que vê na
+   * prévia. Com um rascunho que corta, um corte que divide ou empurra os pedaços
+   * dele também é ajuste; com um rascunho que não corta, só o que muda os
+   * próprios clipes dele. O resto é gravado no projeto (e desatualiza o
+   * rascunho). `confirmDrop` pergunta antes disso quando a etapa tem ajustes
+   * seus, que se perdem com o rascunho desatualizado: sem ela, não pergunta.
    */
-  dispatch(ops: Op[], label?: string): { ok: true; target: 'draft' | 'project' } | { ok: false; message: string } {
+  dispatch(ops: Op[], label?: string, confirmDrop?: () => boolean): { ok: true; target: 'draft' | 'project' } | { ok: false; message: string } {
     // Nada a fazer (ex.: botão de áudio sem vídeos): sem histórico vazio e sem desatualizar o rascunho.
     if (Array.isArray(ops) && ops.length === 0) return { ok: true, target: this.activeStep ? 'draft' : 'project' };
     try {
-      if (this.shouldRouteToDraft(ops)) {
+      // As ops aplicadas sobre a view uma vez só: para decidir a rota e para virar o ajuste do rascunho.
+      let onView: Op[] | undefined;
+      const applyOnView = () => (onView ??= applyOps(this.view, ops).applied);
+      if (this.shouldRouteToDraft(ops, applyOnView)) {
         const p = this.openProposal!;
         const step = this.activeStep!;
-        const base = this.view;
-        const { applied } = applyOps(base, ops);
+        const applied = applyOnView();
         step.manualMarks.push(step.manualOps.length);
         step.manualOps.push(...applied);
         step.manualRedo = [];
@@ -306,21 +410,35 @@ export class EditorSession {
         this.emit();
         return { ok: true, target: 'draft' };
       }
+      // Vai para o projeto e o rascunho fica desatualizado: os seus ajustes nele se perderiam sem aviso.
+      if (this.draftEdits && confirmDrop && !confirmDrop()) return { ok: false, message: '' };
       this.commit(ops, label ?? (ops.length === 1 ? describeOp(ops[0]) : 'Edição'), 'user');
       return { ok: true, target: 'project' };
     } catch (e) {
-      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+      // Para a interface, só o texto de cada erro, sem o "#0 removeRanges:" que a IA recebe.
+      return { ok: false, message: e instanceof OpValidationError ? e.errors.map((x) => x.message).join(' ') : e instanceof Error ? e.message : String(e) };
     }
   }
 
-  private shouldRouteToDraft(ops: Op[]): boolean {
+  private shouldRouteToDraft(ops: Op[], applyOnView: () => Op[]): boolean {
     const step = this.activeStep;
     if (!step) return false;
     // Importar mídia, faixas, nome e formato do projeto são do usuário: nunca entram na etapa do Claude.
     if (ops.some((o) => USER_ONLY_OPS.includes(o.op) || o.op === 'renameProject' || o.op === 'setCanvas')) return false;
     if (this.adjustMode) return true;
     const d = this.draftInfo;
-    return ops.some((o) => 'clipId' in o && d.clipIds.has(o.clipId));
+    // Os clipes que a edição muda de fato no que você vê: um corte não tem clipId, mas divide e
+    // empurra pedaços do rascunho. Se as ops não se aplicam à view, vale o clipId de cada uma.
+    try {
+      const applied = applyOnView();
+      // Sem corte no rascunho, a view e o projeto têm os mesmos tempos: o que a sua edição só empurra (shiftClips) não é mexer no clipe do rascunho.
+      const reached = d.ripple ? applied : applied.filter((o) => o.op !== 'shiftClips');
+      return touchedClipIds(reached).some((id) => d.clipIds.has(id));
+    } catch (e) {
+      // Com corte no rascunho, os tempos são os da view: o erro na view é o erro da edição.
+      if (d.ripple) throw e;
+      return ops.some((o) => 'clipId' in o && d.clipIds.has(o.clipId));
+    }
   }
 
   private commit(ops: Op[], label: string, source: Source, meta: { proposalId?: string; stepId?: string } = {}): void {
@@ -443,7 +561,8 @@ export class EditorSession {
     if (p && p.status === 'active') {
       const allowed = new Set([...p.targets, ...p.selection, ...this.draftInfo.createdClipIds]);
       const changed = next.clipIds.some((id) => !allowed.has(id));
-      if (changed) this.markStale(p, 'A seleção mudou.');
+      // Com ajustes seus no rascunho, clicar em outro clipe não joga esses ajustes fora.
+      if (changed && !this.draftEdits) this.markStale(p, 'A seleção mudou.');
     }
     this.selection = next;
     this.emit();
@@ -514,6 +633,7 @@ export class EditorSession {
     this.viewCache = null;
     this.contextRequest = null;
     this.notes = this.notes.filter((n) => n.delivered);
+    this.loads++;
     this.emit();
     this.wakeAll();
   }
@@ -577,6 +697,13 @@ export class EditorSession {
         details: { proposalId: open.id },
       };
     }
+    if (open && open.status === 'active' && open.id === input.replaces && this.draftEdits > 0)
+      return {
+        ok: false,
+        code: 'proposal_pending',
+        message: 'O usuário ajustou à mão o rascunho aberto: não o substitua. Acrescente etapas com appendTo ou espere ele aceitar ou descartar (get_proposal com waitSeconds).',
+        details: { proposalId: open.id },
+      };
     // Simulação: todas as etapas, em ordem, precisam ser válidas.
     const targets = new Set<string>();
     const simulated = this.simulateSteps(this.project, input.steps, 0);
@@ -599,7 +726,7 @@ export class EditorSession {
       expectedRevision: this.project.revision,
       selection: [...this.selection.clipIds],
       targets: [...targets],
-      steps: input.steps.map(newStep),
+      steps: input.steps.map((st, i) => newStep(st, simulated.bases[i])),
       current: -1,
       status: 'active',
       redoRequested: false,
@@ -615,15 +742,17 @@ export class EditorSession {
     return { ok: true, proposal, reused: false };
   }
 
-  /** Valida etapas em sequência sobre `base`. */
+  /** Valida etapas em sequência sobre `base`. `bases[i]` é a linha do tempo em que a etapa i foi escrita. */
   private simulateSteps(
     base: Project,
     steps: ProposeInput['steps'],
     offset: number,
-  ): { ok: true; targets: string[] } | { ok: false; code: 'invalid_ops'; message: string; details: unknown } {
+  ): { ok: true; targets: string[]; bases: string[] } | { ok: false; code: 'invalid_ops'; message: string; details: unknown } {
     let sim = base;
     const targets = new Set<string>();
+    const bases: string[] = [];
     for (let i = 0; i < steps.length; i++) {
+      bases.push(timeBaseKey(sim));
       try {
         const r = applyOps(sim, steps[i].ops);
         sim = r.project;
@@ -635,7 +764,7 @@ export class EditorSession {
         return { ok: false, code: 'invalid_ops', message: `Etapa ${offset + i + 1}: operação malformada (${e instanceof Error ? e.message : String(e)}).`, details: { step: offset + i + 1 } };
       }
     }
-    return { ok: true, targets: [...targets] };
+    return { ok: true, targets: [...targets], bases };
   }
 
   /**
@@ -693,7 +822,7 @@ export class EditorSession {
     if (!simulated.ok) return simulated;
     for (const id of simulated.targets) if (!p.targets.includes(id)) p.targets.push(id);
     const firstNew = p.steps.length;
-    p.steps.push(...input.steps.map(newStep));
+    p.steps.push(...input.steps.map((st, i) => newStep(st, simulated.bases[i])));
     p.appendedRequestIds.push(requestId);
     p.version++;
     this.log('proposal', `Mais ${input.steps.length} etapa${input.steps.length > 1 ? 's' : ''} em: ${p.title}`);
@@ -712,6 +841,13 @@ export class EditorSession {
       const s = p.steps[i];
       if (s.status !== 'waiting') continue;
       p.current = i;
+      // Os tempos de corte desta etapa eram da linha do tempo que as anteriores deixariam: uma anterior descartada
+      // ou ajustada à mão muda essa linha, e o mesmo segundo já é outro trecho do vídeo.
+      if (s.timeBase !== undefined && usesTimelineTime(s.requested) && timeBaseKey(this.project) !== s.timeBase) {
+        this.markStale(p, `Uma etapa anterior foi descartada ou ajustada à mão, e os tempos da etapa "${s.label}" eram da linha do tempo de antes. Peça para refazer com o contexto atual.`);
+        this.emit();
+        return;
+      }
       try {
         s.ops = applyOps(this.project, s.requested).applied;
         s.status = 'draft';
@@ -720,7 +856,8 @@ export class EditorSession {
         p.expectedRevision = this.project.revision;
         p.version++;
         this.viewCache = null;
-        const firstTarget = touchedClipIds(s.ops)[0];
+        // Um clipe que a própria etapa tirou não está na view: seleciona o primeiro que ficou.
+        const firstTarget = touchedClipIds(s.ops).find((id) => findClip(this.view, id));
         if (firstTarget && !this.selection.clipIds.length) this.selection = { clipIds: [firstTarget] };
         this.emit();
         return;

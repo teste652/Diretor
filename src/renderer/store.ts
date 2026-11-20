@@ -1,5 +1,8 @@
 import { useSyncExternalStore } from 'react';
+import type { Project } from '../core/model';
+import { mapPlayhead } from '../core/pieces';
 import { EditorSession } from '../core/session';
+import type { Marks } from './timelineLogic';
 
 export const session = new EditorSession();
 
@@ -63,6 +66,86 @@ export const playback = {
 export function usePlayback(): ClockState {
   return useSyncExternalStore(playback.subscribe, playback.get);
 }
+
+// Marcas I e O da régua: o trecho que "Apagar trecho" (Shift+Delete) tira de todas as faixas.
+let markState: Marks = { in: null, out: null };
+const markListeners = new Set<() => void>();
+
+export const marks = {
+  get: () => markState,
+  set(next: Marks) {
+    markState = next;
+    for (const fn of markListeners) fn();
+  },
+  subscribe(fn: () => void) {
+    markListeners.add(fn);
+    return () => markListeners.delete(fn);
+  },
+};
+
+export function useMarks(): Marks {
+  return useSyncExternalStore(marks.subscribe, marks.get);
+}
+
+// Outro projeto carregado (abrir ou novo): as marcas eram tempos do anterior e saem, como a seleção.
+let seenLoads = session.loads;
+session.subscribe(() => {
+  if (session.loads === seenLoads) return;
+  seenLoads = session.loads;
+  marks.set({ in: null, out: null });
+});
+
+// Antes/Depois: com um rascunho que corta ou empurra clipes, a prévia pode mostrar o projeto gravado.
+let comparing = false;
+/** O projeto que o "Antes" mostra: guardado ao ligar (não muda com o rascunho aberto) e solto ao desligar. */
+let antes: Project | null = null;
+const compareListeners = new Set<() => void>();
+
+export const compare = {
+  get: () => comparing,
+  set(v: boolean) {
+    if (v === comparing) return;
+    comparing = v;
+    antes = v ? session.project : null;
+    for (const fn of compareListeners) fn();
+  },
+  subscribe(fn: () => void) {
+    compareListeners.add(fn);
+    return () => compareListeners.delete(fn);
+  },
+};
+
+export function useCompare(): boolean {
+  return useSyncExternalStore(compare.subscribe, compare.get);
+}
+
+/** O que a prévia mostra: no "Antes", o projeto gravado (só com rascunho que corta ou empurra); senão, a view. */
+export function shownProject(): Project {
+  return compare.get() && session.draftInfo.ripple ? session.project : session.view;
+}
+
+/** Tempo da agulha na view: no "Antes" de um rascunho que corta, a agulha está no projeto gravado. */
+export function draftTime(t: number): number {
+  return compare.get() && session.draftInfo.ripple ? mapPlayhead(session.project, session.view, t) : t;
+}
+
+/** Antes/Depois: troca o projeto da prévia e leva a agulha ao mesmo ponto do vídeo no outro. */
+export function setCompare(before: boolean): void {
+  if (before === compare.get()) return;
+  const from = shownProject();
+  compare.set(before);
+  playback.seek(mapPlayhead(from, shownProject(), playback.get().time));
+}
+
+// Rascunho aceito ou descartado, outra etapa ou sem corte: a prévia volta ao "Depois" e a agulha vai do projeto que
+// o "Antes" mostrava para o mesmo ponto do vídeo na view (no descarte a view é esse projeto, e ela fica onde está).
+// Entre uma etapa e a seguinte a sessão sempre avisa uma vez sem etapa em rascunho, então a próxima nunca abre no "Antes".
+session.subscribe(() => {
+  if (!comparing || session.draftInfo.ripple) return;
+  const from = antes;
+  compare.set(false);
+  if (from) playback.seek(mapPlayhead(from, session.view, playback.get().time));
+});
 
 export function fmtTime(t: number, fps?: number): string {
   // Com fps, tudo sai do tempo alinhado ao quadro (senão 1,0 s apareceria como 0:00.99).

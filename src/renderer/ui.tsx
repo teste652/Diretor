@@ -134,10 +134,15 @@ export function ToastHost() {
   return t ? <div className={`toast ${t.error ? 'error' : ''}`}>{t.text}</div> : null;
 }
 
-/** Envia operações pela camada única de edição e avisa se o editor recusou. */
+/**
+ * Envia operações pela camada única de edição e avisa se o editor recusou. Uma mudança que iria para o projeto
+ * com um rascunho do Claude ajustado à mão pergunta antes (o rascunho ficaria desatualizado e os ajustes, perdidos).
+ */
 export function run(ops: Op[], label?: string): boolean {
-  const r = session.dispatch(ops, label);
-  if (!r.ok) showToast(r.message, true);
+  const r = session.dispatch(ops, label, () =>
+    confirm('Esta mudança vai direto para o projeto e o rascunho do Claude fica desatualizado: os seus ajustes nele serão perdidos. Para guardá-los, cancele e aceite o rascunho antes. Continuar?'),
+  );
+  if (!r.ok && r.message) showToast(r.message, true);
   return r.ok;
 }
 
@@ -176,4 +181,7 @@ export const Icon = {
   clip: I(<path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L14 7" />),
   stop: I(<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" />),
   newChat: I(<><path d="M4 5h16v11H9l-5 4z" /><path d="M12 8v5M9.5 10.5h5" /></>),
+  scissors: I(<><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M8.5 7.8 20 18M8.5 16.2 20 6" /></>),
+  // Trecho entre duas marcas, com um X: apagar o trecho marcado.
+  cutRange: I(<><path d="M4 4v16M20 4v16" /><path d="m9 9 6 6M15 9l-6 6" /></>),
 };

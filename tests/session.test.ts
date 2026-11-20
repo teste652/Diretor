@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { EditorSession } from '../src/core/session';
-import { findClip, parseProject, type TitleClip } from '../src/core/model';
+import { type NewClipSpec, type Op, applyOps } from '../src/core/operations';
+import { type DraftInfo, EditorSession } from '../src/core/session';
+import { type CaptionClip, type Project, type TitleClip, type VideoClip, createProject, findClip, parseProject, projectDuration } from '../src/core/model';
 import { handleBridge } from '../src/core/api';
 import { evalClipProp, keyframeGroups } from '../src/core/properties';
+import type { TimeRange } from '../src/core/ripple';
+import { videos } from './fixtures';
 
 function setup() {
   const s = new EditorSession();
@@ -607,5 +610,376 @@ describe('teto de contexto', () => {
     s.updateSettings({ contextCeilingBytes: 400 });
     await handleBridge(s, 'get_context', { include: ['timeline'], allowLarger: true });
     expect(s.contextRequest?.status).toBe('pending');
+  });
+});
+
+describe('cortes e rascunhos', () => {
+  it('um Ctrl+Z desfaz o corte inteiro', () => {
+    const s = setup();
+    const before = structuredClone(s.project.clips);
+    expect(s.dispatch([{ op: 'removeRanges', ranges: [[1.5, 2.5]] }]).ok).toBe(true);
+    s.undo();
+    expect(s.project.clips).toEqual(before);
+  });
+
+  it('corte da IA: emenda, ripple, pedaço que não é "clipe novo" e ajuste manual no rascunho', () => {
+    const s = setup();
+    const steps = [{ label: 'Corte', ops: [{ op: 'removeRanges' as const, ranges: [[1.5, 2.5]] as [number, number][] }] }];
+    expect(s.propose({ requestId: 'corte', baseRevision: s.project.revision, title: 'Corte', steps }).ok).toBe(true);
+    const d = s.draftInfo;
+    expect(d.seams).toEqual([{ at: 1.5, removed: 1 }]);
+    expect(d.ripple).toBe(true);
+    const piece = s.view.clips.find((c) => c.kind === 'video' && c.id !== 'v1')!;
+    expect(d.createdClipIds.has(piece.id)).toBe(true);
+    expect(d.addedClipIds.has(piece.id)).toBe(false);
+    expect(s.draftInfo).toBe(d);
+    s.setSelection({ clipIds: [piece.id] });
+    expect(s.openProposal!.status).toBe('active');
+    expect(s.dispatch([{ op: 'removeRanges', ranges: [[3, 3.5]] }])).toEqual({ ok: true, target: 'draft' });
+    expect(s.draftInfo.seams).toEqual([{ at: 1.5, removed: 1 }, { at: 3, removed: 0.5 }]);
+  });
+
+  it('dividir um clipe fora do rascunho grava no projeto e desatualiza a proposta', () => {
+    const s = setup();
+    s.propose(entradaSaida(s.project.revision));
+    expect(s.dispatch([{ op: 'splitClip', clipId: 'v1', at: 3 }])).toEqual({ ok: true, target: 'project' });
+    expect(s.openProposal!.status).toBe('stale');
+  });
+
+  it('corte de 1 quadro ou maior: a emenda marca o lugar e o vídeo cortado fica fora da faixa do rascunho', () => {
+    // v1 [0,6) mostra 2..8 do arquivo: os dois cortes ficam dentro dele. O de 1 quadro apara o pedaço da esquerda.
+    const cases: [[number, number], number][] = [
+      [[3, 3.033], 0.033],
+      [[3, 3.5], 0.5],
+    ];
+    for (const [range, removed] of cases) {
+      const s = setup();
+      const steps = [{ label: 'Corte', ops: [{ op: 'removeRanges' as const, ranges: [range] }] }];
+      expect(s.propose({ requestId: `corte-${removed}`, baseRevision: s.project.revision, title: 'Corte', steps }).ok).toBe(true);
+      const d = s.draftInfo;
+      expect(d.seams).toEqual([{ at: 3, removed }]);
+      const vids = s.view.clips.filter((c) => c.kind === 'video').map((c) => c.id);
+      expect(vids).toHaveLength(2);
+      expect(d.range.filter((r) => vids.includes(r.clipId))).toEqual([]);
+    }
+  });
+
+  it('aparar o fim do último vídeo não deixa emenda: a faixa do rascunho continua no clipe', () => {
+    const s = setup();
+    const steps = [{ label: 'Fim', ops: [{ op: 'removeRanges' as const, ranges: [[5.98, 6]] as [number, number][] }] }];
+    expect(s.propose({ requestId: 'fim', baseRevision: s.project.revision, title: 'Fim', steps }).ok).toBe(true);
+    const d = s.draftInfo;
+    expect(d.seams).toEqual([]);
+    expect(d.ripple).toBe(false);
+    expect(d.range.find((r) => r.clipId === 'v1')).toEqual({ clipId: 'v1', start: 0, end: 5.98 });
+  });
+
+  it('sem etapa em rascunho, draftInfo é sempre o mesmo objeto vazio', () => {
+    const s = setup();
+    const empty = s.draftInfo;
+    expect(s.draftInfo).toBe(empty);
+    expect([empty.clipIds.size, empty.createdClipIds.size, empty.addedClipIds.size, empty.seams.length, empty.range.length]).toEqual([0, 0, 0, 0, 0]);
+    expect(empty.ripple).toBe(false);
+    s.propose(entradaSaida(s.project.revision));
+    expect(s.draftInfo).not.toBe(empty);
+    s.discardStep();
+    s.discardStep();
+    expect(s.activeStep).toBeUndefined();
+    expect(s.draftInfo).toBe(empty);
+  });
+
+  /** Propõe uma etapa só com estas ops e devolve o draftInfo dela. */
+  const proposeStep = (s: EditorSession, ops: Op[]) => {
+    expect(s.propose({ requestId: 'faixa', baseRevision: s.project.revision, title: 'Corte', steps: [{ label: 'Corte', ops }] }).ok).toBe(true);
+    return s.draftInfo;
+  };
+  /** A faixa do rascunho em ordem de início (e de id, no empate). */
+  const sorted = (range: DraftInfo['range']) => [...range].sort((a, b) => a.start - b.start || (a.clipId < b.clipId ? -1 : 1));
+
+  it('corte no fim, sem emenda: a faixa do rascunho marca o vídeo e o título que encurtaram', () => {
+    const d = proposeStep(setup(), [{ op: 'removeRanges', ranges: [[5, 6]] }]);
+    expect(d.seams).toEqual([]);
+    expect(d.ripple).toBe(false);
+    expect(sorted(d.range)).toEqual(sorted([{ clipId: 'v1', start: 0, end: 5 }, { clipId: 't1', start: 0, end: 5 }]));
+  });
+
+  it('corte no começo, sem emenda: a faixa marca o pedaço que ficou e o título', () => {
+    const s = setup();
+    const d = proposeStep(s, [{ op: 'removeRanges', ranges: [[0, 1]] }]);
+    expect(d.seams).toEqual([]);
+    expect(d.ripple).toBe(true);
+    const vids = s.view.clips.filter((c) => c.kind === 'video');
+    expect(vids).toHaveLength(1);
+    expect(sorted(d.range)).toEqual(sorted([{ clipId: vids[0].id, start: 0, end: 5 }, { clipId: 't1', start: 0, end: 5 }]));
+  });
+
+  it('corte no meio do vídeo: a emenda marca o lugar e nada vai para a faixa', () => {
+    expect(proposeStep(setup(), [{ op: 'removeRanges', ranges: [[3, 3.5]] }]).range).toEqual([]);
+  });
+
+  it('corte num trecho só de título: sem emenda, a faixa marca o título', () => {
+    const s = new EditorSession();
+    s.dispatch([
+      { op: 'addMedia', media: { id: 'm1', path: 'C:/v/clip.mp4', name: 'clip.mp4', duration: 10, width: 1280, height: 720, hasAudio: true } },
+      { op: 'addClip', clip: { kind: 'video', id: 'v1', mediaId: 'm1', start: 3, duration: 6 } },
+      { op: 'addClip', clip: { kind: 'title', id: 't1', text: 'ABERTURA', start: 0, duration: 3 } },
+    ]);
+    const d = proposeStep(s, [{ op: 'removeRanges', ranges: [[1, 2]] }]);
+    expect(d.seams).toEqual([]);
+    expect(d.ripple).toBe(true);
+    expect(d.range).toEqual([{ clipId: 't1', start: 0, end: 2 }]);
+  });
+
+  it('dividir sem cortar: a faixa marca os dois pedaços', () => {
+    const s = setup();
+    const d = proposeStep(s, [{ op: 'splitClip', clipId: 'v1', at: 3 }]);
+    expect(d.seams).toEqual([]);
+    const piece = s.view.clips.find((c) => c.kind === 'video' && c.id !== 'v1')!;
+    expect(sorted(d.range)).toEqual([{ clipId: 'v1', start: 0, end: 3 }, { clipId: piece.id, start: 3, end: 6 }]);
+  });
+
+  it('corte com emenda e divisão na mesma etapa: só a divisão sem emenda vai para a faixa', () => {
+    const s = setup();
+    const d = proposeStep(s, [{ op: 'removeRanges', ranges: [[4, 4.5]] }, { op: 'splitClip', clipId: 'v1', at: 1 }]);
+    expect(d.seams).toEqual([{ at: 4, removed: 0.5 }]);
+    const piece = s.view.clips.find((c) => c.kind === 'video' && c.start === 1)!;
+    expect(sorted(d.range)).toEqual([{ clipId: 'v1', start: 0, end: 1 }, { clipId: piece.id, start: 1, end: 4 }]);
+  });
+});
+
+const media = (duration: number) => ({ id: 'm1', path: 'C:/v/a.mp4', name: 'a.mp4', duration, width: 1280, height: 720, hasAudio: true });
+
+/** Sessão com o projeto gravado em C:/p/a.diretor (sem mudanças): v1 de 60 s e os clipes a mais. */
+function sixty(extra: NewClipSpec[] = []): EditorSession {
+  const s = new EditorSession();
+  const ops: Op[] = [{ op: 'addMedia', media: media(60) }, { op: 'addClip', clip: { kind: 'video', id: 'v1', mediaId: 'm1' } }];
+  for (const clip of extra) ops.push({ op: 'addClip', clip });
+  s.load(applyOps(createProject(), ops).project, 'C:/p/a.diretor');
+  return s;
+}
+
+/** Propõe uma etapa só, de corte, com estes trechos. */
+function proposeCut(s: EditorSession, ranges: TimeRange[], label = 'Corte') {
+  const r = s.propose({ baseRevision: s.project.revision, title: label, steps: [{ label, ops: [{ op: 'removeRanges', ranges }] }] });
+  if (!r.ok) throw new Error(r.message);
+  return r.proposal;
+}
+
+describe('ajustes seus no rascunho do Claude', () => {
+  /** v1 de 60 s, legendas c0 [1, 2) "começo" e c9 [40, 42) "fim"; o Claude propõe cortar [10, 13]. */
+  const fixture = () => {
+    const s = sixty([
+      { kind: 'caption', id: 'c0', text: 'começo', start: 1, duration: 1 },
+      { kind: 'caption', id: 'c9', text: 'fim', start: 40, duration: 2 },
+    ]);
+    proposeCut(s, [[10, 13]]);
+    return s;
+  };
+  /** Um corte seu de 0,4 s em 30 s do rascunho. */
+  const cut = (s: EditorSession) => s.dispatch([{ op: 'removeRanges', ranges: [[30, 30.4]] }]);
+  const textOf = (p: Project, id: string) => (findClip(p, id) as CaptionClip).text;
+
+  it('um corte seu vai para o rascunho e conta como ajuste', () => {
+    const s = fixture();
+    expect(cut(s)).toEqual({ ok: true, target: 'draft' });
+    expect(s.draftEdits).toBe(1);
+    expect(s.dirty).toBe(false);
+    s.undo();
+    expect(s.draftEdits).toBe(0);
+    s.redo();
+    expect(s.draftEdits).toBe(1);
+  });
+
+  it('clicar em outro clipe não desatualiza um rascunho com ajustes', () => {
+    const s = fixture();
+    cut(s);
+    s.setSelection({ clipIds: ['c0'] });
+    expect(s.openProposal?.status).toBe('active');
+    expect(projectDuration(s.view)).toBeCloseTo(56.6, 6);
+  });
+
+  it('mudança que vai para o projeto pergunta antes de perder os ajustes', () => {
+    const s = fixture();
+    cut(s);
+    const edit: Op[] = [{ op: 'updateClip', clipId: 'c0', set: { text: 'x' } }];
+    expect(s.dispatch(edit, undefined, () => false)).toEqual({ ok: false, message: '' });
+    expect(s.openProposal?.status).toBe('active');
+    expect(textOf(s.project, 'c0')).toBe('começo');
+    expect(s.dispatch(edit, undefined, () => true)).toEqual({ ok: true, target: 'project' });
+    expect(s.openProposal?.status).toBe('stale');
+  });
+
+  it('sem ajustes, não pergunta', () => {
+    const s = fixture();
+    const ask = () => {
+      throw new Error('não devia perguntar');
+    };
+    expect(s.dispatch([{ op: 'updateClip', clipId: 'c0', set: { text: 'x' } }], undefined, ask)).toEqual({ ok: true, target: 'project' });
+  });
+
+  it('o Claude não substitui um rascunho com ajustes', () => {
+    const s = fixture();
+    cut(s);
+    const open = s.openProposal!;
+    const r = s.propose({ baseRevision: s.project.revision, title: 'Outro corte', replaces: open.id, steps: [{ label: 'Corte', ops: [{ op: 'removeRanges', ranges: [[20, 21]] }] }] });
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.code).toBe('proposal_pending');
+    expect(r.ok === false && r.message).toMatch(/appendTo/);
+    expect(s.openProposal?.id).toBe(open.id);
+    expect(s.draftEdits).toBe(1);
+  });
+});
+
+describe('rota com rascunho que não corta', () => {
+  /** Vídeos [id, início, duração, in] de uma mídia de 60 s e o título T em [t0, t1); o Claude propõe a entrada de T. */
+  const fixture = (vids: [string, number, number, number][], [t0, t1]: [number, number]) => {
+    const ops: Op[] = [{ op: 'addMedia', media: media(60) }];
+    for (const [id, start, duration, inn] of vids) ops.push({ op: 'addClip', clip: { kind: 'video', id, mediaId: 'm1', start, duration, in: inn } });
+    ops.push({ op: 'addClip', clip: { kind: 'title', id: 'T', text: 'TÍTULO', start: t0, duration: t1 - t0 } });
+    const s = new EditorSession();
+    s.load(applyOps(createProject(), ops).project, null);
+    const r = s.propose({ baseRevision: s.project.revision, title: 'Entrada', steps: [{ label: 'Entrada', ops: [{ op: 'animate', clipId: 'T', preset: 'fadeIn' }] }] });
+    if (!r.ok) throw new Error(r.message);
+    return s;
+  };
+
+  it('um corte antes do título vai para o projeto', () => {
+    const s = fixture([['v1', 0, 60, 0]], [30, 33]);
+    expect(s.dispatch([{ op: 'removeRanges', ranges: [[5, 6]] }])).toEqual({ ok: true, target: 'project' });
+    expect(s.openProposal?.status).toBe('stale');
+    expect(projectDuration(s.project)).toBe(59);
+    expect(findClip(s.project, 'T')!.start).toBe(29);
+    expect(s.past.at(-1)!.label).toBe('Apagar trecho');
+    expect(s.discardStep()).toBe(true);
+    expect(projectDuration(s.project)).toBe(59);
+  });
+
+  it('aparar o fim de v1 que só empurra o título vai para o projeto', () => {
+    const s = fixture([['v1', 0, 30, 0], ['v2', 30, 30, 30]], [40, 43]);
+    expect(s.dispatch([{ op: 'trimClip', clipId: 'v1', edge: 'end', delta: -1 }])).toEqual({ ok: true, target: 'project' });
+  });
+
+  it('um corte que atravessa o título vai para o rascunho', () => {
+    const s = fixture([['v1', 0, 60, 0]], [30, 33]);
+    expect(s.dispatch([{ op: 'removeRanges', ranges: [[31, 32]] }])).toEqual({ ok: true, target: 'draft' });
+  });
+});
+
+describe('etapas de corte seguidas', () => {
+  /** Mídia de 20 s, v1 [0, 20) e a legenda "alvo" em [7, 8). */
+  const fixture = () => {
+    const s = new EditorSession();
+    s.load(
+      applyOps(createProject(), [
+        { op: 'addMedia', media: media(20) },
+        { op: 'addClip', clip: { kind: 'video', id: 'v1', mediaId: 'm1' } },
+        { op: 'addClip', clip: { kind: 'caption', id: 'alvo', text: 'alvo', start: 7, duration: 1 } },
+      ]).project,
+      null,
+    );
+    return s;
+  };
+  const cutStep = (label: string, ranges: TimeRange[]) => ({ label, ops: [{ op: 'removeRanges' as const, ranges }] });
+  /** Duas etapas: tira [2, 3] e depois [6, 7] (que é onde a legenda "alvo" fica depois da primeira). */
+  const proposeTwo = (s: EditorSession, second: { label: string; ops: Op[] } = cutStep('Segundo', [[6, 7]])) => {
+    const r = s.propose({ baseRevision: s.project.revision, title: 'Cortes', steps: [cutStep('Primeiro', [[2, 3]]), second] });
+    if (!r.ok) throw new Error(r.message);
+    return r.proposal;
+  };
+  /** Vídeos como [início, duração, in], em ordem. */
+  const vids = (p: Project) =>
+    p.clips
+      .filter((c): c is VideoClip => c.kind === 'video')
+      .sort((a, b) => a.start - b.start)
+      .map((c) => [c.start, c.duration, c.in]);
+
+  it('aceitar as duas etapas tira a fala certa', () => {
+    const s = fixture();
+    proposeTwo(s);
+    expect(s.acceptStep()).toBe(true);
+    expect(s.acceptStep()).toBe(true);
+    expect(vids(s.project)).toEqual([[0, 2, 0], [2, 4, 3], [6, 12, 8]]);
+    expect(findClip(s.project, 'alvo')).toBeUndefined();
+    expect(projectDuration(s.project)).toBe(18);
+  });
+
+  it('descartar a primeira desatualiza a segunda', () => {
+    const s = fixture();
+    const p = proposeTwo(s);
+    s.discardStep();
+    expect(p.status).toBe('stale');
+    expect(p.staleReason).toMatch(/etapa anterior/);
+    expect(vids(s.project)).toEqual([[0, 20, 0]]);
+    expect(findClip(s.project, 'alvo')!.start).toBe(7);
+  });
+
+  it('um corte seu na primeira desatualiza a segunda', () => {
+    const s = fixture();
+    const p = proposeTwo(s);
+    expect(s.dispatch([{ op: 'removeRanges', ranges: [[0.5, 1]] }])).toEqual({ ok: true, target: 'draft' });
+    expect(s.acceptStep()).toBe(true);
+    expect(p.status).toBe('stale');
+    expect(findClip(s.project, 'alvo')).toBeDefined();
+  });
+
+  it('etapa sem tempo da linha do tempo segue depois de um descarte', () => {
+    const s = fixture();
+    const p = proposeTwo(s, { label: 'Texto', ops: [{ op: 'updateClip', clipId: 'alvo', set: { text: 'novo' } }] });
+    s.discardStep();
+    expect(p.status).toBe('active');
+    expect(s.activeStep?.label).toBe('Texto');
+  });
+
+  it('appendTo com os tempos do rascunho segue normal', () => {
+    const s = fixture();
+    const first = s.propose({ baseRevision: s.project.revision, title: 'Cortes', steps: [cutStep('Primeiro', [[2, 3]])] });
+    if (!first.ok) throw new Error(first.message);
+    const more = s.propose({ baseRevision: s.project.revision, title: 'Cortes', appendTo: first.proposal.id, steps: [cutStep('Segundo', [[6, 7]])] });
+    expect(more.ok).toBe(true);
+    expect(s.acceptStep()).toBe(true);
+    expect(s.activeStep?.label).toBe('Segundo');
+    expect(s.acceptStep()).toBe(true);
+    expect(findClip(s.project, 'alvo')).toBeUndefined();
+  });
+
+  it('get_context avisa a base de tempo', async () => {
+    const s = fixture();
+    proposeTwo(s);
+    const cut = (await handleBridge(s, 'get_context', {})) as { pendingProposal: { timeBase?: unknown } };
+    expect(typeof cut.pendingProposal.timeBase).toBe('string');
+    const t = setup();
+    t.propose(entradaSaida(t.project.revision));
+    const anim = (await handleBridge(t, 'get_context', {})) as { pendingProposal: { timeBase?: unknown } };
+    expect(anim.pendingProposal.timeBase).toBeUndefined();
+  });
+});
+
+describe('avisos do corte e seleção do rascunho', () => {
+  it('aviso de faixa travada sem jargão', () => {
+    const s = sixty([{ kind: 'caption', id: 'c1', text: 'fala', start: 30, duration: 2 }]);
+    expect(s.dispatch([{ op: 'updateTrack', trackId: 'trk_captions', set: { locked: true } }]).ok).toBe(true);
+    const r = s.dispatch([{ op: 'removeRanges', ranges: [[30.5, 31]] }]);
+    expect(r.ok === false && r.message).toBe('A faixa "Legendas" está travada e mudaria junto com o corte. Destrave a faixa para continuar.');
+  });
+
+  it('com rascunho que corta, trecho fora da view não vai para o projeto', () => {
+    const s = sixty();
+    proposeCut(s, [[10, 20]]);
+    expect(s.dispatch([{ op: 'removeRanges', ranges: [[52, 55]] }])).toEqual({ ok: false, message: 'Nada para apagar nesses trechos.' });
+    expect(s.openProposal?.status).toBe('active');
+    expect(projectDuration(s.project)).toBe(60);
+  });
+
+  it('o rascunho do Claude não seleciona um clipe que ele mesmo tirou', () => {
+    const cases: [[string, number, number, number][], TimeRange][] = [
+      [[['v1', 0, 10, 0]], [0, 2]],
+      [[['v1', 0, 10, 0], ['v2', 10, 10, 10]], [10, 20]],
+    ];
+    for (const [list, range] of cases) {
+      const s = new EditorSession(videos(list));
+      expect(s.selection.clipIds).toEqual([]);
+      proposeCut(s, [range]);
+      expect(s.selection.clipIds.every((id) => !!findClip(s.view, id))).toBe(true);
+    }
   });
 });

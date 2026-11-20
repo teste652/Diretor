@@ -5,8 +5,9 @@ import { ChatPanel } from './ChatPanel';
 import { cancelExport, exportProject, isExporting } from './exporter';
 import { LeftPanel, importPaths } from './MediaPanel';
 import { Preview, previewSettled, togglePlay } from './Preview';
-import { playback, session, useSession } from './store';
-import { addCaptionAtPlayhead, deleteSelectedKeyframeOrClip, Timeline } from './Timeline';
+import { marks, playback, session, setCompare, useSession } from './store';
+import { addCaptionAtPlayhead, deleteMarkedRange, deleteSelectedKeyframeOrClip, splitAtPlayhead, Timeline } from './Timeline';
+import { isTextEntry, withIn, withOut } from './timelineLogic';
 import { Icon, TextField, ToastHost, run, showToast } from './ui';
 
 export async function saveProject(saveAs = false, path?: string): Promise<string | null> {
@@ -19,12 +20,12 @@ export async function saveProject(saveAs = false, path?: string): Promise<string
     return null;
   }
   session.markSaved(r.path);
-  showToast('Projeto salvo.');
+  showToast(session.draftEdits > 0 ? 'Projeto salvo. Seus ajustes no rascunho do Claude só entram no projeto quando você aceitar o rascunho.' : 'Projeto salvo.');
   return r.path;
 }
 
 export async function openProject(path?: string): Promise<boolean> {
-  if (session.dirty && !confirm('O projeto atual tem mudanças não salvas. Abrir outro e descartar essas mudanças?')) return false;
+  if ((session.dirty || session.draftEdits) && !confirm('O projeto atual tem mudanças não salvas. Abrir outro e descartar essas mudanças?')) return false;
   const r = await window.diretor?.openProject(path);
   if (!r) return false;
   if ('error' in r) {
@@ -43,12 +44,12 @@ export async function openProject(path?: string): Promise<boolean> {
 }
 
 function newProject() {
-  if (session.dirty && !confirm('Descartar as mudanças não salvas?')) return;
+  if ((session.dirty || session.draftEdits) && !confirm('Descartar as mudanças não salvas?')) return;
   session.load(createProject(), null);
   playback.seek(0);
 }
 
-type ExportState = { frame: number; total: number; done?: string; warning?: string; error?: string } | null;
+type ExportState = { frame: number; total: number; slowAudio?: boolean; done?: string; warning?: string; error?: string } | null;
 
 export function App() {
   const s = useSession();
@@ -87,13 +88,22 @@ export function App() {
         if (!e.repeat) dictatePending = true;
         return;
       }
-      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return;
+      // Num campo de texto as teclas são do texto; um controle deslizante em foco (zoom, volume) não segura os atalhos.
+      if (isTextEntry(el as HTMLInputElement)) return;
       if (e.code === 'Space') (e.preventDefault(), togglePlay());
       else if (mod && key === 'z' && !e.shiftKey) (e.preventDefault(), session.undo());
       else if (mod && (key === 'y' || (e.shiftKey && key === 'z'))) (e.preventDefault(), session.redo());
+      else if (mod && key === 'b') (e.preventDefault(), splitAtPlayhead());
+      // Com Shift, o trecho marcado (antes do Delete comum, que tira o clipe selecionado).
+      else if (e.shiftKey && (e.key === 'Delete' || e.key === 'Backspace')) deleteMarkedRange();
       else if (e.key === 'Delete' || e.key === 'Backspace') deleteSelectedKeyframeOrClip();
-      else if (e.key === 'ArrowRight') playback.seek(playback.get().time + 1 / session.view.settings.fps);
-      else if (e.key === 'ArrowLeft') playback.seek(playback.get().time - 1 / session.view.settings.fps);
+      // I e O marcam a agulha. No "Antes", primeiro a prévia volta para o "Depois", com a agulha no mesmo ponto do vídeo.
+      else if (!mod && !e.altKey && key === 'i') (setCompare(false), marks.set(withIn(marks.get(), playback.get().time)));
+      else if (!mod && !e.altKey && key === 'o') (setCompare(false), marks.set(withOut(marks.get(), playback.get().time)));
+      else if (e.key === 'Escape') marks.set({ in: null, out: null });
+      // preventDefault: o controle deslizante em foco não anda junto com a agulha.
+      else if (e.key === 'ArrowRight') (e.preventDefault(), playback.seek(playback.get().time + 1 / session.view.settings.fps));
+      else if (e.key === 'ArrowLeft') (e.preventDefault(), playback.seek(playback.get().time - 1 / session.view.settings.fps));
     };
     const onKeyUp = (e: KeyboardEvent) => {
       if (!dictatePending || (e.key !== 'Control' && e.key !== 'Meta')) return;
@@ -114,7 +124,7 @@ export function App() {
   // Fechar/recarregar com mudanças não salvas ou exportando: o processo principal pergunta antes.
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (!session.dirty && !isExporting()) return;
+      if (!session.dirty && !session.draftEdits && !isExporting()) return;
       e.preventDefault();
       e.returnValue = '';
     };
@@ -136,8 +146,11 @@ export function App() {
   const doExport = async () => {
     if (s.openProposal?.status === 'active' && !confirm('Há um rascunho pendente. A exportação usa só o que já foi aceito. Continuar?')) return;
     cancel.current = { cancelled: false };
-    setExp({ frame: 0, total: 1 });
-    const r = await exportProject(session.project, { onProgress: (p) => setExp({ ...p }), signal: cancel.current });
+    const project = session.project;
+    // Até o motor de áudio novo, o som de muitos pedaços pode levar minutos a mais para ficar pronto.
+    const slowAudio = project.clips.filter((c) => c.kind === 'video').length > 300;
+    setExp({ frame: 0, total: 1, slowAudio });
+    const r = await exportProject(project, { onProgress: (p) => setExp({ ...p, slowAudio }), signal: cancel.current });
     if (r.cancelled) return setExp(null);
     setExp((e) => ({ ...(e ?? { frame: 0, total: 1 }), done: r.ok ? r.outPath : undefined, warning: r.ok ? r.warning : undefined, error: r.ok ? undefined : r.error }));
   };
@@ -161,7 +174,9 @@ export function App() {
         <button className="btn ghost" onClick={() => void saveProject()}>
           Salvar
         </button>
-        <span className="dirty">{s.dirty ? 'não salvo' : s.filePath ? 'salvo' : ''}</span>
+        <span className="dirty" title={s.draftEdits ? 'Seus ajustes no rascunho do Claude só entram no projeto quando você aceitar o rascunho.' : undefined}>
+          {s.dirty || s.draftEdits ? 'não salvo' : s.filePath ? 'salvo' : ''}
+        </span>
         <span className="spacer" />
         <button className="btn primary" onClick={doExport} disabled={!s.project.clips.length}>
           {Icon.export} Exportar
@@ -189,6 +204,7 @@ export function App() {
                 <p className="hint">
                   {exp.frame >= exp.total ? 'Finalizando e gravando o MP4…' : `Quadro ${exp.frame} de ${exp.total}.`} Tudo é processado no seu computador.
                 </p>
+                {exp.slowAudio && <p className="hint">Com muitos cortes, o som pode levar alguns minutos a mais para ficar pronto.</p>}
                 <button
                   className="btn"
                   onClick={() => {

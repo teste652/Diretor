@@ -9,7 +9,6 @@ import {
   type ClipKind,
   type Easing,
   EASINGS,
-  type Keyframe,
   type MediaItem,
   type Project,
   type TextStyle,
@@ -22,7 +21,10 @@ import {
   newId,
   trackForKind,
 } from './model';
-import { defaultProps, evalProp, keyframeGroups, propDef, sortedKeyframes } from './properties';
+import { cutKeyframes, partitionKeyframes, remapKeyframes, sameGroup } from './keyframes';
+import { defaultProps, evalProp, propDef, sortedKeyframes } from './properties';
+import { MAX_RANGES, type TimeRange, planRemoveRanges, trimRipple } from './ripple';
+import { EPS, MIN_DURATION, SAME_T, round } from './time';
 
 export type ClipChanges = {
   name?: string;
@@ -105,10 +107,19 @@ export type Op =
   /**
    * Apara uma borda do clipe. `delta` é quanto a borda anda na linha do tempo
    * (positivo = para a direita). No vídeo, aparar o início mantém o clipe no
-   * lugar e puxa os vídeos seguintes (sem buraco); a animação de entrada fica
-   * no começo, a de saída no fim, e o resto acompanha o conteúdo.
+   * lugar; com ripple (o padrão), aparar vale como apagar ou abrir aquele pedaço
+   * em todas as faixas, sem buraco. A animação de entrada fica no começo, a de
+   * saída no fim, e o resto acompanha o conteúdo.
    */
   | { op: 'trimClip'; clipId: string; edge: TrimEdge; delta: number; ripple?: boolean }
+  /** Divide o clipe em `at` (segundos da linha do tempo): a parte da direita vira o clipe `newId`. */
+  | { op: 'splitClip'; clipId: string; at: number; newId?: string }
+  /** Move vários clipes de uma vez (`delta` em segundos); nenhum começa antes do zero. */
+  | { op: 'shiftClips'; clipIds: string[]; delta: number }
+  /** Tira o trecho [t0, t1] (segundos relativos ao início do clipe) de um título ou legenda. */
+  | { op: 'cutTextTime'; clipId: string; t0: number; t1: number }
+  /** Macro: apaga trechos [início, fim] (segundos da linha do tempo) em todas as faixas; o que vem depois anda para trás. */
+  | { op: 'removeRanges'; ranges: TimeRange[] }
   | { op: 'updateTrack'; trackId: string; set: { hidden?: boolean; locked?: boolean } }
   | { op: 'renameProject'; name: string }
   | { op: 'setCanvas'; width: number; height: number; fps?: number }
@@ -139,16 +150,12 @@ export class OpValidationError extends Error {
   }
 }
 
-const EPS = 1e-6;
-/** Tolerância para "mesmo instante" entre pontos de animação (s). */
-const SAME_T = 1e-3;
-export const MIN_DURATION = 0.04;
+export { MIN_DURATION } from './time';
 const MIN_GROUP_DURATION = 0.01;
 const MAX_TEXT = 2000;
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 const isStr = (v: unknown): v is string => typeof v === 'string';
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
-const round = (n: number) => Math.round(n * 1000) / 1000;
 const CAPTION_PRESET_NAMES: CaptionPreset[] = ['padrao', 'caixa', 'destaque'];
 const COLOR_RE = /^(#[0-9a-f]{3,4}|#[0-9a-f]{6}|#[0-9a-f]{8}|(rgb|rgba|hsl|hsla)\([\d\s.,%+-]+\)|[a-z]{3,24})$/i;
 const STYLE_KEYS = ['fontFamily', 'fontSize', 'fontWeight', 'color', 'background', 'align', 'shadow'];
@@ -166,6 +173,10 @@ const OP_KEYS: Record<Op['op'], string[]> = {
   clearKeyframes: ['clipId', 'prop', 'group'],
   retimeGroup: ['clipId', 'group', 'start', 'duration'],
   trimClip: ['clipId', 'edge', 'delta', 'ripple'],
+  splitClip: ['clipId', 'at', 'newId'],
+  shiftClips: ['clipIds', 'delta'],
+  cutTextTime: ['clipId', 't0', 't1'],
+  removeRanges: ['ranges'],
   updateTrack: ['trackId', 'set'],
   renameProject: ['name'],
   setCanvas: ['width', 'height', 'fps'],
@@ -180,7 +191,28 @@ function trackLocked(p: Project, clip: Clip): boolean {
   return !!findTrack(p, clip.trackId)?.locked;
 }
 
-const sameGroup = (a: string | undefined, b: string | undefined) => (a ?? '') === (b ?? '');
+/**
+ * Primeira faixa travada que um plano de corte mudaria: os clipes que já existem
+ * e que as operações nomeiam. Ids novos (pedaços que o plano ainda vai criar) não
+ * contam. Sem nada travado, null.
+ */
+export function lockedTrackError(p: Project, ops: Op[]): string | null {
+  const clips = new Map(p.clips.map((c) => [c.id, c]));
+  for (const o of ops) {
+    const ids =
+      o.op === 'shiftClips'
+        ? o.clipIds
+        : o.op === 'splitClip' || o.op === 'removeClip' || o.op === 'cutTextTime' || o.op === 'updateClip' || o.op === 'trimClip'
+          ? [o.clipId]
+          : [];
+    for (const id of ids) {
+      const c = clips.get(id);
+      const track = c && findTrack(p, c.trackId);
+      if (track?.locked) return `A faixa "${track.name}" está travada e mudaria junto com o corte. Destrave a faixa para continuar.`;
+    }
+  }
+  return null;
+}
 
 /** Intervalo de uma animação pronta, com os mesmos padrões na validação e na expansão. */
 export function animateRange(
@@ -344,6 +376,83 @@ export function validateOp(p: Project, o: Op, index = 0): OpError[] {
       const lim = trimLimits(p, c, o.edge);
       if (o.delta < lim.min - EPS || o.delta > lim.max + EPS)
         push('out_of_range', `Para aparar ${o.edge === 'start' ? 'o início' : 'o fim'}, delta vai de ${lim.min.toFixed(3)} a ${lim.max.toFixed(3)}s.`);
+      if (!e.length && o.ripple !== false && c.kind === 'video') {
+        const locked = lockedTrackError(p, trimRipple(p, c, o.edge, o.delta));
+        if (locked) push('locked', locked);
+      }
+      break;
+    }
+    case 'splitClip': {
+      const c = need(o.clipId);
+      if (!c) break;
+      if (!isNum(o.at)) push('invalid_param', 'at deve ser um número (segundos da linha do tempo).');
+      else {
+        const lo = c.start + MIN_DURATION;
+        const hi = c.start + c.duration - MIN_DURATION;
+        const at = round(o.at);
+        if (at < lo - EPS || at > hi + EPS)
+          push('out_of_range', `Para dividir, at fica entre ${lo.toFixed(3)} e ${hi.toFixed(3)}s (pelo menos ${MIN_DURATION}s de cada lado).`);
+      }
+      if (o.newId !== undefined && (!isStr(o.newId) || !o.newId.trim())) push('invalid_param', 'newId deve ser um texto.');
+      else if (o.newId && findClip(p, o.newId)) push('invalid_param', `Já existe um clipe "${o.newId}".`);
+      break;
+    }
+    case 'shiftClips': {
+      const ids = o.clipIds;
+      if (!Array.isArray(ids) || !ids.length || ids.some((id) => !isStr(id) || !id)) {
+        push('invalid_param', 'clipIds deve ser uma lista de ids.');
+        break;
+      }
+      if (new Set(ids).size < ids.length) {
+        push('invalid_param', 'clipIds tem ids repetidos.');
+        break;
+      }
+      if (!isNum(o.delta)) {
+        push('invalid_param', 'delta deve ser um número (segundos).');
+        break;
+      }
+      for (const id of ids) {
+        const c = need(id);
+        if (c && c.start + o.delta < -EPS) push('out_of_range', `O clipe "${id}" começaria antes do zero.`);
+      }
+      break;
+    }
+    case 'cutTextTime': {
+      const c = need(o.clipId);
+      if (!c) break;
+      if (c.kind === 'video') {
+        push('invalid_param', 'cutTextTime vale só para título e legenda.');
+        break;
+      }
+      if (!isNum(o.t0) || !isNum(o.t1) || o.t0 < -EPS || o.t1 > c.duration + EPS || o.t1 - o.t0 <= EPS) {
+        push('out_of_range', `t0 e t1 (relativos ao clipe) ficam entre 0 e ${c.duration.toFixed(3)}s, com t0 < t1.`);
+        break;
+      }
+      if (c.duration - round(o.t1 - o.t0) < MIN_DURATION - EPS) push('out_of_range', `O texto ficaria com menos de ${MIN_DURATION}s; remova o clipe.`);
+      break;
+    }
+    case 'removeRanges': {
+      const ranges: unknown = o.ranges;
+      if (!Array.isArray(ranges) || !ranges.length) {
+        push('invalid_param', 'ranges deve ser uma lista de trechos [início, fim] em segundos.');
+        break;
+      }
+      if (ranges.length > MAX_RANGES) {
+        push(
+          'invalid_param',
+          `Até ${MAX_RANGES} trechos por removeRanges (vieram ${ranges.length}). Envie várias removeRanges na mesma etapa, começando pelos trechos do fim do vídeo.`,
+        );
+        break;
+      }
+      const bad = ranges.findIndex((r) => !Array.isArray(r) || r.length !== 2 || !isNum(r[0]) || !isNum(r[1]) || r[0] < 0 || r[0] >= r[1]);
+      if (bad >= 0) {
+        push('invalid_param', `Trecho ${bad + 1}: use [início, fim] em segundos, com 0 ≤ início < fim.`);
+        break;
+      }
+      const plan = planRemoveRanges(p, o.ranges);
+      const locked = lockedTrackError(p, plan);
+      if (locked) push('locked', locked);
+      else if (!plan.length) push('out_of_range', 'Nada para apagar nesses trechos.');
       break;
     }
     case 'setProperty':
@@ -463,6 +572,10 @@ export function expandOp(p: Project, o: Op): Op[] {
   if (o.op === 'addClip' && !o.clip.id) {
     return [{ ...o, clip: { ...o.clip, id: newId(o.clip.kind === 'video' ? 'vid' : o.clip.kind === 'title' ? 'ttl' : 'cap') } }];
   }
+  if (o.op === 'splitClip' && !o.newId) {
+    const kind = findClip(p, o.clipId)!.kind;
+    return [{ ...o, newId: newId(kind === 'video' ? 'vid' : kind === 'title' ? 'ttl' : 'cap') }];
+  }
   if (o.op === 'setKeyframe' && !o.keyframeId) {
     // Edita o ponto que já está nesse instante (do mesmo grupo, se o grupo foi informado).
     const c = findClip(p, o.clipId);
@@ -470,16 +583,12 @@ export function expandOp(p: Project, o: Op): Op[] {
     const existing = near[near.length - 1];
     return [{ ...o, keyframeId: existing?.id ?? newId('kf') }];
   }
+  if (o.op === 'removeRanges') return planRemoveRanges(p, o.ranges);
   if (o.op === 'trimClip') {
     const c = findClip(p, o.clipId)!;
     if (o.ripple === false || c.kind !== 'video') return [{ ...o, ripple: false }];
-    // Vídeo: a borda que mexe no fim do clipe empurra/puxa os vídeos seguintes da faixa.
-    const endShift = o.edge === 'start' ? -o.delta : o.delta;
-    const oldEnd = c.start + c.duration;
-    const ripple: Op[] = p.clips
-      .filter((x) => x.id !== c.id && x.trackId === c.trackId && x.start >= oldEnd - 1e-3 && Math.abs(endShift) > EPS)
-      .map((x) => ({ op: 'updateClip', clipId: x.id, set: { start: round(Math.max(0, x.start + endShift)) } }));
-    return [{ ...o, ripple: false }, ...ripple];
+    // Vídeo: aparar vale como apagar (ou abrir) o pedaço em todas as faixas; o ripple sai do mesmo planejador.
+    return [{ ...o, ripple: false }, ...trimRipple(p, c, o.edge, o.delta)];
   }
   if (o.op !== 'animate') return [o];
   const c = findClip(p, o.clipId)!;
@@ -564,55 +673,6 @@ export function expandOp(p: Project, o: Op): Op[] {
   return ops;
 }
 
-/**
- * Reposiciona os pontos quando a duração do clipe muda (aparar). Grupos que
- * ocupam o clipe inteiro esticam; grupos presos ao fim (saída) acompanham o fim;
- * grupos presos ao começo (entrada) ficam; o resto acompanha o conteúdo
- * (`contentShift`). Pontos que saem do clipe viram um ponto na borda com o
- * valor que a animação tinha ali.
- */
-function remapKeyframes(c: Clip, newDur: number, contentShift: number): void {
-  const D = c.duration;
-  if (Math.abs(newDur - D) < EPS && Math.abs(contentShift) < EPS) return;
-  const groups = new Map(keyframeGroups(c).map((g) => [g.group, g]));
-  const snap = (t: number) => (Math.abs(t) < SAME_T ? 0 : Math.abs(t - newDur) < SAME_T ? newDur : round(t));
-  for (const ap of Object.values(c.props)) {
-    if (!ap.keyframes.length) continue;
-    const mapped = ap.keyframes.map((k) => {
-      const g = k.group ? groups.get(k.group) : undefined;
-      const atStart = !!g && g.start <= SAME_T;
-      const atEnd = !!g && g.end >= D - SAME_T;
-      let t: number;
-      if (atStart && atEnd) t = D > SAME_T ? (k.t / D) * newDur : k.t;
-      else if (atEnd) t = k.t + (newDur - D);
-      else if (atStart) t = k.t;
-      else t = k.t + contentShift;
-      return { ...k, t: snap(t) };
-    });
-    ap.keyframes = clampKeyframes(mapped, newDur, ap.value);
-  }
-}
-
-function clampKeyframes(kfs: Keyframe[], dur: number, value: number): Keyframe[] {
-  const sorted = sortedKeyframes(kfs);
-  const inside: Keyframe[] = [];
-  for (const k of sorted) if (k.t >= -EPS && k.t <= dur + EPS) inside.push({ ...k, t: Math.min(Math.max(k.t, 0), dur) });
-  if (inside.length === sorted.length) return sortedKeyframes(inside);
-  // Cada animação (cada grupo, e os pontos feitos à mão) ganha o próprio ponto na
-  // borda, com o valor da PRÓPRIA curva ali: o valor de uma não vaza para a outra.
-  for (const layer of new Set(sorted.map((k) => k.group ?? ''))) {
-    const own = sorted.filter((k) => (k.group ?? '') === layer);
-    const curve = { value, keyframes: own };
-    const addEdge = (src: Keyframe | undefined, t: number) => {
-      if (!src || inside.some((k) => Math.abs(k.t - t) < SAME_T && sameGroup(k.group, src.group))) return;
-      inside.push({ ...src, t, v: evalProp(curve, t, value) });
-    };
-    addEdge(own.filter((k) => k.t < -EPS).at(-1), 0);
-    addEdge(own.find((k) => k.t > dur + EPS), dur);
-  }
-  return sortedKeyframes(inside);
-}
-
 function applyPrimitive(p: Project, o: Op): void {
   switch (o.op) {
     case 'addMedia':
@@ -621,23 +681,25 @@ function applyPrimitive(p: Project, o: Op): void {
     case 'addClip': {
       const s = o.clip;
       const track = trackForKind(p, s.kind)!;
+      // Tempos no milissegundo, como os que o corte e a divisão gravam: um início de 0,0666… (o passo
+      // de 1/30 do campo "Início") faria cada Ctrl+B deixar um vão de quadro preto entre os pedaços.
       const base = {
         id: s.id!,
         trackId: track.id,
-        start: s.start ?? 0,
+        start: round(s.start ?? 0),
         props: defaultProps(s.kind),
       };
       let clip: Clip;
       if (s.kind === 'video') {
         const m = p.media.find((x) => x.id === s.mediaId)!;
-        const inn = s.in ?? 0;
+        const inn = round(s.in ?? 0);
         clip = {
           ...base,
           kind: 'video',
           name: s.name ?? m.name,
           mediaId: m.id,
           in: inn,
-          duration: s.duration ?? m.duration - inn,
+          duration: round(s.duration ?? m.duration - inn),
           volume: 1,
           muted: false,
         } satisfies VideoClip;
@@ -646,7 +708,7 @@ function applyPrimitive(p: Project, o: Op): void {
           ...base,
           kind: 'title',
           name: s.name ?? 'Título',
-          duration: s.duration ?? 3,
+          duration: round(s.duration ?? 3),
           text: s.text ?? 'Título',
           style: { ...defaultTitleStyle(), ...(s.style ?? {}) },
         } satisfies TitleClip;
@@ -656,7 +718,7 @@ function applyPrimitive(p: Project, o: Op): void {
           ...base,
           kind: 'caption',
           name: s.name ?? 'Legenda',
-          duration: s.duration ?? 2,
+          duration: round(s.duration ?? 2),
           text: s.text ?? 'Nova legenda',
           preset,
           style: { ...captionStyleForPreset(preset), ...(s.style ?? {}) },
@@ -668,14 +730,16 @@ function applyPrimitive(p: Project, o: Op): void {
     case 'updateClip': {
       const c = findClip(p, o.clipId)!;
       const s = o.set;
-      const newDur = s.duration ?? c.duration;
-      const shift = c.kind === 'video' && s.in !== undefined ? -(s.in - c.in) : 0;
+      // Tempos no milissegundo (a validação confere os valores recebidos).
+      const newDur = s.duration !== undefined ? round(s.duration) : c.duration;
+      const newIn = c.kind === 'video' && s.in !== undefined ? round(s.in) : undefined;
+      const shift = c.kind === 'video' && newIn !== undefined ? -(newIn - c.in) : 0;
       remapKeyframes(c, newDur, shift);
       if (s.name !== undefined) c.name = s.name;
-      if (s.start !== undefined) c.start = s.start;
-      if (s.duration !== undefined) c.duration = s.duration;
+      if (s.start !== undefined) c.start = round(s.start);
+      c.duration = newDur;
       if (c.kind === 'video') {
-        if (s.in !== undefined) c.in = s.in;
+        if (newIn !== undefined) c.in = newIn;
         if (s.volume !== undefined) c.volume = s.volume;
         if (s.muted !== undefined) c.muted = s.muted;
       } else {
@@ -704,6 +768,36 @@ function applyPrimitive(p: Project, o: Op): void {
       c.duration = nd;
       if (c.kind === 'video') c.in = round(c.in + d);
       else c.start = round(c.start + d);
+      return;
+    }
+    case 'splitClip': {
+      const i = p.clips.findIndex((x) => x.id === o.clipId);
+      const c = p.clips[i];
+      const L = round(round(o.at) - c.start);
+      const R = round(c.duration - L);
+      const { left, right } = partitionKeyframes(c, L);
+      // Clone inteiro: todos os campos do clipe (inclusive os que vierem depois) passam às duas partes.
+      const piece = structuredClone(c);
+      piece.id = o.newId!;
+      piece.start = round(c.start + L);
+      piece.duration = R;
+      piece.props = right;
+      // in = c.in + L, sem arredondar: o arquivo continua exatamente onde o original para.
+      if (piece.kind === 'video') piece.in += L;
+      c.duration = L;
+      c.props = left;
+      p.clips.splice(i + 1, 0, piece);
+      return;
+    }
+    case 'shiftClips': {
+      const ids = new Set(o.clipIds);
+      for (const c of p.clips) if (ids.has(c.id)) c.start = Math.max(0, round(c.start + o.delta));
+      return;
+    }
+    case 'cutTextTime': {
+      const c = findClip(p, o.clipId)!;
+      c.props = cutKeyframes(c, o.t0, o.t1);
+      c.duration = round(c.duration - round(o.t1 - o.t0));
       return;
     }
     case 'removeClip':
@@ -782,6 +876,8 @@ function applyPrimitive(p: Project, o: Op): void {
       return;
     case 'animate':
       throw new Error('animate deve ser expandida antes de aplicar');
+    case 'removeRanges':
+      throw new Error('removeRanges deve ser expandida antes de aplicar');
   }
 }
 
@@ -827,6 +923,8 @@ export function touchedClipIds(ops: Op[]): string[] {
   for (const o of ops) {
     if ('clipId' in o) ids.add(o.clipId);
     if (o.op === 'addClip' && o.clip.id) ids.add(o.clip.id);
+    if (o.op === 'splitClip' && o.newId) ids.add(o.newId);
+    if (o.op === 'shiftClips') for (const id of o.clipIds) ids.add(id);
   }
   return [...ids];
 }
@@ -842,6 +940,14 @@ export function describeOp(o: Op): string {
       return 'Editar clipe';
     case 'trimClip':
       return o.edge === 'start' ? 'Aparar início' : 'Aparar fim';
+    case 'splitClip':
+      return 'Dividir clipe';
+    case 'shiftClips':
+      return 'Mover clipes';
+    case 'cutTextTime':
+      return 'Encurtar texto';
+    case 'removeRanges':
+      return o.ranges.length === 1 ? 'Apagar trecho' : `Apagar ${o.ranges.length} trechos`;
     case 'removeClip':
       return 'Remover clipe';
     case 'setProperty':

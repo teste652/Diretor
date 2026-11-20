@@ -468,7 +468,7 @@ function ProposalCard({ p }: { p: Proposal }) {
       {stale && <p style={{ color: 'var(--warn)' }}>{p.staleReason}</p>}
       <div className="steps">
         {p.steps.map((st, i) => (
-          <div key={st.id} className={`step ${st.status === 'draft' && !stale ? 'draft' : ''}`} title={st.ops.map(describeOp).join(' · ')}>
+          <div key={st.id} className={`step ${st.status === 'draft' && !stale ? 'draft' : ''}`} title={st.requested.map(describeOp).join(' · ')}>
             <span>
               {i + 1}. {st.label}
               {st.manualOps.length > 0 && ' (ajustada)'}
@@ -493,7 +493,17 @@ function ProposalCard({ p }: { p: Proposal }) {
             <button className="btn primary lg" disabled={locked} onClick={() => s.acceptStep(p.id)} data-testid="accept">
               Aceitar
             </button>
-            <button className="btn lg" disabled={locked} onClick={() => s.discardStep(p.id)} data-testid="discard">
+            <button
+              className="btn lg"
+              disabled={locked}
+              onClick={() => {
+                // Os ajustes à mão vão junto com o rascunho: pergunta antes.
+                const n = step.manualMarks.length;
+                if (n && !confirm(n === 1 ? 'Descartar também o seu ajuste neste rascunho?' : `Descartar também os seus ${n} ajustes neste rascunho?`)) return;
+                s.discardStep(p.id);
+              }}
+              data-testid="discard"
+            >
               Descartar
             </button>
             <button className={`btn lg ${s.adjustMode ? 'on' : 'outline-accent'}`} onClick={() => s.setAdjustMode(!s.adjustMode)} title="Edições à mão vão para o rascunho">

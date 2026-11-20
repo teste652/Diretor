@@ -251,6 +251,8 @@ type ExportJob = {
   proc: ChildProcessWithoutNullStreams;
   outPath: string;
   tmpPath: string;
+  /** O grafo de filtros do ffmpeg, ao lado do temporário. Sai junto com ele, ou assim que o ffmpeg termina bem. */
+  scriptPath: string;
   stderr: string;
   exited: boolean;
   done: Promise<number>;
@@ -271,6 +273,12 @@ function removeQuietly(path: string): void {
   }
 }
 
+/** Apaga o temporário e o script de filtros. Pode ser chamada mais de uma vez e nunca lança erro. */
+function removeTemps(job: ExportJob): void {
+  removeQuietly(job.tmpPath);
+  removeQuietly(job.scriptPath);
+}
+
 const within = (p: Promise<unknown>, ms: number) => Promise.race([p.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), ms))]);
 
 /**
@@ -288,7 +296,7 @@ async function stopFfmpeg(job: ExportJob): Promise<void> {
 }
 
 /**
- * Para o ffmpeg (ou as tentativas de gravar no destino) e apaga o temporário. O
+ * Para o ffmpeg (ou as tentativas de gravar no destino) e apaga os temporários. O
  * destino nunca muda por causa de um cancelamento; se a troca já tinha acontecido
  * (ela é atômica), fica feita. Chamar duas vezes espera o mesmo encerramento.
  */
@@ -296,10 +304,10 @@ function abortExport(id: number, job: ExportJob): Promise<void> {
   job.cancelling ??= (async () => {
     if (job.moving) {
       job.stopMove?.abort();
-      if ('cancelled' in (await job.moving)) removeQuietly(job.tmpPath);
+      if ('cancelled' in (await job.moving)) removeTemps(job);
     } else {
       await stopFfmpeg(job);
-      removeQuietly(job.tmpPath);
+      removeTemps(job);
     }
     jobs.delete(id);
   })();
@@ -329,14 +337,34 @@ ipcMain.handle('export:start', async (_e, { project, outPath }: { project: Proje
   } catch (e) {
     return { error: `Não consigo criar arquivos na pasta ${dirname(file)} (${e instanceof Error ? e.message : String(e)}). Escolha outra pasta.` };
   }
+  // O grafo de filtros vai num arquivo ao lado do temporário, com o mesmo nome.
+  const scriptPath = tmpPath.replace(/\.part$/, '.filtro');
+  // Falhou antes de o ffmpeg começar: não sobra nenhum dos dois.
+  const fail = (error: string) => {
+    removeQuietly(tmpPath);
+    removeQuietly(scriptPath);
+    return { error };
+  };
+  let args: string[];
+  let script: string;
+  try {
+    // Projeto que abre arquivos demais para a linha de comando: o erro já vem em pt-BR.
+    ({ args, script } = buildFfmpegArgs(project, tmpPath, scriptPath));
+  } catch (e) {
+    return fail(e instanceof Error ? e.message : String(e));
+  }
+  try {
+    writeFileSync(scriptPath, script);
+  } catch (e) {
+    return fail(`Não consigo criar arquivos na pasta ${dirname(file)} (${e instanceof Error ? e.message : String(e)}). Escolha outra pasta.`);
+  }
   let proc: ChildProcessWithoutNullStreams;
   try {
-    proc = spawn(ffmpegPath(), buildFfmpegArgs(project, tmpPath));
+    proc = spawn(ffmpegPath(), args);
   } catch (e) {
-    removeQuietly(tmpPath);
-    return { error: `Não consegui iniciar o ffmpeg: ${e instanceof Error ? e.message : String(e)}` };
+    return fail(`Não consegui iniciar o ffmpeg: ${e instanceof Error ? e.message : String(e)}`);
   }
-  const job: ExportJob = { proc, outPath: file, tmpPath, stderr: '', exited: false, done: Promise.resolve(-1) };
+  const job: ExportJob = { proc, outPath: file, tmpPath, scriptPath, stderr: '', exited: false, done: Promise.resolve(-1) };
   job.done = new Promise<number>((res) => {
     proc.on('close', (code) => {
       job.exited = true;
@@ -401,9 +429,11 @@ ipcMain.handle('export:finish', async (_e, jobId: number, abandon?: boolean) => 
   const stderr = job.stderr.trim().slice(-2000);
   if (abandon || code !== 0) {
     jobs.delete(jobId);
-    removeQuietly(job.tmpPath);
+    removeTemps(job);
     return { ok: false, error: abandon ? stderr : stderr || `ffmpeg saiu com código ${code}` };
   }
+  // O ffmpeg terminou bem: o script de filtros não serve mais.
+  removeQuietly(job.scriptPath);
   // Destino preso (player, antivírus): tenta de novo e, se continuar, grava como
   // "nome (1).mp4" em vez de perder o vídeo. Cancelar ou fechar nessa hora cancela.
   job.stopMove = new AbortController();
@@ -672,7 +702,7 @@ function createWindow(): void {
             cancelId: 1,
             title: 'Mudanças não salvas',
             message: 'O projeto tem mudanças que ainda não foram salvas.',
-            detail: 'Se sair agora, elas serão perdidas. Para guardar, cancele e use Salvar (Ctrl+S).',
+            detail: 'Se sair agora, elas serão perdidas. Para guardar, cancele e use Salvar (Ctrl+S). Ajustes num rascunho do Claude só ficam no projeto depois de Aceitar.',
           },
     );
     if (choice === 0) event.preventDefault();

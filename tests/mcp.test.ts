@@ -55,6 +55,18 @@ describe('servidor MCP', () => {
     expect(tools.map((t) => t.name).sort()).toEqual(['cancel_proposal', 'editor_status', 'get_context', 'get_proposal', 'propose_edit']);
   });
 
+  it('a ajuda das operações ensina a dividir e a apagar trechos', async () => {
+    const { tools } = await client.listTools();
+    const d = tools.find((t) => t.name === 'propose_edit')!.description!;
+    expect(d).toContain('"op":"splitClip"');
+    expect(d).toContain('"op":"removeRanges"');
+    expect(d).toMatch(/até 500/);
+    // Dividir de novo a parte da direita na mesma etapa: o newId aparece na ajuda.
+    expect(d).toContain('{"op":"splitClip","clipId","at","newId"?}');
+    // Etapas seguidas de corte: os tempos de cada uma são os da linha do tempo que as anteriores deixam.
+    expect(d).toContain('como as etapas anteriores a deixam');
+  });
+
   it('fluxo: contexto → proposta em rascunho → decisão do usuário → estado', async () => {
     const ctx = await tool('get_context');
     expect(ctx.selection[0]).toMatchObject({ id: 't1', kind: 'title' });

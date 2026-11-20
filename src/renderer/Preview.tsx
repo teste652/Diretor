@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { type Clip, type VideoClip, findClip, projectDuration } from '../core/model';
+import { type Clip, type Project, type VideoClip, findClip, projectDuration } from '../core/model';
 import type { Op } from '../core/operations';
 import { evalClipProp } from '../core/properties';
-import { hitTest, isActiveAt, layoutText, renderFrame, sourceTime, videoRect } from '../core/render';
-import { fmtTime, frameAt, playback, session, usePlayback, useSession } from './store';
+import { hitTest, isActiveAt, layoutText, renderFrame, sourceTime, videoRect, visibleClipsAt } from '../core/render';
+import { fmtTime, frameAt, playback, session, setCompare, shownProject, useCompare, usePlayback, useSession } from './store';
 import { Icon, run, showToast } from './ui';
 import { SEEK_EPSILON, VideoPool, seekExact } from './video';
+import { nextToPrefetch } from './videoSlots';
 
 export const previewPool: { current: VideoPool | null } = { current: null };
+
+const activeVideos = (p: Project, t: number) => p.clips.filter((c): c is VideoClip => c.kind === 'video' && isActiveAt(c, t));
 
 // Última sincronização da prévia parada (vídeos posicionados + quadro desenhado).
 let lastSync: Promise<void> = Promise.resolve();
@@ -24,7 +27,11 @@ export async function previewSettled(): Promise<void> {
 export function Preview() {
   const s = useSession();
   const pb = usePlayback();
-  const view = s.view;
+  const comparing = useCompare();
+  // O projeto que a prévia mostra: a view ou, no "Antes", o projeto gravado.
+  const view = shownProject();
+  /** "Antes": a prévia mostra o projeto sem o rascunho (a mesma condição de shownProject). */
+  const before = comparing && s.draftInfo.ripple;
   const { width: W, height: H, fps } = view.settings;
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -38,13 +45,16 @@ export function Preview() {
   };
   const drag = useRef<{ clipId: string; sx: number; sy: number; dx: number; dy: number } | null>(null);
   const raf = useRef(0);
+  // Na reprodução, o mesmo teste do tick (cada vídeo ativo tem quadro): um elemento que termina de
+  // buscar ou carregar não faz desenhar enquanto outro vídeo ativo ainda está trocando. Parado: null.
+  const framesGate = useRef<(() => boolean) | null>(null);
 
   const draw = useCallback(() => {
     const cv = canvasRef.current;
     const pool = previewPool.current;
     if (!cv || !pool) return;
     const ctx = cv.getContext('2d')!;
-    const p = session.view;
+    const p = shownProject();
     renderFrame(ctx, p, playback.get().time, {
       getVideoFrame: (c) => pool.frame(c),
       dragOffset: drag.current ? { clipId: drag.current.clipId, dx: drag.current.dx, dy: drag.current.dy } : null,
@@ -53,7 +63,10 @@ export function Preview() {
 
   if (!previewPool.current)
     previewPool.current = new VideoPool(
-      () => requestAnimationFrame(draw),
+      () =>
+        requestAnimationFrame(() => {
+          if (!framesGate.current || framesGate.current()) draw();
+        }),
       true,
       (path, msg) => showToast(`Não consegui abrir ${path.split(/[\\/]/).pop()}: ${msg}`, true),
     );
@@ -74,14 +87,17 @@ export function Preview() {
   useEffect(() => {
     const pool = previewPool.current!;
     pool.prune(view);
-    for (const c of view.clips) if (c.kind === 'video') pool.element(c, view);
+    pool.warm(view);
     if (pb.playing) return;
-    for (const [, el] of pool.all()) if (!el.paused) el.pause();
+    for (const el of pool.all()) if (!el.paused) el.pause();
     const t = pb.time;
-    const active = view.clips.filter((c): c is VideoClip => c.kind === 'video' && isActiveAt(c, t));
-    const els = active.map((c) => ({ c, el: pool.element(c, view) })).filter((x): x is { c: VideoClip; el: HTMLVideoElement } => !!x.el);
+    const active = activeVideos(view, t);
+    const protect = new Set(active.map((c) => c.id));
+    const els = active.map((c) => ({ c, el: pool.element(c, view, protect) })).filter((x): x is { c: VideoClip; el: HTMLVideoElement } => !!x.el);
     const settled = els.every(({ c, el }) => !!el.error || (el.readyState >= 2 && !el.seeking && Math.abs(el.currentTime - (sourceTime(c, t) + SEEK_EPSILON)) < 1e-3));
-    lastSync = Promise.all(els.map(({ c, el }) => seekExact(el, sourceTime(c, t)))).then(draw);
+    lastSync = Promise.all(els.map(({ c, el }) => seekExact(el, sourceTime(c, t)))).then(() => {
+      if (!playback.get().playing) draw();
+    });
     // Só desenha já se nenhum vídeo precisa buscar quadro: durante a busca o
     // canvas continua mostrando o quadro anterior (sem piscar preto).
     if (settled) draw();
@@ -95,32 +111,50 @@ export function Preview() {
     let anchor = { wall: performance.now(), t: playback.get().time };
     let epoch = playback.epoch();
     let stopped = false;
+    // Toca os vídeos ativos, prepara o pedaço da próxima emenda e pausa o resto.
     const sync = (p: typeof view, t: number, hard: boolean) => {
       const videoTrack = p.tracks.find((tr) => tr.kind === 'video');
-      for (const c of p.clips) {
-        if (c.kind !== 'video') continue;
-        const el = pool.element(c, p);
-        if (!el || el.error) continue;
-        if (isActiveAt(c, t)) {
-          el.volume = Math.max(0, Math.min(1, volumeRef.current * c.volume));
-          el.muted = c.muted || !!videoTrack?.hidden;
-          const want = sourceTime(c, t);
-          if (hard || Math.abs(el.currentTime - want) > 0.3) el.currentTime = want;
-          if (el.paused) void el.play().catch(() => undefined);
-        } else if (!el.paused) el.pause();
+      const active = activeVideos(p, t);
+      const protect = new Set(active.map((c) => c.id));
+      const playing = new Set<HTMLVideoElement>();
+      for (const c of active) {
+        const el = pool.element(c, p, protect);
+        if (!el) continue;
+        playing.add(el);
+        if (el.error) continue;
+        el.volume = Math.max(0, Math.min(1, volumeRef.current * c.volume));
+        el.muted = c.muted || !!videoTrack?.hidden;
+        const want = sourceTime(c, t);
+        const off = Math.abs(el.currentTime - want);
+        if ((hard && off > 1e-3) || off > 0.3) el.currentTime = want;
+        if (el.paused) void el.play().catch(() => undefined);
       }
+      const next = nextToPrefetch(p, t, active);
+      if (next) pool.prefetch(next, p, protect);
+      for (const el of pool.all()) if (!playing.has(el) && !el.paused) el.pause();
     };
     const masterTime = (p: typeof view, t: number): number | null => {
-      for (const c of p.clips) {
-        if (c.kind !== 'video' || !isActiveAt(c, t)) continue;
-        const el = pool.element(c, p);
-        if (el && !el.paused && !el.seeking && el.readyState >= 3) return c.start + (el.currentTime - c.in);
+      for (const c of activeVideos(p, t)) {
+        const el = pool.peek(c);
+        // Um pedaço que continua o anterior no mesmo elemento pode estar uns milissegundos antes da
+        // emenda: o relógio não volta para o pedaço anterior, que já entregou o elemento.
+        if (el && !el.paused && !el.seeking && el.readyState >= 3) return Math.max(c.start, c.start + (el.currentTime - c.in));
       }
       return null;
     };
+    // Cada vídeo que aparece (fora de faixa oculta, como no renderFrame) tem quadro (ou erro). Enquanto um
+    // elemento busca ou carrega, o canvas fica com o último quadro bom em vez de piscar preto; um vídeo
+    // escondido não segura os textos. Sem elemento (mídia fora do projeto), não há o que esperar.
+    const framesReady = (p: typeof view, t: number) =>
+      visibleClipsAt(p, t)
+        .filter((c): c is VideoClip => c.kind === 'video')
+        .every((c) => {
+          const el = pool.peek(c);
+          return !el || !!el.error || (el.readyState >= 2 && !el.seeking);
+        });
     const tick = () => {
       if (stopped) return;
-      const p = session.view;
+      const p = shownProject();
       const now = performance.now();
       if (playback.epoch() !== epoch) {
         // O usuário clicou em outro ponto durante a reprodução.
@@ -142,10 +176,11 @@ export function Preview() {
       }
       playback.set({ time: t });
       sync(p, t, false);
-      draw();
+      if (framesReady(p, t)) draw();
       raf.current = requestAnimationFrame(tick);
     };
-    sync(session.view, anchor.t, true);
+    framesGate.current = () => framesReady(shownProject(), playback.get().time);
+    sync(shownProject(), anchor.t, true);
     raf.current = requestAnimationFrame(tick);
     // Janela minimizada: o rAF para, então pausa tudo (o som não passa do ponto de corte).
     const onVisibility = () => {
@@ -154,9 +189,10 @@ export function Preview() {
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
       stopped = true;
+      framesGate.current = null;
       cancelAnimationFrame(raf.current);
       document.removeEventListener('visibilitychange', onVisibility);
-      for (const [, el] of pool.all()) el.pause();
+      for (const el of pool.all()) el.pause();
       session.setPlayhead(playback.get().time);
     };
   }, [pb.playing, draw]);
@@ -167,9 +203,11 @@ export function Preview() {
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
+    // No "Antes" só se olha: clicar não seleciona nem arrasta.
+    if (before) return;
     const ctx = canvasRef.current!.getContext('2d')!;
     const { x, y } = toProject(e);
-    const hit = hitTest(ctx, session.view, playback.get().time, x, y, (c) => previewPool.current!.frame(c));
+    const hit = hitTest(ctx, shownProject(), playback.get().time, x, y, (c) => previewPool.current!.frame(c));
     if (!hit) {
       session.setSelection({ clipIds: [] });
       return;
@@ -229,7 +267,17 @@ export function Preview() {
         )}
         {s.activeStep && (
           <div className="draft-flag">
-            <span className="badge">Rascunho: {s.activeStep.label}</span>
+            <span className="badge">{before ? 'Antes do rascunho' : `Rascunho: ${s.activeStep.label}`}</span>
+            {draft.ripple && (
+              <>
+                <button className={`btn small ${before ? 'on' : ''}`} aria-pressed={before} title="Ver o projeto sem o rascunho" onClick={() => setCompare(true)} data-testid="ab-before">
+                  Antes
+                </button>
+                <button className={`btn small ${before ? '' : 'on'}`} aria-pressed={!before} title="Ver o projeto com o rascunho" onClick={() => setCompare(false)} data-testid="ab-after">
+                  Depois
+                </button>
+              </>
+            )}
           </div>
         )}
         {view.clips.length === 0 && <div className="empty" style={{ position: 'absolute' }}>Adicione um MP4 em “Mídia” para começar.</div>}
@@ -263,7 +311,7 @@ export function Preview() {
 
 export function togglePlay() {
   const { playing, time } = playback.get();
-  const p = session.view;
+  const p = shownProject();
   const end = projectDuration(p);
   if (!playing && time >= end - 1.5 / p.settings.fps) playback.seek(0);
   playback.set({ playing: !playing && end > 0 });
@@ -272,11 +320,11 @@ export function togglePlay() {
 function selectionBox(c: Clip, time: number, canvas: HTMLCanvasElement, k: number) {
   if (!isActiveAt(c, time)) return null;
   const ctx = canvas.getContext('2d')!;
-  const p = session.view;
+  const p = shownProject();
   const offX = canvas.offsetLeft;
   const offY = canvas.offsetTop;
   if (c.kind === 'video') {
-    const f = previewPool.current?.frame(c);
+    const f = previewPool.current?.frame(c) ?? previewPool.current?.videoSize(c);
     if (!f) return null;
     const r = videoRect(p, c, f, time);
     return { left: offX + r.x * k, top: offY + r.y * k, w: r.w * k, h: r.h * k };
