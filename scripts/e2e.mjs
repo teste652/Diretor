@@ -348,6 +348,13 @@ check('MP4 marcado como BT.709', /bt709/.test(probe), /Video: .*/.exec(probe)?.[
 // original, então o quadro f da linha do tempo deve mostrar o quadro 30 + f do arquivo.
 // Inclui quadros que não são múltiplos de 3 (onde 1/30 não é exato em ponto flutuante).
 const COUNTER = '100:34:2:2'; // número do quadro escrito pelo testsrc2
+const srcPng = (n) => {
+  const png = join(out, `original-q${n}.png`);
+  if (!existsSync(png)) frameOf(src, n, png);
+  return png;
+};
+// PSNR do contador contra os quadros n-1, n e n+1 do original: o do meio ganha com folga.
+const best = (v) => v[1] > v[0] + 3 && v[1] > v[2] + 3;
 for (const f of [2, 3, 5, 8, 18, 36, 44, 60, 101, 117]) {
   await ev((tt) => window.__diretor.playback.seek(tt), f / 30);
   await settled();
@@ -357,15 +364,9 @@ for (const f of [2, 3, 5, 8, 18, 36, 44, 60, 101, 117]) {
   const expPng = join(out, `cmp-export-q${f}.png`);
   frameOf(mp4, f, expPng);
   const full = psnr(prevPng, expPng);
-  const srcPng = (n) => {
-    const png = join(out, `original-q${n}.png`);
-    if (!existsSync(png)) frameOf(src, n, png);
-    return png;
-  };
   const n = 30 + f;
   const ex = [n - 1, n, n + 1].map((k) => psnr(expPng, srcPng(k), COUNTER));
   const pv = [n - 1, n, n + 1].map((k) => psnr(prevPng, srcPng(k), COUNTER));
-  const best = (v) => v[1] > v[0] + 3 && v[1] > v[2] + 3;
   check(`quadro ${f}: prévia = exportação = quadro ${n} do original`, full > 30 && best(ex) && best(pv), `PSNR ${full.toFixed(1)} dB; contador exp ${ex.map((v) => v.toFixed(0)).join('/')} prévia ${pv.map((v) => v.toFixed(0)).join('/')}`);
 }
 
@@ -724,6 +725,95 @@ check(
 );
 await discardOpen();
 await page.click('[data-testid=ai-tab-claude]');
+
+// ---------- Entrega 1: dividir e apagar trecho ----------
+const freshProject = (name) =>
+  ev((n) => {
+    const s = window.__diretor.session;
+    s.dirty = false;
+    const p = structuredClone(s.project);
+    p.clips = [];
+    p.media = [];
+    p.name = n;
+    p.tracks = p.tracks.map((t) => ({ ...t, hidden: false, locked: false }));
+    s.load(p, null);
+  }, name);
+const e1State = () =>
+  ev(() => {
+    const p = window.__diretor.session.project;
+    const r = (n) => Math.round(n * 1000) / 1000;
+    const of = (k) => p.clips.filter((c) => c.kind === k).sort((a, b) => a.start - b.start);
+    return {
+      dur: r(Math.max(...p.clips.map((c) => c.start + c.duration))),
+      vids: of('video').map((c) => [r(c.start), r(c.start + c.duration), r(c.in)]),
+      caps: of('caption').map((c) => [r(c.start), r(c.start + c.duration)]),
+    };
+  });
+await freshProject('Cortes');
+await ev((f) => window.__diretor.importPaths([f]), src);
+await page.waitForFunction(() => window.__diretor.session.project.clips.length === 1);
+// [Tarefa 9 troca por teclado] dividir em 2 s
+await ev(() => { const s = window.__diretor.session; s.dispatch([{ op: 'splitClip', clipId: s.project.clips[0].id, at: 2 }]); });
+await ev(() => window.__diretor.session.dispatch([
+  { op: 'addClip', clip: { kind: 'caption', text: 'depois do corte', start: 3.6, duration: 1 } },
+  { op: 'addClip', clip: { kind: 'caption', text: 'atravessa o corte', start: 2.8, duration: 0.5 } },
+]));
+// [Tarefa 9 troca por teclado] apagar [3; 3,5]
+await ev(() => window.__diretor.session.dispatch([{ op: 'removeRanges', ranges: [[3, 3.5]] }]));
+const e1 = await e1State();
+check(
+  'dividir e apagar trecho: pedaços certos e legendas sincronizadas',
+  JSON.stringify(e1) === JSON.stringify({ dur: 5.5, vids: [[0, 2, 0], [2, 3, 2], [3, 5.5, 3.5]], caps: [[2.8, 3], [3.1, 4.1]] }),
+  JSON.stringify(e1),
+);
+
+// Prévia x exportação nas emendas: os pedaços [0,2) in 0, [2,3) in 2 e [3;5,5) in 3,5 mostram, no
+// quadro f da linha do tempo, o quadro n do original.
+const cortes = join(out, 'cortes.mp4');
+const tE1 = Date.now();
+const expE1 = await ev((p) => window.__diretor.exportProject(window.__diretor.session.project, { outPath: p }), cortes);
+check('exporta o projeto com cortes', expE1.ok, expE1.error ?? `${((Date.now() - tE1) / 1000).toFixed(1)}s`);
+for (const [f, n] of [[89, 89], [90, 105], [95, 110]]) {
+  await ev((tt) => window.__diretor.playback.seek(tt), f / 30);
+  await settled();
+  const dataUrl = await ev(() => document.querySelector('[data-testid=preview-canvas]').toDataURL('image/png'));
+  const prevPng = join(out, `cortes-previa-q${f}.png`);
+  writeFileSync(prevPng, Buffer.from(dataUrl.split(',')[1], 'base64'));
+  const expPng = join(out, `cortes-export-q${f}.png`);
+  frameOf(cortes, f, expPng);
+  const full = psnr(prevPng, expPng);
+  const ex = [n - 1, n, n + 1].map((k) => psnr(expPng, srcPng(k), COUNTER));
+  const pv = [n - 1, n, n + 1].map((k) => psnr(prevPng, srcPng(k), COUNTER));
+  check(`com cortes, quadro ${f}: prévia = exportação = quadro ${n} do original`, full > 30 && best(ex) && best(pv), `PSNR ${full.toFixed(1)} dB; contador exp ${ex.map((v) => v.toFixed(0)).join('/')} prévia ${pv.map((v) => v.toFixed(0)).join('/')}`);
+}
+
+await ev(() => window.__diretor.playback.seek(1.7));
+await settled();
+await ev(() => {
+  window.__lum = [];
+  const cv = document.querySelector('[data-testid=preview-canvas]');
+  const small = Object.assign(document.createElement('canvas'), { width: 32, height: 18 });
+  const g = small.getContext('2d', { willReadFrequently: true });
+  const tick = () => {
+    if (!window.__diretor.playback.get().playing) return;
+    g.drawImage(cv, 0, 0, 32, 18);
+    const d = g.getImageData(0, 0, 32, 18).data;
+    let s = 0;
+    for (let i = 0; i < d.length; i += 4) s += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+    window.__lum.push([window.__diretor.playback.get().time, s / (d.length / 4)]);
+    requestAnimationFrame(tick);
+  };
+  window.__diretor.playback.set({ playing: true });
+  requestAnimationFrame(tick);
+});
+await page.waitForTimeout(1600);
+await ev(() => window.__diretor.playback.set({ playing: false }));
+const lum = await ev(() => window.__lum);
+check(
+  'a reprodução passa pelas emendas (2 s e 3 s) sem quadro preto',
+  lum.length > 10 && lum.some(([t]) => t > 3.05) && lum.every(([, l]) => l > 10),
+  `${lum.length} quadros, luz mínima ${Math.min(...lum.map(([, l]) => l)).toFixed(0)}`,
+);
 
 writeFileSync(join(out, 'resultado.json'), JSON.stringify(results, null, 2));
 await client.close();

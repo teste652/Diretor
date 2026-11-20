@@ -78,8 +78,10 @@ export async function exportProject(
         if (signal.cancelled) return await stop('Cancelado.');
         const t = f / fps;
         const active = project.clips.filter((c): c is VideoClip => c.kind === 'video' && isActiveAt(c, t));
+        // Os pedaços do quadro não tomam o elemento um do outro.
+        const protect = new Set(active.map((c) => c.id));
         for (const c of active) {
-          const el = pool.element(c, project);
+          const el = pool.element(c, project, protect);
           if (el) await seekExact(el, sourceTime(c, t));
         }
         if (pool.failed.size) return await stop(`Um vídeo parou de abrir durante a exportação: ${[...pool.failed.keys()].join(', ')}`);

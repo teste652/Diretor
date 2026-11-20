@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { type Clip, type VideoClip, findClip, projectDuration } from '../core/model';
+import { type Clip, type Project, type VideoClip, findClip, projectDuration } from '../core/model';
 import type { Op } from '../core/operations';
 import { evalClipProp } from '../core/properties';
 import { hitTest, isActiveAt, layoutText, renderFrame, sourceTime, videoRect } from '../core/render';
 import { fmtTime, frameAt, playback, session, usePlayback, useSession } from './store';
 import { Icon, run, showToast } from './ui';
 import { SEEK_EPSILON, VideoPool, seekExact } from './video';
+import { nextToPrefetch } from './videoSlots';
 
 export const previewPool: { current: VideoPool | null } = { current: null };
+
+const activeVideos = (p: Project, t: number) => p.clips.filter((c): c is VideoClip => c.kind === 'video' && isActiveAt(c, t));
 
 // Última sincronização da prévia parada (vídeos posicionados + quadro desenhado).
 let lastSync: Promise<void> = Promise.resolve();
@@ -74,12 +77,13 @@ export function Preview() {
   useEffect(() => {
     const pool = previewPool.current!;
     pool.prune(view);
-    for (const c of view.clips) if (c.kind === 'video') pool.element(c, view);
+    pool.warm(view);
     if (pb.playing) return;
-    for (const [, el] of pool.all()) if (!el.paused) el.pause();
+    for (const el of pool.all()) if (!el.paused) el.pause();
     const t = pb.time;
-    const active = view.clips.filter((c): c is VideoClip => c.kind === 'video' && isActiveAt(c, t));
-    const els = active.map((c) => ({ c, el: pool.element(c, view) })).filter((x): x is { c: VideoClip; el: HTMLVideoElement } => !!x.el);
+    const active = activeVideos(view, t);
+    const protect = new Set(active.map((c) => c.id));
+    const els = active.map((c) => ({ c, el: pool.element(c, view, protect) })).filter((x): x is { c: VideoClip; el: HTMLVideoElement } => !!x.el);
     const settled = els.every(({ c, el }) => !!el.error || (el.readyState >= 2 && !el.seeking && Math.abs(el.currentTime - (sourceTime(c, t) + SEEK_EPSILON)) < 1e-3));
     lastSync = Promise.all(els.map(({ c, el }) => seekExact(el, sourceTime(c, t)))).then(draw);
     // Só desenha já se nenhum vídeo precisa buscar quadro: durante a busca o
@@ -95,29 +99,44 @@ export function Preview() {
     let anchor = { wall: performance.now(), t: playback.get().time };
     let epoch = playback.epoch();
     let stopped = false;
+    // Toca os vídeos ativos, prepara o pedaço da próxima emenda e pausa o resto.
     const sync = (p: typeof view, t: number, hard: boolean) => {
       const videoTrack = p.tracks.find((tr) => tr.kind === 'video');
-      for (const c of p.clips) {
-        if (c.kind !== 'video') continue;
-        const el = pool.element(c, p);
-        if (!el || el.error) continue;
-        if (isActiveAt(c, t)) {
-          el.volume = Math.max(0, Math.min(1, volumeRef.current * c.volume));
-          el.muted = c.muted || !!videoTrack?.hidden;
-          const want = sourceTime(c, t);
-          if (hard || Math.abs(el.currentTime - want) > 0.3) el.currentTime = want;
-          if (el.paused) void el.play().catch(() => undefined);
-        } else if (!el.paused) el.pause();
+      const active = activeVideos(p, t);
+      const protect = new Set(active.map((c) => c.id));
+      const playing = new Set<HTMLVideoElement>();
+      for (const c of active) {
+        const el = pool.element(c, p, protect);
+        if (!el) continue;
+        playing.add(el);
+        if (el.error) continue;
+        el.volume = Math.max(0, Math.min(1, volumeRef.current * c.volume));
+        el.muted = c.muted || !!videoTrack?.hidden;
+        const want = sourceTime(c, t);
+        const off = Math.abs(el.currentTime - want);
+        if ((hard && off > 1e-3) || off > 0.3) el.currentTime = want;
+        if (el.paused) void el.play().catch(() => undefined);
       }
+      const next = nextToPrefetch(p, t, active);
+      if (next) pool.prefetch(next, p, protect);
+      for (const el of pool.all()) if (!playing.has(el) && !el.paused) el.pause();
     };
     const masterTime = (p: typeof view, t: number): number | null => {
-      for (const c of p.clips) {
-        if (c.kind !== 'video' || !isActiveAt(c, t)) continue;
-        const el = pool.element(c, p);
-        if (el && !el.paused && !el.seeking && el.readyState >= 3) return c.start + (el.currentTime - c.in);
+      for (const c of activeVideos(p, t)) {
+        const el = pool.peek(c);
+        // Um pedaço que continua o anterior no mesmo elemento pode estar uns milissegundos antes da
+        // emenda: o relógio não volta para o pedaço anterior, que já entregou o elemento.
+        if (el && !el.paused && !el.seeking && el.readyState >= 3) return Math.max(c.start, c.start + (el.currentTime - c.in));
       }
       return null;
     };
+    // Cada vídeo ativo tem quadro (ou erro). Enquanto um elemento busca ou carrega, o canvas fica com o
+    // último quadro bom em vez de piscar preto. Sem elemento (mídia fora do projeto), não há o que esperar.
+    const framesReady = (p: typeof view, t: number) =>
+      activeVideos(p, t).every((c) => {
+        const el = pool.peek(c);
+        return !el || !!el.error || (el.readyState >= 2 && !el.seeking);
+      });
     const tick = () => {
       if (stopped) return;
       const p = session.view;
@@ -142,7 +161,7 @@ export function Preview() {
       }
       playback.set({ time: t });
       sync(p, t, false);
-      draw();
+      if (framesReady(p, t)) draw();
       raf.current = requestAnimationFrame(tick);
     };
     sync(session.view, anchor.t, true);
@@ -156,7 +175,7 @@ export function Preview() {
       stopped = true;
       cancelAnimationFrame(raf.current);
       document.removeEventListener('visibilitychange', onVisibility);
-      for (const [, el] of pool.all()) el.pause();
+      for (const el of pool.all()) el.pause();
       session.setPlayhead(playback.get().time);
     };
   }, [pb.playing, draw]);
