@@ -1124,8 +1124,8 @@ check(
   - O e2e apaga os MP4 grandes quando a verificação passa.
   - Os testes de 500 trechos medem o melhor de três.
   - O README e o roteiro de teste descrevem a Entrega 1.
-- **Pendências depois da revisão final (para um PR pequeno logo depois desta entrega):**
-  - Com um ajuste seu no rascunho de corte, a recusa do `replaces` manda o Claude usar `appendTo`. A etapa acrescentada guarda a base de tempo da view, que já tem o seu corte, e o Claude não vê esse corte. Assim, um corte acrescentado pode sair deslocado pelo tamanho do seu corte, sem ficar desatualizado. Regra para o PR: enquanto o rascunho tiver ajustes seus, `appendTo` com `removeRanges` ou `splitClip` é recusado, e a mensagem pede para esperar Aceitar ou Descartar.
-  - Uma divisão à mão (Ctrl+B) num rascunho de corte muda a base de tempo sem mudar nenhum tempo, e a etapa seguinte fica desatualizada com um motivo falso.
-  - O comentário de `shouldRouteToDraft` sobre o `clipId` está desatualizado.
+- **Pendências depois da revisão final (as três primeiras resolvidas no PR seguinte, logo depois desta entrega):**
+  - Com um ajuste seu no rascunho de corte, a recusa do `replaces` manda o Claude usar `appendTo`. A etapa acrescentada guarda a base de tempo da view, que já tem o seu corte, e o Claude não vê esse corte. Assim, um corte acrescentado pode sair deslocado pelo tamanho do seu corte, sem ficar desatualizado. Resolvido assim: enquanto o rascunho aberto tiver ajustes seus, `appendTo` e `replaces` são recusados com `proposal_pending`, e a mensagem pede para esperar Aceitar ou Descartar e ler o `get_context` de novo. Depois de aceitar uma etapa com ajustes seus, `appendTo` com uma `baseRevision` anterior é recusado com `stale_revision` (`manualRevision` na proposta).
+  - Uma divisão à mão (Ctrl+B) num rascunho de corte mudava a base de tempo sem mudar nenhum tempo, e a etapa seguinte ficava desatualizada com um motivo falso. Resolvido: a base de tempo junta os pedaços que continuam um ao outro, no tempo e no arquivo.
+  - O comentário de `shouldRouteToDraft` sobre o `clipId` estava desatualizado. Resolvido.
   - Com um rascunho de corte aberto, Adicionar legenda ou título na agulha vai para o projeto no tempo da view. Isso vem da rota da Tarefa 4.

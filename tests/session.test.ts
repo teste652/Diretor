@@ -824,7 +824,8 @@ describe('ajustes seus no rascunho do Claude', () => {
     const r = s.propose({ baseRevision: s.project.revision, title: 'Outro corte', replaces: open.id, steps: [{ label: 'Corte', ops: [{ op: 'removeRanges', ranges: [[20, 21]] }] }] });
     expect(r.ok).toBe(false);
     expect(r.ok === false && r.code).toBe('proposal_pending');
-    expect(r.ok === false && r.message).toMatch(/appendTo/);
+    expect(r.ok === false && r.message).toMatch(/aceitar ou descartar/);
+    expect(r.ok === false && r.message).not.toMatch(/appendTo/);
     expect(s.openProposal?.id).toBe(open.id);
     expect(s.draftEdits).toBe(1);
   });
@@ -928,6 +929,57 @@ describe('etapas de corte seguidas', () => {
     s.discardStep();
     expect(p.status).toBe('active');
     expect(s.activeStep?.label).toBe('Texto');
+  });
+
+  it('o Claude não acrescenta etapas a um rascunho com ajustes seus', () => {
+    const s = fixture();
+    const first = s.propose({ baseRevision: s.project.revision, title: 'Cortes', steps: [cutStep('Primeiro', [[2, 3]])] });
+    if (!first.ok) throw new Error(first.message);
+    expect(s.dispatch([{ op: 'removeRanges', ranges: [[0.5, 1]] }])).toEqual({ ok: true, target: 'draft' });
+    // O Claude não vê o seu corte: a legenda que ele acha em 6 está em 5,5 no rascunho.
+    const more = s.propose({ baseRevision: s.project.revision, title: 'Cortes', appendTo: first.proposal.id, steps: [cutStep('Segundo', [[6, 7]])] });
+    expect(more.ok).toBe(false);
+    expect(more.ok === false && more.code).toBe('proposal_pending');
+    expect(more.ok === false && more.message).toMatch(/aceitar ou descartar/);
+    expect(first.proposal.steps).toHaveLength(1);
+    // Sem o ajuste (Ctrl+Z), o Claude volta a poder acrescentar.
+    s.undo();
+    expect(s.draftEdits).toBe(0);
+    expect(s.propose({ baseRevision: s.project.revision, title: 'Cortes', appendTo: first.proposal.id, steps: [cutStep('Segundo', [[6, 7]])] }).ok).toBe(true);
+  });
+
+  it('depois de aceitar um rascunho com ajustes seus, acrescentar pede o contexto novo', () => {
+    const s = fixture();
+    const old = s.project.revision;
+    const first = s.propose({ baseRevision: old, title: 'Cortes', steps: [cutStep('Primeiro', [[2, 3]])] });
+    if (!first.ok) throw new Error(first.message);
+    s.dispatch([{ op: 'removeRanges', ranges: [[0.5, 1]] }]);
+    expect(s.acceptStep()).toBe(true);
+    expect(first.proposal.status).toBe('done');
+    // Com a revisão de antes, o Claude ainda acha a legenda em 6.
+    const stale = s.propose({ baseRevision: old, title: 'Cortes', appendTo: first.proposal.id, steps: [cutStep('Segundo', [[6, 7]])] });
+    expect(stale.ok === false && stale.code).toBe('stale_revision');
+    expect(stale.ok === false && stale.message).toMatch(/ajustes feitos à mão/);
+    // Com o contexto novo, a legenda está em 5,5.
+    expect(findClip(s.project, 'alvo')!.start).toBe(5.5);
+    const fresh = s.propose({ baseRevision: s.project.revision, title: 'Cortes', appendTo: first.proposal.id, steps: [cutStep('Segundo', [[5.5, 6.5]])] });
+    expect(fresh.ok).toBe(true);
+    expect(s.acceptStep()).toBe(true);
+    expect(findClip(s.project, 'alvo')).toBeUndefined();
+    expect(projectDuration(s.project)).toBe(17.5);
+  });
+
+  it('uma divisão sua na primeira não desatualiza a segunda', () => {
+    const s = fixture();
+    const p = proposeTwo(s);
+    const piece = s.view.clips.find((c) => c.kind === 'video' && c.start <= 12 && 12 < c.start + c.duration)!;
+    expect(s.dispatch([{ op: 'splitClip', clipId: piece.id, at: 12 }])).toEqual({ ok: true, target: 'draft' });
+    expect(s.acceptStep()).toBe(true);
+    expect(p.status).toBe('active');
+    expect(s.activeStep?.label).toBe('Segundo');
+    expect(s.acceptStep()).toBe(true);
+    expect(findClip(s.project, 'alvo')).toBeUndefined();
+    expect(vids(s.project)).toEqual([[0, 2, 0], [2, 4, 3], [6, 5, 8], [11, 7, 13]]);
   });
 
   it('appendTo com os tempos do rascunho segue normal', () => {
