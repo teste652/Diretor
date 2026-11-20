@@ -251,8 +251,8 @@ describe('som com cortes (montagem)', () => {
   it('cada trecho é recarimbado depois do apad', () => {
     const p = applyOps(audioProject([{ id: 'v1', start: 0, duration: 4, in: 0, volume: 0.5 }]), [{ op: 'removeRanges', ranges: [[1, 1.5]] }]).project;
     const { script } = cmd(p);
-    expect(script).toContain('apad=whole_len=48000,asetpts=N/SR/TB,volume=0.5[s0]');
-    expect(script).toContain('apad=whole_len=120000,asetpts=N/SR/TB,volume=0.5[s1]');
+    expect(script).toContain('apad=whole_len=48000,asetpts=round(N/SR/TB),volume=0.5[s0]');
+    expect(script).toContain('apad=whole_len=120000,asetpts=round(N/SR/TB),volume=0.5[s1]');
   });
 });
 
@@ -311,6 +311,26 @@ describe('som com cortes (ffmpeg)', () => {
       '-c:v', 'libx264', '-g', '15', '-pix_fmt', 'yuv420p', '-c:a', 'aac', short,
     ]);
   }, 60_000);
+
+  it('o asetpts arredonda: nenhum quadro de som sai uma amostra adiantado', () => {
+    // O ffmpeg calcula N/SR/TB em double: 3003/48000/(1/48000) dá 3002,9999…, que truncado vira 3002.
+    const g = audioGraph([{ mediaId: 'm', path: 'x.mp4', tl0: 0, src0: 2003, n: 897997, volume: 1 }], 897997, 0);
+    const seg = g.filters.find((f) => f.endsWith('[s0]'))!;
+    const chain = `${seg.replace(/^\[i0_0\]/, '').replace(/\[s0\]$/, '')},ashowinfo`;
+    const r = spawnSync(FFMPEG, ['-hide_banner', '-nostats', '-f', 'lavfi', '-i', 'sine=frequency=330:sample_rate=48000:duration=20', '-af', chain, '-f', 'null', '-'], { encoding: 'utf8' });
+    const pts = [...r.stderr.matchAll(/pts:(\d+)/g)].map((m) => Number(m[1]));
+    const sizes = [...r.stderr.matchAll(/nb_samples:(\d+)/g)].map((m) => Number(m[1]));
+    expect(pts.length).toBeGreaterThan(800);
+    expect(sizes).toHaveLength(pts.length);
+    // Cada quadro começa onde o anterior acaba: pts = soma das amostras de antes.
+    const off: string[] = [];
+    let sum = 0;
+    pts.forEach((p, i) => {
+      if (p !== sum) off.push(`quadro ${i}: pts ${p}, esperado ${sum}`);
+      sum += sizes[i];
+    });
+    expect(off).toEqual([]);
+  });
 
   it('300 pedaços: duração certa e som sem buraco', async () => {
     const ranges = Array.from({ length: 299 }, (_, i): TimeRange => [round(0.1 * (i + 1) - 0.02), round(0.1 * (i + 1))]);

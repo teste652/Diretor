@@ -50,6 +50,15 @@ const check = (name, ok, extra = '') => {
   results.push({ name, ok: !!ok, extra });
   console.log(`${ok ? '✓' : '✗'} ${name}${extra ? ' — ' + extra : ''}`);
 };
+// Vídeo grande que já foi conferido sai da pasta (o artefato do CI fica leve); se a verificação falhou, fica para olhar.
+const dropIfOk = (file, ok) => {
+  if (!ok) return;
+  try {
+    rmSync(file, { force: true });
+  } catch {
+    /* preso no Windows: fica para o artefato */
+  }
+};
 const frameOf = (file, n, png) => execFileSync(FFMPEG, ['-y', '-loglevel', 'error', '-i', file, '-vf', `select=eq(n\\,${n})`, '-frames:v', '1', png]);
 const psnr = (a, b, crop) => {
   const lavfi = crop ? `[0]crop=${crop}[a];[1]crop=${crop}[b];[a][b]psnr` : 'psnr';
@@ -580,6 +589,15 @@ const capEnd = await ev((id) => {
 check('campo numérico: clicar em outro clipe grava o valor digitado no clipe certo', capEnd === 2, `fim da legenda: ${capEnd}`);
 
 // Arrastar a borda esquerda do vídeo: durante o arrasto ele já aparece como vai ficar (no lugar, mais curto).
+// O clique em cap_b acima rola a linha do tempo até ela quando ela não cabe na tela (o zoom não se ajusta mais a
+// cada mudança de duração): volta ao começo, para a borda esquerda do vídeo ficar à vista.
+await ev(
+  () =>
+    new Promise((r) => {
+      document.querySelector('.tl-scroll').scrollLeft = 0;
+      requestAnimationFrame(() => requestAnimationFrame(() => r()));
+    }),
+);
 const block = page.locator(`[data-clip="${vid}"]`);
 const b0 = await block.boundingBox();
 const vidDur = await ev((id) => window.__diretor.session.project.clips.find((x) => x.id === id).duration, vid);
@@ -639,6 +657,8 @@ check(
 const iaCalls = () => (existsSync(iaLog) ? readFileSync(iaLog, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
 const discardOpen = async () => {
   if (await ev(() => !!window.__diretor.session.openProposal)) {
+    // Com ajustes seus na etapa, Descartar pergunta antes (e o Playwright recusaria a pergunta sozinho).
+    if (await ev(() => (window.__diretor.session.activeStep?.manualMarks.length ?? 0) > 0)) page.once('dialog', (d) => d.accept());
     await page.click('[data-testid=discard]');
     await page.waitForFunction(() => !window.__diretor.session.openProposal, null, { timeout: 10_000 });
   }
@@ -752,6 +772,9 @@ const e1State = () =>
 await freshProject('Cortes');
 await ev((f) => window.__diretor.importPaths([f]), src);
 await page.waitForFunction(() => window.__diretor.session.project.clips.length === 1);
+// Sem trecho marcado, "Apagar trecho" fica desligado e o botão diz como marcar.
+const rangeHelp = await ev(() => document.querySelector('[data-testid=delete-range]').title);
+check('Apagar trecho desligado explica como marcar', /Shift\+arrastar/.test(rangeHelp), rangeHelp);
 // Ctrl+B com a agulha colada na borda não divide, só explica; em 2 s, divide o vídeo.
 await ev(() => document.activeElement?.blur());
 await ev(() => window.__diretor.playback.seek(0.01));
@@ -785,6 +808,7 @@ const cortes = join(out, 'cortes.mp4');
 const tE1 = Date.now();
 const expE1 = await ev((p) => window.__diretor.exportProject(window.__diretor.session.project, { outPath: p }), cortes);
 check('exporta o projeto com cortes', expE1.ok, expE1.error ?? `${((Date.now() - tE1) / 1000).toFixed(1)}s`);
+let cortesOk = expE1.ok;
 for (const [f, n] of [[89, 89], [90, 105], [95, 110]]) {
   await ev((tt) => window.__diretor.playback.seek(tt), f / 30);
   await settled();
@@ -796,8 +820,11 @@ for (const [f, n] of [[89, 89], [90, 105], [95, 110]]) {
   const full = psnr(prevPng, expPng);
   const ex = [n - 1, n, n + 1].map((k) => psnr(expPng, srcPng(k), COUNTER));
   const pv = [n - 1, n, n + 1].map((k) => psnr(prevPng, srcPng(k), COUNTER));
-  check(`com cortes, quadro ${f}: prévia = exportação = quadro ${n} do original`, full > 30 && best(ex) && best(pv), `PSNR ${full.toFixed(1)} dB; contador exp ${ex.map((v) => v.toFixed(0)).join('/')} prévia ${pv.map((v) => v.toFixed(0)).join('/')}`);
+  const okF = full > 30 && best(ex) && best(pv);
+  check(`com cortes, quadro ${f}: prévia = exportação = quadro ${n} do original`, okF, `PSNR ${full.toFixed(1)} dB; contador exp ${ex.map((v) => v.toFixed(0)).join('/')} prévia ${pv.map((v) => v.toFixed(0)).join('/')}`);
+  cortesOk &&= okF;
 }
+dropIfOk(cortes, cortesOk);
 
 await ev(() => window.__diretor.playback.seek(1.7));
 await settled();
@@ -861,6 +888,11 @@ const pE1 = await tool('propose_edit', { requestId: 'e2e-corte', baseRevision: c
 await page.waitForSelector('.seam-chip');
 const chips = await ev(() => [...document.querySelectorAll('.seam-chip')].map((e) => e.textContent.trim()));
 check('rascunho com corte mostra a emenda "−0,5 s"', pE1.status === 'active' && chips.length === 1 && chips[0] === '\u22120,5 s', JSON.stringify(chips));
+// Clicar no chip leva a agulha a 1 s antes do corte (em 1 s): tocando dali, passa pelo corte.
+await ev(() => window.__diretor.playback.seek(4));
+await page.click('.seam-chip');
+const chipTime = await ev(() => window.__diretor.playback.get().time);
+check('clicar na emenda leva a agulha para antes do corte', Math.abs(chipTime - 0) <= 0.001, `agulha em ${chipTime} s`);
 await page.click('[data-testid=ab-before]');
 const tcBefore = await page.textContent('[data-testid=timecode]');
 await page.click('[data-testid=ab-after]');
@@ -874,6 +906,26 @@ await page.keyboard.press('Control+B');
 const tcSplit = await page.textContent('[data-testid=timecode]');
 const splitAt2 = await ev(() => window.__diretor.session.view.clips.some((c) => c.kind === 'video' && Math.abs(c.start - 2) <= 0.001 && Math.abs(c.in - 2.5) <= 0.001));
 check('Ctrl+B no "Antes" volta para "Depois" e divide no mesmo ponto do vídeo', /\/ 0:05\.00/.test(tcSplit) && splitAt2, `${tcSplit}; pedaço em 2 s com in 2,5: ${splitAt2}`);
+// Essa divisão é um ajuste seu no rascunho: o Ctrl+S não a salva, então o título diz "não salvo" e explica,
+// e Descartar pergunta antes de jogá-la fora (recusando, o rascunho continua aberto).
+const savedHint = await ev(() => {
+  const el = document.querySelector('span.dirty');
+  return { text: el?.textContent ?? '', title: el?.getAttribute('title') ?? '' };
+});
+let discardMsg = '';
+const onDiscardDialog = (d) => {
+  discardMsg = d.message();
+  void d.dismiss();
+};
+page.once('dialog', onDiscardDialog);
+await page.click('[data-testid=discard]');
+page.off('dialog', onDiscardDialog);
+const keptOpen = await ev(() => !!window.__diretor.session.openProposal);
+check(
+  'ajuste seu no rascunho avisa e Descartar pergunta',
+  savedHint.text === 'não salvo' && /quando você aceitar o rascunho/.test(savedHint.title) && /ajuste/.test(discardMsg) && keptOpen,
+  JSON.stringify({ ...savedHint, pergunta: discardMsg, aberto: keptOpen }),
+);
 await discardOpen();
 
 // Aceitar no "Antes": a prévia volta para o "Depois" com a agulha no mesmo ponto do vídeo (2,5 s do "Antes" → 2 s).
@@ -938,14 +990,108 @@ const pedProbe = spawnSync(FFMPEG, ['-hide_banner', '-i', pedOut], { encoding: '
 const pd = /Duration: (\d+):(\d+):([\d.]+)/.exec(pedProbe);
 const pedSecs = pd ? Number(pd[1]) * 3600 + Number(pd[2]) * 60 + Number(pd[3]) : 0;
 const pedSil = String(spawnSync(FFMPEG, ['-hide_banner', '-nostats', '-i', pedOut, '-af', 'silencedetect=n=-40dB:d=0.05', '-f', 'null', '-']).stderr);
+const pedOk = pedExp.ok && Math.abs(pedSecs - 24.02) < 0.1 && /Audio:/.test(pedProbe) && !/silence_start/.test(pedSil) && leftovers().length === 0;
+check('exporta 300 pedaços: duração certa, som contínuo e nenhum temporário sobrando', pedOk, `${((Date.now() - tExp) / 1000).toFixed(1)} s; ${pedSecs} s; ${pedExp.error ?? ''}`);
+dropIfOk(pedOut, pedOk);
+
+const nextFrame = () => ev(() => new Promise((r) => requestAnimationFrame(() => r())));
+const zoomPps = () => ev(() => 2 ** Number(document.querySelector('[data-testid=zoom]').value));
+// Leva o zoom ao mínimo ou ao máximo como o controle deslizante faz.
+const setZoom = (end) =>
+  ev((w) => {
+    const z = document.querySelector('[data-testid=zoom]');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(z, z[w]);
+    z.dispatchEvent(new Event('input', { bubbles: true }));
+  }, end);
+
+// Apagar um trecho não muda o zoom (400 px/s): o zoom só se ajusta sozinho ao abrir um projeto ou ao ganhar o primeiro clipe.
+await ev(() => document.activeElement?.blur());
+await ev(() => window.__diretor.playback.seek(10));
+await page.keyboard.press('i');
+await ev(() => window.__diretor.playback.seek(11));
+await page.keyboard.press('o');
+await page.keyboard.press('Shift+Delete');
+await nextFrame();
+await nextFrame();
+const ppsAfterCut = await zoomPps();
+const cutDone = await ev(() => window.__diretor.session.past.at(-1)?.label ?? '');
+check('apagar trecho não muda o zoom', cutDone === 'Apagar trecho' && Math.abs(ppsAfterCut - 400) / 400 < 0.01, `${ppsAfterCut.toFixed(1)} px/s; último: ${cutDone}`);
+
+// Zoom ancorado na agulha, e a linha do tempo acompanha a agulha quando ela sai da tela.
+const headInView = () =>
+  ev(() => {
+    const h = document.querySelector('.playhead').getBoundingClientRect();
+    const box = document.querySelector('.tl-scroll').getBoundingClientRect();
+    return h.left >= box.left && h.left <= box.right;
+  });
+await setZoom('min');
+await ev(() => window.__diretor.playback.seek(20));
+await nextFrame();
+await setZoom('max');
+await nextFrame();
+const seenZoom = await headInView();
+await ev(() => window.__diretor.playback.seek(2));
+await nextFrame();
+const seenBack = await headInView();
+await ev(() => window.__diretor.playback.seek(22));
+await nextFrame();
+const seenAhead = await headInView();
+check('zoom e rolagem mantêm a agulha à vista', seenZoom && seenBack && seenAhead, JSON.stringify({ aoAproximar: seenZoom, em2s: seenBack, em22s: seenAhead }));
+
+// Depois de clicar no zoom (o controle deslizante fica com o foco), I, Esc e as setas continuam valendo, e a seta não mexe no zoom.
+await page.click('[data-testid=zoom]');
+const zoomBefore = await ev(() => document.querySelector('[data-testid=zoom]').value);
+const timeBefore = await ev(() => window.__diretor.playback.get().time);
+const fps = await ev(() => window.__diretor.session.view.settings.fps);
+await page.keyboard.press('i');
+const markShown = await ev(() => !!document.querySelector('.mark-in'));
+await page.keyboard.press('Escape');
+const markCleared = await ev(() => !document.querySelector('.mark-in'));
+await page.keyboard.press('ArrowRight');
+const afterArrow = await ev(() => ({ t: window.__diretor.playback.get().time, zoom: document.querySelector('[data-testid=zoom]').value }));
 check(
-  'exporta 300 pedaços: duração certa, som contínuo e nenhum temporário sobrando',
-  pedExp.ok && Math.abs(pedSecs - 24.02) < 0.1 && /Audio:/.test(pedProbe) && !/silence_start/.test(pedSil) && leftovers().length === 0,
-  `${((Date.now() - tExp) / 1000).toFixed(1)} s; ${pedSecs} s; ${pedExp.error ?? ''}`,
+  'teclas valem depois de clicar no zoom',
+  markShown && markCleared && Math.abs(afterArrow.t - (timeBefore + 1 / fps)) <= 0.001 && afterArrow.zoom === zoomBefore,
+  JSON.stringify({ marcou: markShown, limpou: markCleared, antes: { t: timeBefore, zoom: zoomBefore }, depois: afterArrow }),
 );
+
+// Delete num pedaço do meio tira o pedaço sem deixar buraco; com um trecho marcado, Delete só avisa (quem apaga o trecho é o Shift+Delete).
+await ev(() => document.activeElement?.blur());
+const pieceList = () =>
+  ev(() =>
+    window.__diretor.session.project.clips
+      .filter((c) => c.kind === 'video')
+      .sort((a, b) => a.start - b.start)
+      .map((c) => [c.id, c.start, c.start + c.duration]),
+  );
+const before8 = await pieceList();
+const middle = before8[Math.floor(before8.length / 2)];
+await ev((id) => window.__diretor.session.setSelection({ clipIds: [id] }), middle[0]);
+await page.keyboard.press('Delete');
+const after8 = await pieceList();
+const noHole = after8.every(([, start], i) => i === 0 || Math.abs(start - after8[i - 1][2]) <= 0.001);
+const shorter = before8.at(-1)[2] - after8.at(-1)[2];
+await ev(() => window.__diretor.playback.seek(5));
+await page.keyboard.press('i');
+await ev(() => window.__diretor.playback.seek(6));
+await page.keyboard.press('o');
+const countMarked = await ev(() => window.__diretor.session.project.clips.length);
+await ev(() => {
+  const s = window.__diretor.session;
+  s.setSelection({ clipIds: [s.project.clips.find((c) => c.kind === 'video' && c.start > 5.5).id] });
+});
+await page.keyboard.press('Delete');
+const marked8 = await ev(() => ({ n: window.__diretor.session.project.clips.length, toast: document.querySelector('.toast')?.textContent ?? '' }));
+check(
+  'Delete num pedaço fecha o buraco; com trecho marcado, só avisa',
+  after8.length === before8.length - 1 && noHole && Math.abs(shorter - (middle[2] - middle[1])) <= 0.001 && marked8.n === countMarked && /Shift\+Delete/.test(marked8.toast),
+  JSON.stringify({ pedaços: `${before8.length} → ${after8.length}`, semBuraco: noHole, encurtou: shorter, pedaço: middle[2] - middle[1], marcado: marked8 }),
+);
+await page.keyboard.press('Escape');
 
 // A exportação interrompida do fim precisa de vídeo: volta ao projeto dos cortes.
 await ev((p) => window.__diretor.session.load(p, null), cortesProject);
+dropIfOk(pedacos, pedOk);
 
 writeFileSync(join(out, 'resultado.json'), JSON.stringify(results, null, 2));
 await client.close();
