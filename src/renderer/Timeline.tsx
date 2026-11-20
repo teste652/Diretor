@@ -4,7 +4,22 @@ import { type Op, type TrimEdge, applyOps, clampTrimDelta } from '../core/operat
 import { keyframeAt } from '../core/properties';
 import { snapToFrame } from '../core/time';
 import { fmtTime, marks, playback, session, setCompare, useMarks, usePlayback, useSession } from './store';
-import { fmtRemoved, markedRange, splitTargets, tickStep, visibleClips, withIn, withOut, zoomBounds } from './timelineLogic';
+import {
+  type FitKey,
+  anchoredScroll,
+  deleteOps,
+  fmtRemoved,
+  followScroll,
+  lockedSplitTrack,
+  markedRange,
+  shouldFit,
+  splitTargets,
+  tickStep,
+  visibleClips,
+  withIn,
+  withOut,
+  zoomBounds,
+} from './timelineLogic';
 import { Icon, run, showToast } from './ui';
 
 type DragState =
@@ -37,8 +52,9 @@ export function addTitleAtPlayhead() {
   addAtPlayhead('title');
 }
 
+/** Delete: um pedaço de vídeo sai sem deixar buraco (e as legendas vêm junto); ver deleteOps. */
 export function deleteSelection() {
-  const ops: Op[] = session.selection.clipIds.map((id) => ({ op: 'removeClip', clipId: id }));
+  const ops = deleteOps(session.view, session.selection.clipIds);
   if (ops.length) run(ops, 'Remover clipe');
 }
 
@@ -56,6 +72,8 @@ export function deleteSelectedKeyframeOrClip() {
       return;
     }
   }
+  // Com um trecho marcado, o Delete não tira o clipe inteiro: quem apaga o trecho é o Shift+Delete.
+  if (markedRange(marks.get())) return showToast('Há um trecho marcado: Shift+Delete apaga o trecho, e Esc tira a marca.');
   deleteSelection();
 }
 
@@ -68,7 +86,10 @@ export function splitAtPlayhead(): void {
   const view = session.view;
   const t = snapToFrame(playback.get().time, view.settings.fps);
   const ids = splitTargets(view, session.selection.clipIds, t);
-  if (!ids.length) return showToast('Para dividir, coloque a agulha no meio de um clipe (longe das bordas).');
+  if (!ids.length) {
+    const locked = lockedSplitTrack(view, session.selection.clipIds, t);
+    return showToast(locked ? `A faixa "${locked}" está travada. Destrave a faixa para dividir.` : 'Para dividir, coloque a agulha no meio de um clipe (longe das bordas).');
+  }
   run(ids.map((clipId): Op => ({ op: 'splitClip', clipId, at: t })), 'Dividir');
 }
 
@@ -127,17 +148,39 @@ export function Timeline() {
       el.removeEventListener('scroll', onScroll);
     };
   }, [readArea]);
+  // Zoom pelo controle: a agulha fica no mesmo ponto da tela (fora da área, o meio da área). A rolagem nova é
+  // calculada antes de mudar o zoom: depois, o navegador já teria limitado a rolagem à largura nova.
+  const pendingScroll = useRef<number | null>(null);
+  const zoomTo = (next: number) => {
+    const el = scrollRef.current;
+    if (!el || next === pps) return;
+    pendingScroll.current = anchoredScroll(el.scrollLeft, el.clientWidth, pps, next, playback.get().time);
+    setPps(next);
+  };
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el || pendingScroll.current === null) return;
+    el.scrollLeft = pendingScroll.current;
+    pendingScroll.current = null;
+    readArea();
+  }, [pps, readArea]);
   // Outro zoom ou outra duração mudam a largura do conteúdo, e o navegador pode ter limitado a rolagem: relê antes de pintar.
   useLayoutEffect(readArea, [width, readArea]);
 
-  // Ajusta o zoom ao conteúdo quando a duração muda bastante.
-  const lastFit = useRef(0);
+  // O zoom cabe o projeto inteiro só ao abrir um projeto ou quando a linha do tempo ganha o primeiro clipe:
+  // cortes, desfazer e rascunhos não tiram a pessoa do ponto onde está.
+  const fitFor = useRef<FitKey | null>(null);
+  const empty = view.clips.length === 0;
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el || Math.abs(lastFit.current - total) < 0.5) return;
-    lastFit.current = total;
-    setPps(zoomBounds(total, el.clientWidth).fit);
-  }, [total]);
+    if (!el) return;
+    const next = { loads: s.loads, empty };
+    if (shouldFit(fitFor.current, next)) {
+      el.scrollLeft = 0;
+      setPps(zoomBounds(total, el.clientWidth).fit);
+    }
+    fitFor.current = next;
+  }, [s.loads, empty, total]);
 
   // Limites novos (outra duração ou outra largura): o zoom que ficou fora deles volta para dentro.
   useEffect(() => {
@@ -255,7 +298,13 @@ export function Timeline() {
         </button>
         <button
           className="btn ghost icon"
-          title={selectedKfExists ? 'Remover ponto selecionado (Delete)' : 'Remover clipe selecionado (Delete)'}
+          title={
+            selectedKfExists
+              ? 'Remover ponto selecionado (Delete)'
+              : deleteOps(view, s.selection.clipIds).some((o) => o.op === 'removeRanges')
+                ? 'Apagar o pedaço selecionado sem deixar buraco (Delete)'
+                : 'Remover clipe selecionado (Delete)'
+          }
           disabled={!s.selection.clipIds.length}
           onClick={deleteSelectedKeyframeOrClip}
           data-testid="trash"
@@ -265,7 +314,13 @@ export function Timeline() {
         <button className="btn" title="Dividir na agulha (Ctrl+B)" onClick={splitAtPlayhead} data-testid="split">
           {Icon.scissors} Dividir
         </button>
-        <button className="btn" title="Apagar o trecho marcado em todas as faixas (Shift+Delete)" disabled={!range} onClick={deleteMarkedRange} data-testid="delete-range">
+        <button
+          className="btn"
+          title={range ? 'Apagar o trecho marcado em todas as faixas (Shift+Delete)' : 'Marque o trecho na régua (Shift+arrastar, ou I e O) para apagar'}
+          disabled={!range}
+          onClick={deleteMarkedRange}
+          data-testid="delete-range"
+        >
           {Icon.cutRange} Apagar trecho
         </button>
         <button className="btn" onClick={addCaptionAtPlayhead} data-testid="add-caption">
@@ -289,7 +344,7 @@ export function Timeline() {
           max={Math.log2(zb.max)}
           step={0.01}
           value={Math.min(Math.log2(zb.max), Math.max(Math.log2(zb.min), Math.log2(pps)))}
-          onChange={(e) => setPps(2 ** Number(e.target.value))}
+          onChange={(e) => zoomTo(2 ** Number(e.target.value))}
           style={{ accentColor: 'var(--accent)', width: 120 }}
         />
       </div>
@@ -329,6 +384,7 @@ export function Timeline() {
           <div className="tl-inner" style={{ width }}>
             <div
               className="ruler"
+              title="Clique para mover a agulha. Shift+arrastar marca um trecho para apagar (ou use I e O)."
               onPointerDown={(e) => {
                 const t = snap(timeAt(e.clientX));
                 // Shift+arrastar marca o trecho (as duas marcas no quadro); sem Shift, arrasta a agulha.
@@ -398,7 +454,19 @@ export function Timeline() {
                     ))}
                   {l.kind === 'video' &&
                     visibleClips(draft.seams.map((seam, i) => ({ ...seam, i, start: seam.at, duration: 0 })), t0, t1).map((seam) => (
-                      <div key={`seam-${seam.i}`} className="seam-chip" style={{ left: seam.at * pps }} title={`Corte do rascunho: ${fmtRemoved(seam.removed)}`}>
+                      <div
+                        key={`seam-${seam.i}`}
+                        className="seam-chip"
+                        style={{ left: seam.at * pps }}
+                        title={`Corte do rascunho: ${fmtRemoved(seam.removed)}. Clique para ver o corte.`}
+                        // A agulha vai 1 s antes da emenda, para tocar passando pelo corte. A emenda é um tempo do
+                        // rascunho: no "Antes", a prévia volta primeiro para o "Depois".
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          setCompare(false);
+                          playback.seek(Math.max(0, seam.at - 1));
+                        }}
+                      >
                         {fmtRemoved(seam.removed)}
                       </div>
                     ))}
@@ -413,7 +481,7 @@ export function Timeline() {
                 {mk.out !== null && <div className="mark-out" style={{ left: mk.out * pps }} />}
               </>
             )}
-            <Playhead pps={pps} />
+            <Playhead pps={pps} scrollRef={scrollRef} follow={!drag} />
           </div>
         </div>
       </div>
@@ -421,9 +489,17 @@ export function Timeline() {
   );
 }
 
-/** A agulha assina o relógio sozinha: tocar o vídeo redesenha só ela, não a linha do tempo inteira. */
-function Playhead({ pps }: { pps: number }) {
+/**
+ * A agulha assina o relógio sozinha: tocar o vídeo redesenha só ela, não a linha do tempo inteira. Quando ela sai
+ * da área (tocando, Fim, Início, setas), a linha do tempo rola atrás dela; só quando o tempo muda, então um zoom
+ * ou o fim de um arrasto não fazem a rolagem pular.
+ */
+function Playhead({ pps, scrollRef, follow }: { pps: number; scrollRef: React.RefObject<HTMLDivElement>; follow: boolean }) {
   const pb = usePlayback();
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el && follow) el.scrollLeft = followScroll(el.scrollLeft, el.clientWidth, pb.time * pps, pb.playing ? 16 : 0);
+  }, [pb.time]);
   return <div className="playhead" style={{ left: pb.time * pps }} />;
 }
 

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { type CaptionPreset, type Clip, EASINGS, type Easing, findClip } from '../core/model';
 import { ANIMATION_PRESETS, type AnimationPreset, CAPTION_PRESETS, type TrimEdge, clampTrimDelta } from '../core/operations';
 import { clipLocalTime, keyframeGroups, propAtPlayhead, propDef, propsForKind } from '../core/properties';
-import { playback, session, usePlayback, useSession } from './store';
+import { draftTime, playback, session, useCompare, usePlayback, useSession } from './store';
 import { ColorField, NumberField, TextField, run } from './ui';
 
 const EASE_LABEL: Record<Easing, string> = { linear: 'Linear', easeIn: 'Acelerar', easeOut: 'Desacelerar', easeInOut: 'Suave', hold: 'Segurar' };
@@ -10,6 +10,7 @@ const EASE_LABEL: Record<Easing, string> = { linear: 'Linear', easeIn: 'Acelerar
 export function Inspector() {
   const s = useSession();
   const pb = usePlayback();
+  useCompare();
   const id = s.selection.clipIds[0];
   const c = id ? findClip(s.view, id) : undefined;
   if (!c) return <div className="empty">Selecione um clipe na linha do tempo ou na prévia para editar texto, tempo, estilo e animação.</div>;
@@ -22,7 +23,9 @@ export function Inspector() {
     const d = clampTrimDelta(session.view, cur, edge, delta);
     if (Math.abs(d) > 1e-6) run([{ op: 'trimClip', clipId: c.id, edge, delta: d }], label);
   };
-  const local = clipLocalTime(c, pb.time);
+  // No "Antes" de um rascunho que corta, a agulha está no projeto gravado; o clipe é o do rascunho.
+  const t = draftTime(pb.time);
+  const local = clipLocalTime(c, t);
 
   return (
     <div>
@@ -73,7 +76,7 @@ export function Inspector() {
         {propsForKind(c.kind).map((d) => {
           const ap = c.props[d.name];
           // Valor e ponto do mesmo instante (o que a prévia mostra; com dois grupos no mesmo tempo, o último).
-          const { value, keyframe: kfHere } = propAtPlayhead(c, d.name, pb.time);
+          const { value, keyframe: kfHere } = propAtPlayhead(c, d.name, t);
           return (
             <div className="prop-row" key={d.name}>
               <label>{d.label}</label>

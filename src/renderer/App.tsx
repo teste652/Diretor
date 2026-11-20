@@ -7,7 +7,7 @@ import { LeftPanel, importPaths } from './MediaPanel';
 import { Preview, previewSettled, togglePlay } from './Preview';
 import { marks, playback, session, setCompare, useSession } from './store';
 import { addCaptionAtPlayhead, deleteMarkedRange, deleteSelectedKeyframeOrClip, splitAtPlayhead, Timeline } from './Timeline';
-import { withIn, withOut } from './timelineLogic';
+import { isTextEntry, withIn, withOut } from './timelineLogic';
 import { Icon, TextField, ToastHost, run, showToast } from './ui';
 
 export async function saveProject(saveAs = false, path?: string): Promise<string | null> {
@@ -88,7 +88,8 @@ export function App() {
         if (!e.repeat) dictatePending = true;
         return;
       }
-      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return;
+      // Num campo de texto as teclas são do texto; um controle deslizante em foco (zoom, volume) não segura os atalhos.
+      if (isTextEntry(el as HTMLInputElement)) return;
       if (e.code === 'Space') (e.preventDefault(), togglePlay());
       else if (mod && key === 'z' && !e.shiftKey) (e.preventDefault(), session.undo());
       else if (mod && (key === 'y' || (e.shiftKey && key === 'z'))) (e.preventDefault(), session.redo());
@@ -100,8 +101,9 @@ export function App() {
       else if (!mod && !e.altKey && key === 'i') (setCompare(false), marks.set(withIn(marks.get(), playback.get().time)));
       else if (!mod && !e.altKey && key === 'o') (setCompare(false), marks.set(withOut(marks.get(), playback.get().time)));
       else if (e.key === 'Escape') marks.set({ in: null, out: null });
-      else if (e.key === 'ArrowRight') playback.seek(playback.get().time + 1 / session.view.settings.fps);
-      else if (e.key === 'ArrowLeft') playback.seek(playback.get().time - 1 / session.view.settings.fps);
+      // preventDefault: o controle deslizante em foco não anda junto com a agulha.
+      else if (e.key === 'ArrowRight') (e.preventDefault(), playback.seek(playback.get().time + 1 / session.view.settings.fps));
+      else if (e.key === 'ArrowLeft') (e.preventDefault(), playback.seek(playback.get().time - 1 / session.view.settings.fps));
     };
     const onKeyUp = (e: KeyboardEvent) => {
       if (!dictatePending || (e.key !== 'Control' && e.key !== 'Meta')) return;

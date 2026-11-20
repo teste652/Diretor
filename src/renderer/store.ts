@@ -124,6 +124,11 @@ export function shownProject(): Project {
   return compare.get() && session.draftInfo.ripple ? session.project : session.view;
 }
 
+/** Tempo da agulha na view: no "Antes" de um rascunho que corta, a agulha está no projeto gravado. */
+export function draftTime(t: number): number {
+  return compare.get() && session.draftInfo.ripple ? mapPlayhead(session.project, session.view, t) : t;
+}
+
 /** Antes/Depois: troca o projeto da prévia e leva a agulha ao mesmo ponto do vídeo no outro. */
 export function setCompare(before: boolean): void {
   if (before === compare.get()) return;
