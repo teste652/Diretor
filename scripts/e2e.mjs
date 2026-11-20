@@ -904,6 +904,32 @@ const marksGone = await ev(() => ({
   shown: document.querySelectorAll('.range-band, .mark-in, .mark-out').length,
 }));
 check('abrir outro projeto apaga as marcas I e O', marksOn && marksGone.disabled && marksGone.shown === 0, JSON.stringify({ ligado: marksOn, ...marksGone }));
+
+// 300 pedaços: 299 cortes de 20 ms num vídeo de 30 s aplicam rápido, e no zoom máximo a linha do tempo desenha só os visíveis.
+const pedacos = join(out, 'pedacos.mp4');
+execFileSync(FFMPEG, ['-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30:duration=30', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=30', '-c:v', 'libx264', '-g', '15', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', pedacos]);
+await freshProject('Pedaços');
+await ev((f) => window.__diretor.importPaths([f]), pedacos);
+await page.waitForFunction(() => window.__diretor.session.project.clips.length === 1);
+const applyE1 = await ev(() => {
+  const s = window.__diretor.session;
+  const r = (n) => Math.round(n * 1000) / 1000;
+  const ranges = Array.from({ length: 299 }, (_, i) => [r(0.1 * (i + 1) - 0.02), r(0.1 * (i + 1))]);
+  const t0 = performance.now();
+  const res = s.dispatch([{ op: 'removeRanges', ranges }]);
+  return { ok: res.ok, ms: performance.now() - t0, n: s.project.clips.length };
+});
+const tSettle = Date.now();
+await settled();
+const settleMs = Date.now() - tSettle;
+await ev(() => {
+  const z = document.querySelector('[data-testid=zoom]');
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(z, z.max);
+  z.dispatchEvent(new Event('input', { bubbles: true }));
+});
+const inDom = await ev(() => document.querySelectorAll('[data-clip]').length);
+check('300 pedaços: aplica e a linha do tempo desenha só os visíveis', applyE1.ok && applyE1.n === 300 && inDom < 120, `aplicar ${applyE1.ms.toFixed(0)} ms, prévia pronta em ${settleMs} ms, ${inDom} blocos desenhados`);
+
 // A exportação interrompida do fim precisa de vídeo: volta ao projeto dos cortes.
 await ev((p) => window.__diretor.session.load(p, null), cortesProject);
 

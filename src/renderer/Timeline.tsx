@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { type Clip, type Track, newId, projectDuration } from '../core/model';
-import { type Op, clampTrimDelta } from '../core/operations';
+import { type Op, type TrimEdge, applyOps, clampTrimDelta } from '../core/operations';
 import { keyframeAt } from '../core/properties';
 import { snapToFrame } from '../core/time';
 import { fmtTime, marks, playback, session, setCompare, useMarks, usePlayback, useSession } from './store';
-import { fmtRemoved, markedRange, splitTargets, withIn, withOut } from './timelineLogic';
+import { fmtRemoved, markedRange, splitTargets, tickStep, visibleClips, withIn, withOut, zoomBounds } from './timelineLogic';
 import { Icon, run, showToast } from './ui';
 
 type DragState =
@@ -89,7 +89,6 @@ const round = (n: number) => Math.round(n * 1000) / 1000;
 
 export function Timeline() {
   const s = useSession();
-  const pb = usePlayback();
   const mk = useMarks();
   const range = markedRange(mk);
   const view = s.view;
@@ -97,9 +96,39 @@ export function Timeline() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pps, setPps] = useState(80); // pixels por segundo
   const [drag, setDrag] = useState<DragState | null>(null);
+  /** Rolagem e largura da área da linha do tempo (px): só o que está perto dela é desenhado. */
+  const [area, setArea] = useState({ left: 0, width: 0 });
   const total = Math.max(projectDuration(view), 5);
   const width = total * pps + 200;
+  const zb = zoomBounds(total, area.width);
   const draft = s.draftInfo;
+
+  // A rolagem é lida uma vez por quadro; a largura, quando a área muda de tamanho.
+  const readArea = useCallback(() => {
+    const el = scrollRef.current;
+    if (el) setArea((a) => (a.left === el.scrollLeft && a.width === el.clientWidth ? a : { left: el.scrollLeft, width: el.clientWidth }));
+  }, []);
+  useLayoutEffect(() => {
+    const el = scrollRef.current!;
+    let frame = 0;
+    const onScroll = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        readArea();
+      });
+    };
+    const ro = new ResizeObserver(readArea);
+    ro.observe(el);
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      cancelAnimationFrame(frame);
+      ro.disconnect();
+      el.removeEventListener('scroll', onScroll);
+    };
+  }, [readArea]);
+  // Outro zoom ou outra duração mudam a largura do conteúdo, e o navegador pode ter limitado a rolagem: relê antes de pintar.
+  useLayoutEffect(readArea, [width, readArea]);
 
   // Ajusta o zoom ao conteúdo quando a duração muda bastante.
   const lastFit = useRef(0);
@@ -107,8 +136,13 @@ export function Timeline() {
     const el = scrollRef.current;
     if (!el || Math.abs(lastFit.current - total) < 0.5) return;
     lastFit.current = total;
-    setPps(Math.max(20, Math.min(300, (el.clientWidth - 40) / total)));
+    setPps(zoomBounds(total, el.clientWidth).fit);
   }, [total]);
+
+  // Limites novos (outra duração ou outra largura): o zoom que ficou fora deles volta para dentro.
+  useEffect(() => {
+    setPps((p) => Math.min(zb.max, Math.max(zb.min, p)));
+  }, [zb.min, zb.max]);
 
   const snap = (t: number) => Math.round(t * fps) / fps;
   const timeAt = (clientX: number) => {
@@ -150,32 +184,56 @@ export function Timeline() {
     };
   }, [drag, pps, view]);
 
+  // A janela desenhada (s): a área visível e mais 300 px de cada lado, para a rolagem não mostrar buraco.
+  const t0 = (area.left - 300) / pps;
+  const t1 = (area.left + area.width + 300) / pps;
+  const step = tickStep(pps);
   const ticks: number[] = [];
-  const stepSec = pps > 150 ? 0.5 : pps > 60 ? 1 : pps > 25 ? 3 : 5;
-  for (let t = 0; t <= total + 2; t += stepSec) ticks.push(t);
+  for (let k = Math.max(0, Math.ceil(t0 / step)); k * step <= Math.min(t1, total + 2); k++) ticks.push(k * step);
 
-  // Prévia do arrasto igual ao resultado do trimClip: o vídeo aparado no início fica
-  // no lugar (o fim acompanha) e os vídeos seguintes da faixa andam junto.
-  const dragged = drag && drag.kind !== 'scrub' && drag.kind !== 'mark' && drag.kind !== 'kf' ? view.clips.find((x) => x.id === drag.clipId) : undefined;
-  const geom = (c: Clip) => {
-    let start = c.start;
-    let dur = c.duration;
-    if (dragged && drag && drag.kind !== 'scrub' && drag.kind !== 'mark' && drag.kind !== 'kf') {
-      const edge = drag.kind === 'trimL' ? 'start' : 'end';
-      const d = drag.kind === 'move' ? 0 : clampTrimDelta(view, dragged, edge, drag.dt);
-      if (dragged.id === c.id) {
-        if (drag.kind === 'move') start = Math.max(0, start + drag.dt);
-        if (drag.kind === 'trimR') dur += d;
-        if (drag.kind === 'trimL') {
-          if (c.kind !== 'video') start += d;
-          dur -= d;
-        }
-      } else if (drag.kind !== 'move' && dragged.kind === 'video' && c.trackId === dragged.trackId && c.start >= dragged.start + dragged.duration - 1e-3) {
-        start = Math.max(0, start + (edge === 'start' ? -d : d));
-      }
+  // Arrastar uma borda: a prévia é o resultado do próprio trimClip, refeito só quando o quanto a borda anda muda.
+  // No vídeo o ripple vale em todas as faixas, então as legendas e os títulos também aparecem onde vão parar.
+  // Se o trimClip falharia (por exemplo, numa faixa travada), nada muda até soltar.
+  const trim = drag && (drag.kind === 'trimL' || drag.kind === 'trimR') ? drag : null;
+  const trimEdge: TrimEdge = trim?.kind === 'trimL' ? 'start' : 'end';
+  const trimmed = trim ? view.clips.find((c) => c.id === trim.clipId) : undefined;
+  const trimDelta = trim && trimmed ? clampTrimDelta(view, trimmed, trimEdge, trim.dt) : 0;
+  const trimId = trim?.clipId;
+  /** O que as faixas desenham: a view ou, durante o arrasto de uma borda, a prévia dele. */
+  const drawn = useMemo(() => {
+    if (!trimId || Math.abs(trimDelta) <= 1e-6) return view;
+    try {
+      return applyOps(view, [{ op: 'trimClip', clipId: trimId, edge: trimEdge, delta: trimDelta }]).project;
+    } catch {
+      return view;
     }
-    return { left: start * pps, width: Math.max(4, dur * pps) };
+  }, [view, trimId, trimEdge, trimDelta]);
+  // Mover um clipe: só ele anda.
+  const moved = drag?.kind === 'move' ? drag : null;
+  const geom = (c: Clip) => {
+    const start = moved?.clipId === c.id ? Math.max(0, c.start + moved.dt) : c.start;
+    return { left: start * pps, width: Math.max(4, c.duration * pps) };
   };
+
+  // Callbacks estáveis para os blocos (React.memo): leem a view atual pela ref.
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const onDown = useCallback((clipId: string, kind: 'move' | 'trimL' | 'trimR', e: React.PointerEvent) => {
+    e.stopPropagation();
+    session.setSelection({ clipIds: [clipId] });
+    const v = viewRef.current;
+    const c = v.clips.find((x) => x.id === clipId);
+    if (c && !v.tracks.find((tr) => tr.id === c.trackId)?.locked) setDrag({ kind, clipId, x0: e.clientX, dt: 0 });
+  }, []);
+  const onKfDown = useCallback((clipId: string, t: number, prop: string, keyframeId: string, e: React.PointerEvent) => {
+    e.stopPropagation();
+    session.setSelection({ clipIds: [clipId], keyframe: { clipId, prop, keyframeId } });
+    const v = viewRef.current;
+    const c = v.clips.find((x) => x.id === clipId);
+    if (!c) return;
+    playback.seek(c.start + t);
+    if (!v.tracks.find((tr) => tr.id === c.trackId)?.locked) setDrag({ kind: 'kf', clipId, t, x0: e.clientX, dt: 0 });
+  }, []);
 
   const trackOf = (kind: string) => view.tracks.find((t) => t.kind === kind);
   const selKf = s.selection.keyframe;
@@ -223,7 +281,17 @@ export function Timeline() {
           s.past.length > 0 && <span className="hint">Último: {s.past[s.past.length - 1].label}</span>
         )}
         <span className="hint">Zoom</span>
-        <input type="range" min={20} max={400} value={pps} onChange={(e) => setPps(Number(e.target.value))} style={{ accentColor: 'var(--accent)', width: 120 }} />
+        {/* Logarítmico: cada passo multiplica o zoom pelo mesmo tanto, de caber o projeto inteiro até 400 px/s. */}
+        <input
+          type="range"
+          data-testid="zoom"
+          min={Math.log2(zb.min)}
+          max={Math.log2(zb.max)}
+          step={0.01}
+          value={Math.min(Math.log2(zb.max), Math.max(Math.log2(zb.min), Math.log2(pps)))}
+          onChange={(e) => setPps(2 ** Number(e.target.value))}
+          style={{ accentColor: 'var(--accent)', width: 120 }}
+        />
       </div>
       <div className="tl-body">
         <div className="tl-heads">
@@ -280,7 +348,7 @@ export function Timeline() {
             </div>
             {LANES.map((l) => {
               const tr = l.kind === 'audio' ? trackOf('video') : trackOf(l.kind);
-              const clips = view.clips.filter((c) => c.trackId === tr?.id);
+              const clips = visibleClips(drawn.clips.filter((c) => c.trackId === tr?.id), t0, t1);
               return (
                 <div className="lane" key={l.label} onPointerDown={(e) => e.target === e.currentTarget && session.setSelection({ clipIds: [] })}>
                   {clips.map((c) => {
@@ -299,19 +367,10 @@ export function Timeline() {
                         selected={s.selection.clipIds.includes(c.id)}
                         isNewDraft={draft.addedClipIds.has(c.id)}
                         draftKfs={draft.keyframeIds}
-                        selectedKf={s.selection.keyframe}
+                        selectedKf={selKf?.clipId === c.id ? selKf : undefined}
                         kfDrag={drag?.kind === 'kf' && drag.clipId === c.id ? drag : null}
-                        onDown={(kind, e) => {
-                          e.stopPropagation();
-                          session.setSelection({ clipIds: [c.id] });
-                          if (!tr?.locked) setDrag({ kind, clipId: c.id, x0: e.clientX, dt: 0 });
-                        }}
-                        onKfDown={(t, prop, keyframeId, e) => {
-                          e.stopPropagation();
-                          session.setSelection({ clipIds: [c.id], keyframe: { clipId: c.id, prop, keyframeId } });
-                          playback.seek(c.start + t);
-                          if (!tr?.locked) setDrag({ kind: 'kf', clipId: c.id, t, x0: e.clientX, dt: 0 });
-                        }}
+                        onDown={onDown}
+                        onKfDown={onKfDown}
                       />
                     );
                   })}
@@ -332,16 +391,14 @@ export function Timeline() {
                   {/* Com corte ou empurrão no rascunho, as posições do projeto não valem mais na view. */}
                   {l.kind !== 'audio' &&
                     !draft.ripple &&
-                    s.project.clips
-                      .filter((c) => draft.removedClipIds.has(c.id) && c.trackId === tr?.id)
-                      .map((c) => (
-                        <div key={`rm-${c.id}`} className="clip removed" style={{ left: c.start * pps, width: Math.max(4, c.duration * pps) }} title="O rascunho do Claude remove este clipe">
-                          <span className="label">Remoção proposta · {c.kind === 'video' ? c.name : c.text}</span>
-                        </div>
-                      ))}
+                    visibleClips(s.project.clips.filter((c) => draft.removedClipIds.has(c.id) && c.trackId === tr?.id), t0, t1).map((c) => (
+                      <div key={`rm-${c.id}`} className="clip removed" style={{ left: c.start * pps, width: Math.max(4, c.duration * pps) }} title="O rascunho do Claude remove este clipe">
+                        <span className="label">Remoção proposta · {c.kind === 'video' ? c.name : c.text}</span>
+                      </div>
+                    ))}
                   {l.kind === 'video' &&
-                    draft.seams.map((seam, i) => (
-                      <div key={`seam-${i}`} className="seam-chip" style={{ left: seam.at * pps }} title={`Corte do rascunho: ${fmtRemoved(seam.removed)}`}>
+                    visibleClips(draft.seams.map((seam, i) => ({ ...seam, i, start: seam.at, duration: 0 })), t0, t1).map((seam) => (
+                      <div key={`seam-${seam.i}`} className="seam-chip" style={{ left: seam.at * pps }} title={`Corte do rascunho: ${fmtRemoved(seam.removed)}`}>
                         {fmtRemoved(seam.removed)}
                       </div>
                     ))}
@@ -356,12 +413,18 @@ export function Timeline() {
                 {mk.out !== null && <div className="mark-out" style={{ left: mk.out * pps }} />}
               </>
             )}
-            <div className="playhead" style={{ left: pb.time * pps }} />
+            <Playhead pps={pps} />
           </div>
         </div>
       </div>
     </div>
   );
+}
+
+/** A agulha assina o relógio sozinha: tocar o vídeo redesenha só ela, não a linha do tempo inteira. */
+function Playhead({ pps }: { pps: number }) {
+  const pb = usePlayback();
+  return <div className="playhead" style={{ left: pb.time * pps }} />;
 }
 
 function moveKeyframesAt(c: Clip, t: number, dt: number) {
@@ -375,18 +438,20 @@ function moveKeyframesAt(c: Clip, t: number, dt: number) {
   if (ops.length) run(ops, 'Mover ponto de animação');
 }
 
-function ClipBlock(props: {
+/** Um bloco por clipe. Só redesenha quando as próprias props mudam: rolar e tocar não redesenham os que já estão na tela. */
+const ClipBlock = memo(function ClipBlock(props: {
   clip: Clip;
   left: number;
   width: number;
   pps: number;
   selected: boolean;
   isNewDraft: boolean;
-  draftKfs: Set<string>;
+  draftKfs: ReadonlySet<string>;
+  /** O ponto selecionado, só quando é deste clipe. */
   selectedKf?: { clipId: string; prop: string; keyframeId: string };
   kfDrag: { t: number; dt: number } | null;
-  onDown: (kind: 'move' | 'trimL' | 'trimR', e: React.PointerEvent) => void;
-  onKfDown: (t: number, prop: string, keyframeId: string, e: React.PointerEvent) => void;
+  onDown: (clipId: string, kind: 'move' | 'trimL' | 'trimR', e: React.PointerEvent) => void;
+  onKfDown: (clipId: string, t: number, prop: string, keyframeId: string, e: React.PointerEvent) => void;
 }) {
   const { clip: c } = props;
   // Um losango por instante (agrupa propriedades no mesmo tempo).
@@ -411,15 +476,15 @@ function ClipBlock(props: {
       <div
         className={`clip ${c.kind} ${props.selected ? 'selected' : ''} ${props.isNewDraft ? 'draft-new' : ''}`}
         style={{ left: props.left, width: props.width }}
-        onPointerDown={(e) => props.onDown('move', e)}
+        onPointerDown={(e) => props.onDown(c.id, 'move', e)}
         data-clip={c.id}
       >
-        <div className="handle l" onPointerDown={(e) => props.onDown('trimL', e)} />
+        <div className="handle l" onPointerDown={(e) => props.onDown(c.id, 'trimL', e)} />
         <span className="label">
           {props.isNewDraft ? 'Rascunho da IA · ' : ''}
           {label}
         </span>
-        <div className="handle r" onPointerDown={(e) => props.onDown('trimR', e)} />
+        <div className="handle r" onPointerDown={(e) => props.onDown(c.id, 'trimR', e)} />
       </div>
       {[...diamonds.values()].map((m) => {
         const t = props.kfDrag && Math.abs(props.kfDrag.t - m.t) < 1e-3 ? m.t + props.kfDrag.dt : m.t;
@@ -429,10 +494,10 @@ function ClipBlock(props: {
             className={`kf ${m.draft ? 'draft' : ''} ${m.sel ? 'sel' : ''}`}
             style={{ left: props.left + t * props.pps }}
             title={`${t.toFixed(2)}s`}
-            onPointerDown={(e) => props.onKfDown(m.t, m.prop, m.id, e)}
+            onPointerDown={(e) => props.onKfDown(c.id, m.t, m.prop, m.id, e)}
           />
         );
       })}
     </>
   );
-}
+});

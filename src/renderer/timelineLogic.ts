@@ -1,5 +1,6 @@
-// Lógica pura da linha do tempo: marcas I e O, o que o Ctrl+B divide e o texto
-// dos chips de emenda. Sem DOM e sem o store, para os testes.
+// Lógica pura da linha do tempo: marcas I e O, o que o Ctrl+B divide, o texto
+// dos chips de emenda, o que está na janela, o passo da régua e os limites do
+// zoom. Sem DOM e sem o store, para os testes.
 
 import type { Clip, Project } from '../core/model';
 import { EPS, MIN_DURATION, round } from '../core/time';
@@ -45,4 +46,28 @@ export function fmtRemoved(sec: number): string {
   if (tenths < 100) return `\u2212${Math.floor(tenths / 10)},${tenths % 10} s`;
   const whole = Math.round(sec);
   return `\u2212${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
+}
+
+/** Só o que aparece na janela [t0, t1] (s): um vídeo longo tem milhares de pedaços, e a linha do tempo desenha só estes. */
+export function visibleClips<T extends { start: number; duration: number }>(clips: T[], t0: number, t1: number): T[] {
+  return clips.filter((c) => c.start < t1 && c.start + c.duration > t0);
+}
+
+/** Passos da régua (s), do mais curto ao mais longo. */
+const TICK_STEPS = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
+
+/** Passo da régua: o menor com pelo menos 70 px entre dois traços, para os rótulos não se encostarem. */
+export function tickStep(pps: number): number {
+  return TICK_STEPS.find((s) => s * pps >= 70) ?? TICK_STEPS[TICK_STEPS.length - 1];
+}
+
+/**
+ * Limites do zoom (px por segundo) para um projeto de `total` s numa área de `viewportPx` px. `fit` cabe o
+ * projeto inteiro na área (entre `min` e 300). `min` deixa afastar até caber o projeto (uma hora em 1.240 px dá
+ * 0,33 px/s), entre 0,05 e 20. `max` é 400.
+ */
+export function zoomBounds(total: number, viewportPx: number): { min: number; fit: number; max: number } {
+  const raw = (viewportPx - 40) / Math.max(total, 5);
+  const min = Math.min(20, Math.max(0.05, raw));
+  return { min, fit: Math.min(300, Math.max(min, raw)), max: 400 };
 }

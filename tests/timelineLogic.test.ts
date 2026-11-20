@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createProject } from '../src/core/model';
 import { applyOps } from '../src/core/operations';
-import { fmtRemoved, markedRange, splitTargets, withIn, withOut } from '../src/renderer/timelineLogic';
+import { fmtRemoved, markedRange, splitTargets, tickStep, visibleClips, withIn, withOut, zoomBounds } from '../src/renderer/timelineLogic';
 
 describe('marcas, alvos do Ctrl+B e chips', () => {
   it('marcas I e O', () => {
@@ -30,5 +30,21 @@ describe('marcas, alvos do Ctrl+B e chips', () => {
   it('chip da emenda', () => {
     expect([0.4, 4, 12, 75].map(fmtRemoved)).toEqual(['\u22120,4 s', '\u22124,0 s', '\u22120:12', '\u22121:15']);
     expect([0.033, 0.004].map(fmtRemoved)).toEqual(['\u22120,03 s', '\u22120,01 s']);
+  });
+});
+
+describe('linha do tempo longa', () => {
+  it('só os pedaços na janela', () => {
+    const clips = Array.from({ length: 3000 }, (_, i) => ({ id: `p${i}`, start: 1.2 * i, duration: 1 }));
+    expect(visibleClips(clips, 600, 612).map((c) => c.id)).toEqual(Array.from({ length: 10 }, (_, i) => `p${500 + i}`));
+  });
+  it('passo da régua acompanha o zoom', () => {
+    expect([80, 300, 1].map(tickStep)).toEqual([1, 0.5, 120]);
+  });
+  it('o zoom mínimo cabe uma hora na janela', () => {
+    const h = zoomBounds(3600, 1240);
+    expect(h.fit).toBeCloseTo(1200 / 3600, 6);
+    expect(h.min).toBeLessThanOrEqual(h.fit);
+    expect(zoomBounds(10, 1240)).toMatchObject({ fit: 120, max: 400 });
   });
 });
