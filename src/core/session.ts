@@ -201,13 +201,13 @@ function hashString(s: string): string {
  * ids nem da ordem dos clipes, e dividir não a muda, porque nenhum tempo muda.
  */
 function timeBaseKey(p: Project): string {
-  // Em milissegundos inteiros, como os tempos que as operações gravam: assim um início antigo fora da grade (0,0666…)
-  // arredonda igual nas duas metades de uma divisão.
+  // Em milissegundos inteiros, como os tempos que as operações gravam: assim um início ou uma duração antigos fora da
+  // grade (0,0666…) arredondam igual nas duas metades de uma divisão, que arredonda o início e a duração separados.
   const ms = (t: number) => Math.round(t * 1000);
   // Pedaços da mesma mídia com o mesmo deslocamento (início menos in) mostram o mesmo momento no mesmo segundo: os que
   // se tocam ou se sobrepõem contam como um trecho só, inclusive uma cópia do mesmo vídeo por cima ou por baixo.
   const vids = p.clips
-    .flatMap((c) => (c.kind === 'video' ? [{ m: c.mediaId, s: ms(c.start), e: ms(c.start + c.duration), i: ms(c.in) }] : []))
+    .flatMap((c) => (c.kind === 'video' ? [{ m: c.mediaId, s: ms(c.start), e: ms(c.start) + ms(c.duration), i: ms(c.in) }] : []))
     .sort((a, b) => (a.m < b.m ? -1 : a.m > b.m ? 1 : a.s - a.i - (b.s - b.i) || a.s - b.s));
   const runs: string[] = [];
   let run: (typeof vids)[number] | undefined;

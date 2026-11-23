@@ -120,7 +120,7 @@ As operações são as mesmas que a interface usa (`src/core/operations.ts`): `a
 ## Testes
 
 ```bash
-npm test            # 309 testes: unitários + MCP real (cliente MCP → servidor stdio → ponte → editor) + exportação com ffmpeg
+npm test            # 310 testes: unitários + MCP real (cliente MCP → servidor stdio → ponte → editor) + exportação com ffmpeg
 npm run typecheck
 npm run test:e2e    # abre o app Electron e roda o roteiro da especificação (no Linux sem tela: xvfb-run -a node scripts/e2e.mjs)
 ```

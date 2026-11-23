@@ -1038,6 +1038,31 @@ describe('etapas de corte seguidas', () => {
     expect(s.activeStep?.label).toBe('Segundo');
   });
 
+  it('num projeto antigo com início e duração fora do milissegundo, uma divisão sua também não desatualiza', () => {
+    // Antes, a duração que o Claude mandava também ficava como veio (19,9666…).
+    const old = applyOps(createProject(), [
+      { op: 'addMedia', media: media(20) },
+      { op: 'addClip', clip: { kind: 'video', id: 'v1', mediaId: 'm1' } },
+      { op: 'addClip', clip: { kind: 'caption', id: 'alvo', text: 'alvo', start: 7, duration: 1 } },
+    ]).project;
+    const v1 = old.clips.find((c) => c.id === 'v1')!;
+    v1.start = 2 / 30;
+    v1.duration = 20 - 1 / 30;
+    const s = new EditorSession();
+    s.load(old, null);
+    // A primeira etapa mexe no v1 inteiro, então a divisão dele vai para o rascunho dela.
+    const q = s.propose({
+      baseRevision: s.project.revision,
+      title: 'Entrada e corte',
+      steps: [{ label: 'Entrada', ops: [{ op: 'animate', clipId: 'v1', preset: 'fadeIn' }] }, cutStep('Segundo', [[15, 16]])],
+    });
+    if (!q.ok) throw new Error(q.message);
+    expect(s.dispatch([{ op: 'splitClip', clipId: 'v1', at: 10 }])).toEqual({ ok: true, target: 'draft' });
+    expect(s.acceptStep()).toBe(true);
+    expect(q.proposal.status).toBe('active');
+    expect(s.activeStep?.label).toBe('Segundo');
+  });
+
   it('o Claude não acrescenta nem uma etapa que não corta a um rascunho com ajustes seus', () => {
     const s = fixture();
     const first = s.propose({ baseRevision: s.project.revision, title: 'Cortes', steps: [cutStep('Primeiro', [[2, 3]])] });
