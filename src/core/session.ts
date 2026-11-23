@@ -122,6 +122,8 @@ export interface Proposal {
   fingerprint: string;
   /** Aumenta a cada mudança visível (para o Claude esperar decisões). */
   version: number;
+  /** Revisão do projeto logo depois de aceitar uma etapa com ajustes seus: o Claude não os vê, então precisa ler o contexto de novo. */
+  manualRevision?: number;
 }
 
 export interface ActivityEntry {
@@ -194,15 +196,46 @@ function hashString(s: string): string {
   return (h >>> 0).toString(36);
 }
 
-/** Impressão digital da linha do tempo dos vídeos (mídia, início, duração e in de cada um, sem os ids). */
+/**
+ * Impressão digital da linha do tempo dos vídeos: que momento de cada mídia aparece em cada segundo. Não depende dos
+ * ids nem da ordem dos clipes, e dividir não a muda, porque nenhum tempo muda.
+ */
 function timeBaseKey(p: Project): string {
-  const parts: string[] = [];
-  for (const c of p.clips) if (c.kind === 'video') parts.push(`${c.mediaId}@${c.start.toFixed(3)}+${c.duration.toFixed(3)}<${c.in.toFixed(3)}`);
-  return hashString(parts.sort().join('|'));
+  // Em milissegundos inteiros, como os tempos que as operações gravam: assim um início ou uma duração antigos fora da
+  // grade (0,0666…) arredondam igual nas duas metades de uma divisão, que arredonda o início e a duração separados.
+  const ms = (t: number) => Math.round(t * 1000);
+  // Pedaços da mesma mídia com o mesmo deslocamento (início menos in) mostram o mesmo momento no mesmo segundo: os que
+  // se tocam ou se sobrepõem contam como um trecho só, inclusive uma cópia do mesmo vídeo por cima ou por baixo.
+  const vids = p.clips
+    .flatMap((c) => (c.kind === 'video' ? [{ m: c.mediaId, s: ms(c.start), e: ms(c.start) + ms(c.duration), i: ms(c.in) }] : []))
+    .sort((a, b) => (a.m < b.m ? -1 : a.m > b.m ? 1 : a.s - a.i - (b.s - b.i) || a.s - b.s));
+  const runs: string[] = [];
+  let run: (typeof vids)[number] | undefined;
+  const close = () => run && runs.push(`${run.m}@${run.s}+${run.e - run.s}<${run.i}`);
+  for (const v of vids) {
+    if (run && v.m === run.m && v.s - v.i === run.s - run.i && v.s <= run.e) run.e = Math.max(run.e, v.e);
+    else {
+      close();
+      run = { ...v };
+    }
+  }
+  close();
+  return hashString(runs.sort().join('|'));
 }
 
-/** Operações cujos tempos são da linha do tempo (e não de dentro de um clipe). */
-const usesTimelineTime = (ops: Op[]) => ops.some((o) => o?.op === 'removeRanges' || o?.op === 'splitClip');
+/** Resposta ao Claude quando o rascunho aberto tem ajustes seus, que ele não vê. */
+const WAIT_FOR_DECISION =
+  'O usuário ajustou à mão o rascunho aberto, e você não vê esses ajustes. Não acrescente nem substitua etapas agora: espere ele aceitar ou descartar (get_proposal com waitSeconds) e leia get_context de novo antes de continuar.';
+
+/** Operações com um tempo da linha do tempo (e não de dentro de um clipe): cortar, dividir, pôr ou mover um clipe num tempo. */
+const usesTimelineTime = (ops: Op[]) =>
+  ops.some(
+    (o) =>
+      o?.op === 'removeRanges' ||
+      o?.op === 'splitClip' ||
+      (o?.op === 'addClip' && o.clip?.start !== undefined) ||
+      (o?.op === 'updateClip' && o.set?.start !== undefined),
+  );
 
 export class EditorSession {
   project: Project;
@@ -428,7 +461,8 @@ export class EditorSession {
     if (this.adjustMode) return true;
     const d = this.draftInfo;
     // Os clipes que a edição muda de fato no que você vê: um corte não tem clipId, mas divide e
-    // empurra pedaços do rascunho. Se as ops não se aplicam à view, vale o clipId de cada uma.
+    // empurra pedaços do rascunho. Se as ops não se aplicam à view de um rascunho que não corta,
+    // vale o clipId de cada uma.
     try {
       const applied = applyOnView();
       // Sem corte no rascunho, a view e o projeto têm os mesmos tempos: o que a sua edição só empurra (shiftClips) não é mexer no clipe do rascunho.
@@ -689,21 +723,15 @@ export class EditorSession {
       };
     }
     const open = this.openProposal;
-    if (open && open.status === 'active' && open.id !== input.replaces) {
+    // Com ajustes seus no rascunho aberto, nem replaces vale: o Claude espera você aceitar ou descartar.
+    if (open && open.status === 'active' && (open.id !== input.replaces || this.draftEdits > 0)) {
       return {
         ok: false,
         code: 'proposal_pending',
-        message: `Há uma proposta aguardando decisão (${open.id}). Espere a decisão ou use replaces.`,
+        message: this.draftEdits > 0 ? WAIT_FOR_DECISION : `Há uma proposta aguardando decisão (${open.id}). Espere a decisão ou use replaces.`,
         details: { proposalId: open.id },
       };
     }
-    if (open && open.status === 'active' && open.id === input.replaces && this.draftEdits > 0)
-      return {
-        ok: false,
-        code: 'proposal_pending',
-        message: 'O usuário ajustou à mão o rascunho aberto: não o substitua. Acrescente etapas com appendTo ou espere ele aceitar ou descartar (get_proposal com waitSeconds).',
-        details: { proposalId: open.id },
-      };
     // Simulação: todas as etapas, em ordem, precisam ser válidas.
     const targets = new Set<string>();
     const simulated = this.simulateSteps(this.project, input.steps, 0);
@@ -786,6 +814,15 @@ export class EditorSession {
             : 'Esta proposta foi substituída por uma mais nova; continue por ela.';
       return { ok: false, code: 'proposal_closed', message, details: { status: p.status, redoRequested: p.redoRequested } };
     }
+    // Uma etapa aceita com ajustes seus mudou o projeto de um jeito que o Claude não viu.
+    if (p.manualRevision !== undefined && input.baseRevision < p.manualRevision) {
+      return {
+        ok: false,
+        code: 'stale_revision',
+        message: `O usuário aceitou um rascunho com ajustes feitos à mão: leia get_context de novo (revisão ${this.project.revision}) antes de acrescentar etapas.`,
+        details: { revision: this.project.revision },
+      };
+    }
     // Só as decisões desta proposta podem ter mudado a revisão desde então.
     if (input.baseRevision !== this.project.revision && p.expectedRevision !== this.project.revision) {
       return {
@@ -807,6 +844,10 @@ export class EditorSession {
             : `Há uma proposta desatualizada aberta (${open.id}). Espere o usuário decidir (get_proposal com waitSeconds).`,
         details: { proposalId: open.id, status: open.status },
       };
+    }
+    // Os seus ajustes no rascunho aberto mudam os tempos que o Claude calculou: ele espera a sua decisão.
+    if (p.status === 'active' && open?.id === p.id && this.draftEdits > 0) {
+      return { ok: false, code: 'proposal_pending', message: WAIT_FOR_DECISION, details: { proposalId: p.id } };
     }
     // Base da simulação: projeto + rascunho atual + etapas ainda na fila.
     let base = this.view;
@@ -841,8 +882,8 @@ export class EditorSession {
       const s = p.steps[i];
       if (s.status !== 'waiting') continue;
       p.current = i;
-      // Os tempos de corte desta etapa eram da linha do tempo que as anteriores deixariam: uma anterior descartada
-      // ou ajustada à mão muda essa linha, e o mesmo segundo já é outro trecho do vídeo.
+      // Os tempos da linha do tempo desta etapa (cortes, divisões, o início de um clipe) eram da linha que as anteriores
+      // deixariam: uma anterior descartada ou ajustada à mão muda essa linha, e o mesmo segundo já é outro trecho do vídeo.
       if (s.timeBase !== undefined && usesTimelineTime(s.requested) && timeBaseKey(this.project) !== s.timeBase) {
         this.markStale(p, `Uma etapa anterior foi descartada ou ajustada à mão, e os tempos da etapa "${s.label}" eram da linha do tempo de antes. Peça para refazer com o contexto atual.`);
         this.emit();
@@ -887,6 +928,7 @@ export class EditorSession {
     }
     s.status = 'accepted';
     p.expectedRevision = this.project.revision;
+    if (s.manualOps.length) p.manualRevision = this.project.revision;
     p.version++;
     this.log('decision', `Aceito: ${s.label}${s.manualOps.length ? ' (com ajustes manuais)' : ''}`);
     this.advance(p);
